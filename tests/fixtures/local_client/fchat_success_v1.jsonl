@@ -1,0 +1,7 @@
+{"dir":"client","frame":{"type":"hello","protocol":"FloofClawWS","version":"1.0","token":"<secret>","client_id":"fixture","session_id":"sess_fixture"}}
+{"dir":"server","frame":{"type":"hello_ack","protocol":"FloofClawWS","version":"1.0","session_id":"sess_fixture","capabilities":["chat_stream","resume","cancel"]}}
+{"dir":"client","frame":{"type":"message","id":"msg_fixture","ctx_id":"main","body":"Hello"}}
+{"dir":"server","frame":{"type":"status","corr_id":"msg_fixture","state":"accepted","run_id":"run_fixture"}}
+{"dir":"server","frame":{"type":"reply_chunk","corr_id":"msg_fixture","seq":0,"delta":"Hi"}}
+{"dir":"server","frame":{"type":"reply_chunk","corr_id":"msg_fixture","seq":1,"delta":" there"}}
+{"dir":"server","frame":{"type":"reply_done","corr_id":"msg_fixture","run_id":"run_fixture","delivery_id":"deliv_fixture","body":"Hi there"}}

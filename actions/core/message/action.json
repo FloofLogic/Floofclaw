@@ -1,0 +1,18 @@
+{
+  "id": "message",
+  "description": "Send a user-facing message back to the originating channel.",
+  "outside_world": true,
+  "args_schema": {
+    "type": "object",
+    "required": ["message"],
+    "additionalProperties": false,
+    "properties": {
+      "message": {
+        "type": "string",
+        "description": "Text to deliver to the user."
+      }
+    }
+  },
+  "exec": ["runtime", "fc_message()"],
+  "timeout_ms": 0
+}

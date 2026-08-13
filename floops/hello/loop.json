@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "name": "hello",
+  "description": "Fresh-clone conversational smoke: one mock-backed agent returns a friendly local reply with no account or key.",
+  "steps": [
+    { "id": "hello", "type": "agent", "agent": "hello" }
+  ]
+}

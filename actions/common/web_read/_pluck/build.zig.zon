@@ -1,0 +1,15 @@
+.{
+    .name = .pluck,
+    .version = "0.1.0",
+    .fingerprint = 0x888a7566da841f17, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.15.2",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "README.md",
+        "src",
+        "testdata",
+        "scripts",
+    },
+}

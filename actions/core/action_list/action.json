@@ -1,0 +1,24 @@
+{
+  "id": "action_list",
+  "description": "List actions authorized for this agent, or return one named action's complete description and argument schema.",
+  "outside_world": false,
+  "args_schema": {
+    "type": "object",
+    "required": ["op"],
+    "additionalProperties": false,
+    "properties": {
+      "op": {
+        "type": "string",
+        "enum": ["start"],
+        "description": "Always start; discovery finishes immediately and returns on a later operation_result turn."
+      },
+      "name": {
+        "type": "string",
+        "description": "One exact ID returned by an earlier list call. Omit to list all authorized IDs."
+      }
+    }
+  },
+  "exec": ["runtime", "fc_action_list()"],
+  "timeout_ms": 0,
+  "contract": "managed_operation"
+}

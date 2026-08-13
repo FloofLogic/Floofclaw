@@ -1,0 +1,17 @@
+{
+  "id": "result_manager",
+  "executor": "llm",
+  "model": { "ref": "floofclaw_manager" },
+  "actions": [
+    "message",
+    "note_add",
+    "working_memory_append"
+  ],
+  "listen": [
+    "event",
+    "memory",
+    "affairs",
+    "tasks",
+    "usage"
+  ]
+}

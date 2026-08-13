@@ -1,0 +1,39 @@
+{
+  "id": "apply_patch",
+  "description": "Apply a unified diff inside the workspace. Managed operation: call with op:start \u2014 it finishes immediately and the result arrives on a later turn as an operation_result envelope whose text is the bounded patch output.",
+  "outside_world": true,
+  "args_schema": {
+    "type": "object",
+    "required": [
+      "op"
+    ],
+    "additionalProperties": false,
+    "properties": {
+      "op": {
+        "type": "string",
+        "enum": [
+          "start"
+        ],
+        "description": "'start' executes and finishes immediately."
+      },
+      "patch": {
+        "type": "string",
+        "description": "Unified patch text. Required with op:start."
+      },
+      "strip": {
+        "type": "integer",
+        "description": "Patch strip level. Defaults to 1."
+      },
+      "cwd": {
+        "type": "string",
+        "description": "Working directory relative to the workspace root."
+      }
+    }
+  },
+  "exec": [
+    "bash",
+    "run.sh"
+  ],
+  "timeout_ms": 30000,
+  "contract": "managed_operation"
+}

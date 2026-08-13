@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "name": "floofclaw",
+  "description": "Default FloofClaw assistant. Chat and review managers admit durable work without carrying the execution catalog. A cheap bound work manager considers the ordered action catalog, advances one exact work revision at a time, and completes or blocks it explicitly. Managed-operation polling is native and mechanical; only terminal work outcomes reach the result manager.",
+  "one_pass": true,
+  "serialize_contexts": true,
+  "retry_attempts": 0,
+  "poll_interval_ms": 5000,
+  "steps": [
+    { "id": "memory.before", "type": "agent", "agent": "memory" },
+    { "id": "chat", "type": "agent", "agent": "chat_manager",
+      "gate": "event_kind:user_message" },
+    { "id": "review", "type": "agent", "agent": "review_manager",
+      "gate": "event_kind:affair_review" },
+    { "id": "admission.dispatch", "type": "builtin", "builtin": "action_runner" },
+    { "id": "work.select", "type": "agent", "agent": "work_manager",
+      "gate": "work_consequence" },
+    { "id": "work.dispatch", "type": "builtin", "builtin": "action_runner" },
+    { "id": "operation.poll", "type": "agent", "agent": "operation_poller",
+      "gate": "event_kind:operation_poll" },
+    { "id": "operation.dispatch", "type": "builtin", "builtin": "action_runner" },
+    { "id": "result", "type": "agent", "agent": "result_manager",
+      "gate": "terminal_work_outcome" },
+    { "id": "result.dispatch", "type": "builtin", "builtin": "action_runner" },
+    { "id": "memory.after", "type": "agent", "agent": "memory", "non_critical": true },
+    { "id": "memory.compact", "type": "agent", "agent": "memory_compactor",
+      "gate": "memory_compaction_due", "non_critical": true }
+  ]
+}

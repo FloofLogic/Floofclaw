@@ -1,0 +1,5 @@
+{
+  "id": "hold_agent",
+  "executor": "script",
+  "listen": ["event"]
+}

@@ -1,0 +1,1 @@
+{"schema_version":1,"ready":true,"running":true,"pid":1234,"floop":"hello","api_version":1,"chat_protocol":"FloofClawWS/1.0","runs":{"active":0},"jobs":{"active":0},"build":{"version":"0.0.0-fixture","revision":"fixture"},"capabilities":["chat_stream","resume","cancel","pulse","usage"]}

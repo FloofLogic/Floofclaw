@@ -1,0 +1,31 @@
+{
+  "id": "read_dir",
+  "description": "List entries in a workspace-relative directory. Managed operation: call with op:start \u2014 it finishes immediately and the result arrives on a later turn as an operation_result envelope whose text is a bounded name listing; the entries array carries names, directory flags, and sizes.",
+  "outside_world": false,
+  "args_schema": {
+    "type": "object",
+    "required": [
+      "op"
+    ],
+    "additionalProperties": false,
+    "properties": {
+      "op": {
+        "type": "string",
+        "enum": [
+          "start"
+        ],
+        "description": "'start' executes and finishes immediately."
+      },
+      "path": {
+        "type": "string",
+        "description": "Workspace-relative directory path. Defaults to the workspace root. Only meaningful with op:start."
+      }
+    }
+  },
+  "exec": [
+    "runtime",
+    "fc_list_directory()"
+  ],
+  "timeout_ms": 0,
+  "contract": "managed_operation"
+}

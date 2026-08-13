@@ -1,0 +1,26 @@
+{
+  "id": "work",
+  "description": "Create or revise the durable background work intent. Asynchronous: it queues or updates the work and returns immediately; it never waits for the work to run. Include task_id (from your task list) to revise existing work with the complete revised description; omit it to create new work.",
+  "outside_world": false,
+  "args_schema": {
+    "type": "object",
+    "required": ["work", "done_when"],
+    "additionalProperties": false,
+    "properties": {
+      "work": {
+        "type": "string",
+        "description": "Complete description of the work to perform. For a revision, restate the entire revised work, not just the change."
+      },
+      "done_when": {
+        "type": "string",
+        "description": "Completion condition for the work."
+      },
+      "task_id": {
+        "type": "string",
+        "description": "Existing task to revise. Only use a task_id supplied in your input; never invent one."
+      }
+    }
+  },
+  "exec": ["runtime", "fc_work()"],
+  "timeout_ms": 0
+}

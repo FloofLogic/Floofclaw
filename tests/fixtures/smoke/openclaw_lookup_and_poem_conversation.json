@@ -1,0 +1,17 @@
+{
+  "calls": [
+    {
+      "name": "message",
+      "args": {
+        "message": "I'm doing well. I'm FloofClaw. I looked up example.com and wrote POEM.md."
+      }
+    },
+    {
+      "name": "task.update",
+      "args": {
+        "task_id": "__TASK_ID__",
+        "state": "completed"
+      }
+    }
+  ]
+}

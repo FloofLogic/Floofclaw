@@ -1,0 +1,60 @@
+{
+  "id": "manage_claude",
+  "description": "Run Claude Code as a managed external operation with start, poll, reply, abort, and status operations.",
+  "outside_world": true,
+  "args_schema": {
+    "type": "object",
+    "required": [
+      "op"
+    ],
+    "additionalProperties": false,
+    "properties": {
+      "op": {
+        "type": "string",
+        "enum": [
+          "start",
+          "poll",
+          "reply",
+          "abort",
+          "status"
+        ],
+        "description": "Operation to perform."
+      },
+      "task": {
+        "type": "string",
+        "description": "Task text for start."
+      },
+      "op_id": {
+        "type": "string",
+        "description": "Managed operation identifier for poll, reply, abort, or status."
+      },
+      "answer": {
+        "type": "string",
+        "description": "Follow-up answer for reply."
+      },
+      "cwd": {
+        "type": "string",
+        "description": "Workspace-relative working directory."
+      },
+      "model": {
+        "type": "string",
+        "description": "Optional Claude model override."
+      },
+      "permission_mode": {
+        "type": "string",
+        "enum": [
+          "safe",
+          "dangerous"
+        ],
+        "description": "Permission mode. Defaults to safe."
+      }
+    }
+  },
+  "exec": [
+    "runtime",
+    "fc_manage_claude()"
+  ],
+  "timeout_ms": 0,
+  "contract": "managed_operation",
+  "poll_handle_arg": "op_id"
+}

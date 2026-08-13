@@ -1,0 +1,21 @@
+{
+  "id": "working_memory_append",
+  "description": "Append unstructured working text to the exact task available to this agent. Existing working_memory is preserved and the new text is added after it. Use it for useful discoveries, corrections, attempted approaches, unresolved issues, or likely next steps that another agent handling the same task should see.",
+  "outside_world": false,
+  "args_schema": {
+    "type": "object",
+    "required": ["working_memory"],
+    "additionalProperties": false,
+    "properties": {
+      "working_memory": {
+        "type": "string",
+        "description": "New unstructured text to append. Existing text cannot be replaced, erased, or reformatted."
+      }
+    }
+  },
+  "exec": [
+    "runtime",
+    "fc_working_memory_append()"
+  ],
+  "timeout_ms": 0
+}

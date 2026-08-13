@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "${1-}" = --version ] || [ "${1-}" = version ]; then
+  printf 'gog v0.12.0\n'
+  exit 0
+fi
+
+home="${GOG_HOME-}" client=default
+args=("$@")
+for ((i=0; i<${#args[@]}; i++)); do
+  case "${args[$i]}" in
+    --home) home="${args[$((i+1))]}" ;;
+    --client) client="${args[$((i+1))]}" ;;
+  esac
+done
+[ -n "$home" ] || { printf 'missing fake gog home\n' >&2; exit 2; }
+mkdir -p "$home/config" "$home/data"
+chmod 700 "$home" "$home/config" "$home/data"
+
+if [ -n "${FAKE_GOG_ARGV_LOG-}" ]; then
+  printf '%q ' "$@" >>"$FAKE_GOG_ARGV_LOG"
+  printf '\n' >>"$FAKE_GOG_ARGV_LOG"
+fi
+
+joined=" $* "
+case "$joined" in
+  *" auth credentials "*)
+    printf '{"stored":true,"client":"%s"}\n' "$client"
+    ;;
+  *" auth tokens import "*)
+    in=""
+    for ((i=0; i<${#args[@]}; i++)); do
+      if [ "${args[$i]}" = import ]; then in="${args[$((i+1))]}"; break; fi
+    done
+    cp "$in" "$home/data/token.json"
+    chmod 600 "$home/data/token.json"
+    printf '{"imported":true}\n'
+    ;;
+  *" auth tokens export "*)
+    out="" email=""
+    for ((i=0; i<${#args[@]}; i++)); do
+      if [ "${args[$i]}" = export ]; then email="${args[$((i+1))]}"; fi
+      if [ "${args[$i]}" = --out ]; then out="${args[$((i+1))]}"; fi
+    done
+    [ -f "$home/data/token.json" ] || {
+      printf '%s\n' 'refresh token missing' >&2
+      exit 1
+    }
+    if [ -f "${FCLAW_WORKSPACE_ROOT-}/fake-gog-bad-writeback" ]; then
+      jq --arg email "$email" --arg client "$client" \
+        '.email=$email | .client=$client | .refresh_token="uncommitted-refresh" | .access_token=("X" * 9000)' \
+        "$home/data/token.json" >"$out"
+    else
+      jq --arg email "$email" --arg client "$client" \
+        '.email=$email | .client=$client' "$home/data/token.json" >"$out"
+    fi
+    chmod 600 "$out"
+    printf '{"exported":true}\n'
+    ;;
+  *" auth add "*)
+    email=""
+    for ((i=0; i<${#args[@]}; i++)); do
+      if [ "${args[$i]}" = add ]; then email="${args[$((i+1))]}"; break; fi
+    done
+    if [[ "$joined" == *" --remote --step 1 "* ]]; then
+      printf '%s\n' '{"state":"fixture","client":"'"$client"'","scopes":["openid","https://www.googleapis.com/auth/calendar"],"redirect_uri":"http://localhost:1/oauth2/callback","code_verifier":"fixture-verifier","created_at":"2099-01-01T00:00:00Z"}' \
+        >"$home/config/oauth-manual-state-fixture.json"
+      chmod 600 "$home/config/oauth-manual-state-fixture.json"
+      printf '%s\n' '{"auth_url":"https://accounts.example.test/auth?state=fixture","state_reused":false}'
+      exit 0
+    fi
+    if [[ "$joined" == *" --manual "* ]]; then
+      IFS= read -r redirect_url || true
+      [[ "$redirect_url" == https://callback.example.test/* ]] ||
+      [[ "$redirect_url" == https://developers.google.com/oauthplayground* ]] || {
+        printf '%s\n' 'invalid manual redirect' >&2
+        exit 1
+      }
+    fi
+    jq -cn --arg email "$email" --arg client "$client" \
+      '{email:$email,client:$client,services:["calendar"],scopes:["https://www.googleapis.com/auth/calendar"],refresh_token:"fixture-refresh",access_token:"fixture-access",access_token_expires_at:"2099-01-01T01:00:00Z"}' \
+      >"$home/data/token.json"
+    chmod 600 "$home/data/token.json"
+    printf '{"authorized":true,"email":"%s"}\n' "$email"
+    ;;
+  *" --enable-commands calendar calendar "*)
+    if [ -f "${FCLAW_WORKSPACE_ROOT-}/fake-gog-api-disabled" ]; then
+      printf '%s\n' 'Google API error (403 accessNotConfigured): Google Calendar API has not been used in project 572361359125 before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/calendar-json.googleapis.com/overview?project=572361359125 then retry.' >&2
+      exit 6
+    fi
+    [ -n "${GOG_ACCESS_TOKEN-}" ] || [ -f "$home/data/token.json" ] || {
+      printf '%s\n' 'refresh token missing' >&2
+      exit 1
+    }
+    guard=""
+    if [ -f "${FCLAW_WORKSPACE_ROOT-}/fake-gog-slow" ]; then
+      guard="${FCLAW_WORKSPACE_ROOT}/fake-gog-active"
+      mkdir "$guard" 2>/dev/null || {
+        printf '%s\n' 'concurrent credential use detected' >&2
+        exit 1
+      }
+      trap 'rmdir "$guard" 2>/dev/null || true' EXIT
+      touch "${FCLAW_WORKSPACE_ROOT}/fake-gog-entered"
+      sleep 0.5
+    fi
+    if { [ "${FAKE_GOG_REVOKED-0}" = 1 ] ||
+         [ -f "${FCLAW_WORKSPACE_ROOT-}/fake-gog-revoked" ]; } &&
+       [ -z "${GOG_ACCESS_TOKEN-}" ]; then
+      printf '%s\n' 'oauth2: invalid_grant refresh token rejected' >&2
+      exit 1
+    fi
+    if [ -z "${GOG_ACCESS_TOKEN-}" ]; then
+      tmp="$home/data/token.next"
+      jq '.refresh_token="rotated-refresh" | .access_token="rotated-access" | .access_token_expires_at="2099-01-02T01:00:00Z"' \
+        "$home/data/token.json" >"$tmp"
+      mv "$tmp" "$home/data/token.json"
+    fi
+    if [[ "$joined" == *" calendar calendars "* ]]; then
+      printf '%s\n' '{"calendars":[{"id":"primary","summary":"Primary"}]}'
+    elif [[ "$joined" == *" calendar events "* ]]; then
+      printf '%s\n' '{"events":[{"id":"evt_1","summary":"Fixture meeting","start":{"dateTime":"2026-08-05T10:00:00-05:00"},"end":{"dateTime":"2026-08-05T11:00:00-05:00"}}]}'
+    elif [[ "$joined" == *" calendar create "* ]]; then
+      printf '%s\n' '{"event":{"id":"evt_new","summary":"Created fixture"}}'
+    elif [[ "$joined" == *" calendar delete "* ]]; then
+      printf '%s\n' '{"deleted":true,"eventId":"evt_1"}'
+    else
+      printf '%s\n' '{"event":{"id":"evt_1","summary":"Fixture meeting"}}'
+    fi
+    ;;
+  *)
+    printf 'unsupported fake gog invocation\n' >&2
+    exit 2
+    ;;
+esac

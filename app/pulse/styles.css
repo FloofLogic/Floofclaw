@@ -1,0 +1,192 @@
+:root {
+  --bg: #0f1318;
+  --panel: rgba(20, 27, 34, 0.88);
+  --panel-border: rgba(152, 176, 201, 0.18);
+  --text: #edf3f8;
+  --muted: #9ba9b7;
+  --accent: #28b39a;
+  --accent-2: #f08a4b;
+  --accent-3: #72a7ff;
+  --bad: #ff7d7d;
+  --proactive: #b895ff;
+  --shadow: 0 18px 50px rgba(0, 0, 0, 0.34);
+  --radius: 20px;
+  --radius-sm: 12px;
+}
+
+* { box-sizing: border-box; }
+button, input { font: inherit; color: inherit; }
+code { font-family: "SFMono-Regular", "Menlo", "Monaco", monospace; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--text);
+  background:
+    radial-gradient(circle at top left, rgba(240, 138, 75, 0.16), transparent 26%),
+    radial-gradient(circle at top right, rgba(40, 179, 154, 0.14), transparent 24%),
+    linear-gradient(180deg, #0c1015 0%, var(--bg) 54%, #151b22 100%);
+  font-family: "Avenir Next", "Segoe UI", "Helvetica Neue", sans-serif;
+}
+
+.page-shell {
+  width: min(1500px, calc(100vw - 24px));
+  margin: 0 auto;
+  padding: 14px 0 24px;
+}
+
+.hero, .panel {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  box-shadow: var(--shadow);
+}
+
+.hero {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 16px 20px;
+  border-radius: var(--radius);
+}
+
+.eyebrow {
+  margin: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  font-size: 11px;
+  color: var(--accent);
+}
+
+h1 { margin: 2px 0 6px; font-size: 28px; }
+.hero-copy { margin: 0; color: var(--muted); font-size: 13px; max-width: 60ch; }
+.app-nav { display: flex; gap: 12px; margin-top: 10px; }
+.app-nav a { color: var(--accent-3); font-size: 12px; text-decoration: none; }
+.app-nav a:hover { text-decoration: underline; }
+
+.status-column { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+.chip {
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--panel-border);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.chip.up { border-color: rgba(40, 179, 154, 0.6); color: var(--accent); }
+.chip.down { border-color: rgba(255, 125, 125, 0.6); color: var(--bad); }
+.chip.subtle { color: var(--muted); }
+.refresh-btn {
+  background: rgba(40, 179, 154, 0.14);
+  border: 1px solid rgba(40, 179, 154, 0.5);
+  color: var(--accent);
+  padding: 6px 14px;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.refresh-btn:hover { background: rgba(40, 179, 154, 0.26); }
+.auto-row { font-size: 12px; color: var(--muted); display: flex; gap: 6px; align-items: center; }
+
+.warnings { display: flex; flex-direction: column; gap: 6px; margin: 12px 0; }
+.warning {
+  border: 1px solid rgba(255, 125, 125, 0.5);
+  background: rgba(255, 125, 125, 0.08);
+  color: var(--bad);
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 12px;
+}
+.panel { border-radius: var(--radius); padding: 14px 16px; min-width: 0; }
+.panel.wide { grid-column: 1 / -1; }
+
+.panel-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 10px;
+}
+.panel-head h2 { margin: 0; font-size: 15px; }
+.count { color: var(--muted); font-size: 12px; }
+
+.card {
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+.card .row { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
+.card .main { margin: 4px 0 0; line-height: 1.4; overflow-wrap: anywhere; }
+.card .sub { color: var(--muted); font-size: 12px; margin: 4px 0 0; overflow-wrap: anywhere; }
+.card.dormant { border-color: rgba(240, 138, 75, 0.55); }
+.card.failed { border-color: rgba(255, 125, 125, 0.55); }
+.card.running { border-color: rgba(114, 167, 255, 0.55); }
+
+.pill {
+  display: inline-block;
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--panel-border);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.pill.active { color: var(--accent); border-color: rgba(40, 179, 154, 0.5); }
+.pill.running { color: var(--accent-3); border-color: rgba(114, 167, 255, 0.5); }
+.pill.open { color: var(--accent-2); border-color: rgba(240, 138, 75, 0.5); }
+.pill.finished, .pill.completed, .pill.closed, .pill.run_done { color: var(--muted); }
+.pill.failed, .pill.run_failed { color: var(--bad); border-color: rgba(255, 125, 125, 0.5); }
+.pill.dormant { color: var(--accent-2); border-color: rgba(240, 138, 75, 0.6); }
+.pill.proactive { color: var(--proactive); border-color: rgba(184, 149, 255, 0.55); }
+
+.note { color: var(--muted); font-size: 12px; margin: 3px 0 0 10px; }
+.note::before { content: "· "; color: var(--accent); }
+
+.msg {
+  display: grid;
+  grid-template-columns: 84px 92px minmax(0, 1fr);
+  gap: 10px;
+  padding: 7px 6px;
+  border-bottom: 1px solid rgba(152, 176, 201, 0.08);
+  font-size: 13px;
+  align-items: baseline;
+}
+.msg:last-child { border-bottom: none; }
+.msg .when { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.msg .who { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.msg.in .who { color: var(--accent-2); }
+.msg.out .who { color: var(--accent); }
+.msg.out.proactive .who { color: var(--proactive); }
+.msg.failure .text { color: var(--bad); }
+.msg .text { overflow-wrap: anywhere; line-height: 1.45; }
+
+.empty { color: var(--muted); font-size: 13px; padding: 6px 2px; }
+
+@media (max-width: 1000px) {
+  .grid { grid-template-columns: 1fr; }
+  .hero { flex-direction: column; }
+  .status-column { align-items: flex-start; }
+}
+
+.subhead {
+  margin: 14px 2px 8px;
+  padding-top: 10px;
+  border-top: 1px dashed rgba(152, 176, 201, 0.25);
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+.card.past { opacity: 0.55; }
+.card.past .main { color: var(--muted); }
+
+.run-link { text-decoration: none; }
+.run-link code { color: var(--accent-3); }
+.run-link:hover code { text-decoration: underline; }

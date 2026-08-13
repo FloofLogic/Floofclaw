@@ -1,0 +1,39 @@
+{
+  "id": "read_file",
+  "description": "Read UTF-8 text content from a workspace-relative file path. Managed operation: call with op:start \u2014 it finishes immediately and the result arrives on a later turn as an operation_result envelope whose text carries the bounded file content with pagination info. Supports offset and length.",
+  "outside_world": true,
+  "args_schema": {
+    "type": "object",
+    "required": [
+      "op"
+    ],
+    "additionalProperties": false,
+    "properties": {
+      "op": {
+        "type": "string",
+        "enum": [
+          "start"
+        ],
+        "description": "'start' executes and finishes immediately."
+      },
+      "path": {
+        "type": "string",
+        "description": "Workspace-relative path to read. Required with op:start."
+      },
+      "offset": {
+        "type": "integer",
+        "description": "Optional byte offset. Defaults to 0."
+      },
+      "length": {
+        "type": "integer",
+        "description": "Optional max bytes to read. Runtime caps this to a safe maximum."
+      }
+    }
+  },
+  "exec": [
+    "runtime",
+    "fc_read_file()"
+  ],
+  "timeout_ms": 0,
+  "contract": "managed_operation"
+}

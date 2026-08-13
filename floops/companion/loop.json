@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "name": "companion",
+  "description": "Sharp, caring companion. Reduces unnecessary suffering through accurate assessment of reality, calibrated perspective, and practical next steps. Tracks durable concerns as affairs. No work delegation.",
+  "steps": [
+    { "id": "memory.before",   "type": "agent", "agent": "memory" },
+    { "id": "concern.extract", "type": "agent", "agent": "companion_concern_extractor", "gate": "affair_extraction_maybe_needed" },
+    { "id": "speak",           "type": "agent", "agent": "companion" },
+    { "id": "memory.after",    "type": "agent", "agent": "memory", "gate": "after_message_result" },
+    { "id": "memory.compact",  "type": "agent", "agent": "memory_compactor", "gate": "memory_compaction_due" }
+  ]
+}

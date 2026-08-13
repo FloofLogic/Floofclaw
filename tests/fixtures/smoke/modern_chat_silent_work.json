@@ -1,0 +1,1 @@
+{"calls":[{"name":"work","args":{"work":"Create silent.html as a one-line HTML file.","done_when":"silent.html exists."}},{"name":"message","args":{"message":"I’ll have that file created."}}]}

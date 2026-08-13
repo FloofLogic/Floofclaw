@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tokenwatch Pricing Assumptions</title>
+  <link rel="stylesheet" href="styles.css?v=tw3">
+</head>
+<body>
+  <div class="page-shell pricing-page">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">FloofClaw Model Economics</p>
+        <h1>Pricing assumptions</h1>
+        <p class="hero-copy">The exact app-owned rates Tokenwatch uses for cost estimates. These are stored assumptions, not live provider quotes.</p>
+        <nav class="app-nav"><a href="index.html">Tokenwatch</a><a href="http://127.0.0.1:8003/">Pulse</a><a href="http://127.0.0.1:8002/">Runtime Flow</a></nav>
+      </div>
+      <div class="status-column"><div id="pricing-count" class="chip up"></div><div id="pricing-updated" class="chip subtle"></div><div class="chip subtle">USD per 1M tokens</div></div>
+    </header>
+
+    <main class="panel pricing-panel">
+      <div class="panel-head"><div><h2>Stored provider/model rates</h2><p>Every provider/model combination is a separate line. Follow “Last known pricing” to check the provider source.</p></div></div>
+      <div class="pricing-head" aria-hidden="true"><span>Provider</span><span>Model</span><span>Input</span><span>Cached input</span><span>Output</span><span>Source</span></div>
+      <div id="pricing-rows" class="pricing-rows"></div>
+    </main>
+  </div>
+  <script src="app.js?v=tw3"></script>
+</body>
+</html>

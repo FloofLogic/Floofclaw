@@ -1,0 +1,19 @@
+{
+  "id": "work_complete",
+  "description": "Finish the exact runtime-bound work revision after its completion condition is satisfied.",
+  "outside_world": false,
+  "contract": "work_terminal",
+  "args_schema": {
+    "type": "object",
+    "required": ["summary"],
+    "additionalProperties": false,
+    "properties": {
+      "summary": {
+        "type": "string",
+        "description": "Concise evidence-based explanation of what completed."
+      }
+    }
+  },
+  "exec": ["runtime", "fc_work_complete()"],
+  "timeout_ms": 0
+}

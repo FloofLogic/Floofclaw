@@ -1,0 +1,12 @@
+{
+  "calls": [
+    {
+      "name": "write_file",
+      "args": {
+        "op": "start",
+        "path": "POEM.md",
+        "content": "Example Domain, a lantern mild,\nA quiet page, precise and styled.\nFrom borrowed light and patient chrome,\nA little lookup blooms to poem.\n"
+      }
+    }
+  ]
+}

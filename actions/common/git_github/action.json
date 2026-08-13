@@ -1,0 +1,38 @@
+{
+  "id": "git_github",
+  "description": "Work with Git repositories and GitHub through the installed git and gh CLIs. Managed operation: use op:start with kind:check to inspect setup, or kind:git/kind:gh plus argv for one non-interactive command. The result includes bounded output and direct setup instructions when a dependency, Git identity, or GitHub authentication is missing.",
+  "outside_world": true,
+  "args_schema": {
+    "type": "object",
+    "required": ["op"],
+    "additionalProperties": false,
+    "properties": {
+      "op": {
+        "type": "string",
+        "enum": ["start", "poll"],
+        "description": "Operation lifecycle. Use start for a setup check or command. Poll exists only for managed-operation compatibility because commands finish synchronously."
+      },
+      "kind": {
+        "type": "string",
+        "enum": ["check", "git", "gh"],
+        "description": "Required with op:start. check reports whether git, gh, Git identity, and GitHub authentication are ready. git or gh executes exactly one command from argv."
+      },
+      "repo": {
+        "type": "string",
+        "description": "Workspace-relative existing directory in which to run the check or command, such as \".\" or \"repos/project\". Defaults to the workspace root. Never use an absolute path or .. traversal."
+      },
+      "argv": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Required and non-empty for kind:git or kind:gh. Each item is one literal CLI argument, starting with the subcommand, for example [\"status\",\"--short\"] or [\"pr\",\"list\",\"--limit\",\"20\"]. No shell syntax is evaluated. Supply all flags needed for non-interactive use. Never put credentials here; configure gh authentication outside the action."
+      },
+      "handle": {
+        "type": "string",
+        "description": "Opaque handle returned by start; only used with op:poll."
+      }
+    }
+  },
+  "exec": ["bash", "run.sh"],
+  "timeout_ms": 60000,
+  "contract": "managed_operation"
+}

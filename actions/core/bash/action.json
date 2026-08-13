@@ -1,0 +1,31 @@
+{
+  "id": "bash",
+  "description": "Run a shell command in the workspace root. Managed operation: call with op:start \u2014 it finishes immediately and the result arrives on a later turn as an operation_result envelope whose text is the command's bounded stdout (stdout, stderr, and exit_code ride alongside).",
+  "outside_world": true,
+  "args_schema": {
+    "type": "object",
+    "required": [
+      "op"
+    ],
+    "additionalProperties": false,
+    "properties": {
+      "op": {
+        "type": "string",
+        "enum": [
+          "start"
+        ],
+        "description": "'start' executes and finishes immediately."
+      },
+      "cmd": {
+        "type": "string",
+        "description": "Shell command to execute from workspace root. Required with op:start."
+      }
+    }
+  },
+  "exec": [
+    "bash",
+    "run.sh"
+  ],
+  "timeout_ms": 30000,
+  "contract": "managed_operation"
+}

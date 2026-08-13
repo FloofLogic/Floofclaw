@@ -1,0 +1,24 @@
+{
+  "id": "web_fetch",
+  "description": "Fetch an HTTP or HTTPS URL and return response metadata and text content. Managed operation: call with op:start; it finishes synchronously and a later operation_result turn receives text containing the HTTP status and bounded body excerpt. The full body stays in the action-call artifact named by body_artifact in action_succeeded.",
+  "outside_world": true,
+  "args_schema": {
+    "type": "object",
+    "required": ["op"],
+    "additionalProperties": false,
+    "properties": {
+      "op": {
+        "type": "string",
+        "enum": ["start"],
+        "description": "'start' fetches and finishes immediately."
+      },
+      "url": {
+        "type": "string",
+        "description": "HTTP or HTTPS URL to fetch. Required with op:start."
+      }
+    }
+  },
+  "exec": ["bash", "run.sh"],
+  "timeout_ms": 45000,
+  "contract": "managed_operation"
+}

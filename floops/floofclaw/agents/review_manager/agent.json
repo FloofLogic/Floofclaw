@@ -1,0 +1,20 @@
+{
+  "id": "review_manager",
+  "executor": "llm",
+  "model": { "ref": "floofclaw_manager" },
+  "actions": [
+    "work",
+    "note_add",
+    "defer",
+    "affair_close",
+    "working_memory_append",
+    "message"
+  ],
+  "listen": [
+    "event",
+    "memory",
+    "affairs",
+    "tasks",
+    "usage"
+  ]
+}

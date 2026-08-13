@@ -1,0 +1,10 @@
+{
+  "bot_name": "ThrashScratch",
+  "appliance": {
+    "runs": {"keep": 500, "check_interval_ms": 3600000},
+    "codex_ops": {"keep": 200, "check_interval_ms": 3600000},
+    "bus_processed": {"keep": 10000, "check_interval_ms": 3600000},
+    "tasks_archive": {"keep_days": 90, "check_interval_ms": 3600000},
+    "logs": {"check_interval_ms": 3600000}
+  }
+}

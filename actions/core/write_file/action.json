@@ -1,0 +1,32 @@
+{
+  "id": "write_file",
+  "description": "Write UTF-8 text content to a workspace-relative file path. Managed operation: call with op:start — result arrives on a later turn as an operation_result envelope confirming the write with the path.",
+  "outside_world": true,
+  "args_schema": {
+    "type": "object",
+    "required": ["op"],
+    "additionalProperties": false,
+    "properties": {
+      "op": {
+        "type": "string",
+        "enum": ["start", "poll"],
+        "description": "'start' writes and finishes immediately; 'poll' is contract completeness only."
+      },
+      "path": {
+        "type": "string",
+        "description": "Workspace-relative path to write. Required with op:start."
+      },
+      "content": {
+        "type": "string",
+        "description": "File content. Required with op:start."
+      },
+      "handle": {
+        "type": "string",
+        "description": "Only used with op:poll."
+      }
+    }
+  },
+  "exec": ["runtime", "fc_write_file()"],
+  "timeout_ms": 0,
+  "contract": "managed_operation"
+}

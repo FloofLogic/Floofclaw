@@ -1,0 +1,22 @@
+{
+  "id": "affair_open",
+  "description": "Open a standing concern (affair) for this conversation: something to keep watching across days, with periodic reviews. Asynchronous: it records the concern and returns; reviews happen later.",
+  "outside_world": false,
+  "args_schema": {
+    "type": "object",
+    "required": ["manage"],
+    "additionalProperties": false,
+    "properties": {
+      "manage": {
+        "type": "string",
+        "description": "What to watch and what matters about it, e.g. 'Watch for Kill Tony tickets in Austin to become available; the user wants to buy one.'"
+      },
+      "review_in": {
+        "type": "string",
+        "description": "When to first review the concern, as a duration like \"1d\", \"6h\", or \"30m\". Omit for a concern reviewed only on demand."
+      }
+    }
+  },
+  "exec": ["runtime", "fc_affair_open()"],
+  "timeout_ms": 0
+}

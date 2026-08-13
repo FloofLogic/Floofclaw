@@ -1,0 +1,9 @@
+{
+  "id": "companion",
+  "executor": "llm",
+  "model": { "ref": "responses" },
+  "actions": ["message", "note_add", "affair_close", "defer"],
+  "autocomplete_message_task_on_send": true,
+  "conversational_payload_only": true,
+  "listen": ["memory", "tasks"]
+}

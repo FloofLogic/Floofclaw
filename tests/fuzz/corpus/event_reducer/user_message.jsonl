@@ -1,0 +1,1 @@
+{"event_id":"evt_run_001_000001","ts":"2026-07-18T19:58:13.401Z","type":"user_message","source":"cli","run_id":"run_001","payload":{"text":"synthetic fuzz text user_message.jsonl","origin_event_id":"bus_000003","channel":"cli","adapter_id":""}}

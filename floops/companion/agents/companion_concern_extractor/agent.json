@@ -1,0 +1,8 @@
+{
+  "id": "companion_concern_extractor",
+  "executor": "llm",
+  "model": { "ref": "responses" },
+  "actions": [],
+  "affair_extraction_context_only": true,
+  "listen": ["memory", "tasks", "affairs"]
+}

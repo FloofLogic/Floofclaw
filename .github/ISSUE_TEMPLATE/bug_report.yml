@@ -1,0 +1,25 @@
+name: Bug report
+description: Report a reproducible FloofClaw defect
+body:
+  - type: textarea
+    attributes:
+      label: What happened?
+      description: Include the exact command, agent-mode JSON, and run ID when available.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Reproduction
+      description: Give the smallest safe sequence that reproduces the problem.
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Version
+      description: Output of `fclaw --version -a`.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Environment
+      description: Operating system, architecture, compiler, and relevant optional libraries.

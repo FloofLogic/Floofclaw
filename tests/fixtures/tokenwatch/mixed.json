@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-07T18:30:00+00:00",
+  "scope": {
+    "kind": "current_log_segment",
+    "path": "workspace/logs/llm_usage.jsonl",
+    "floop": "fixture_floop",
+    "floop_source": "fixture",
+    "rotated_history_included": false,
+    "recent_cache_calls_per_agent": 10
+  },
+  "agents": [
+    {"id":"chat_manager","profile":"chat","provider":"gemini_key","model":"gemini-2.5-flash"},
+    {"id":"local_worker","profile":"local","provider":"local_vllm","model":"qwen-fixture"},
+    {"id":"zero_call_agent","profile":"chat","provider":"gemini_key","model":"gemini-2.5-flash-lite"}
+  ],
+  "usage_records": [
+    {"ts":"2026-08-07T18:00:00Z","floop":"fixture_floop","run_id":"run_041","call_seq":1,"agent":"chat_manager","profile":"chat","provider":"gemini_key","model":"gemini-2.5-flash","input_chars":48000,"input_media_count":0,"input_media_bytes":0,"output_chars":3400,"input_tokens":12000,"output_tokens":850,"total_tokens":12850,"provider_cached_input_tokens":7600,"duration_ms":540},
+    {"ts":"2026-08-07T18:05:00Z","floop":"fixture_floop","run_id":"run_042","call_seq":1,"agent":"chat_manager","profile":"chat","provider":"gemini_key","model":"gemini-2.5-flash","input_chars":52800,"input_media_count":0,"input_media_bytes":0,"output_chars":3680,"input_tokens":13200,"output_tokens":920,"total_tokens":14120,"provider_cached_input_tokens":8900,"duration_ms":610},
+    {"ts":"2026-08-07T18:10:00Z","floop":"fixture_floop","run_id":"run_043","call_seq":1,"agent":"chat_manager","profile":"chat","provider":"gemini_key","model":"gemini-2.5-flash","input_chars":51200,"input_media_count":0,"input_media_bytes":0,"output_chars":3160,"input_tokens":12800,"output_tokens":790,"total_tokens":13590,"provider_cached_input_tokens":null,"duration_ms":580},
+    {"ts":"2026-08-07T18:12:00Z","floop":"fixture_floop","run_id":"run_044","call_seq":1,"agent":"local_worker","profile":"local","provider":"local_vllm","model":"qwen-fixture","input_chars":17600,"input_media_count":0,"input_media_bytes":0,"output_chars":2400,"input_tokens":4400,"output_tokens":600,"total_tokens":5000,"provider_cached_input_tokens":null,"duration_ms":810}
+  ],
+  "cacheview_records": {
+    "chat_manager": [
+      {"run_id":"run_043","call_seq":1,"profile":"chat","provider":"gemini_key","model":"gemini-2.5-flash","url":"https://generativelanguage.googleapis.com/v1beta","bytes":154,"input_tokens":12800,"provider_cached_input_tokens":null,"raw_request":"{\"system\":\"You are FloofClaw. Stable policy and action catalog.\",\"memory\":\"shared context shared context\",\"request\":\"Summarize the latest deployment\"}"},
+      {"run_id":"run_042","call_seq":1,"profile":"chat","provider":"gemini_key","model":"gemini-2.5-flash","url":"https://generativelanguage.googleapis.com/v1beta","bytes":149,"input_tokens":13200,"provider_cached_input_tokens":8900,"raw_request":"{\"system\":\"You are FloofClaw. Stable policy and action catalog.\",\"memory\":\"shared context shared context\",\"request\":\"Check the latest deployment\"}"},
+      {"run_id":"run_041","call_seq":1,"profile":"chat","provider":"gemini_key","model":"gemini-2.5-flash","url":"https://generativelanguage.googleapis.com/v1beta","bytes":143,"input_tokens":12000,"provider_cached_input_tokens":7600,"raw_request":"{\"system\":\"You are FloofClaw. Stable policy and action catalog.\",\"memory\":\"shared context shared context\",\"request\":\"Plan the deployment\"}"}
+    ],
+    "local_worker": [
+      {"run_id":"run_044","call_seq":1,"profile":"local","provider":"local_vllm","model":"qwen-fixture","url":"http://127.0.0.1:1234/v1/chat/completions","bytes":72,"input_tokens":4400,"provider_cached_input_tokens":null,"raw_request":"{\"system\":\"local worker fixture\",\"request\":\"build the package\"}"}
+    ],
+    "zero_call_agent": []
+  },
+  "warnings": []
+}

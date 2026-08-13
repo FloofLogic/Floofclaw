@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FloofClaw Tokenwatch</title>
+  <link rel="stylesheet" href="styles.css?v=tw4">
+</head>
+<body>
+  <div class="page-shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">FloofClaw Model Economics</p>
+        <h1>Tokenwatch</h1>
+        <p class="hero-copy">What each agent used, what the provider says was cached, what FloofClaw can observe staying stable, and what it likely cost.</p>
+        <nav class="app-nav"><a href="http://127.0.0.1:8003/">Pulse</a><a href="http://127.0.0.1:8002/">Runtime Flow</a><a href="pricing.html">Pricing assumptions</a></nav>
+      </div>
+      <div class="status-column">
+        <div id="scope-chip" class="chip up"></div>
+        <div id="generated-chip" class="chip subtle"></div>
+        <button id="refresh" class="refresh-btn">Refresh now</button>
+        <label class="auto-row"><input type="checkbox" id="auto" checked> auto-refresh</label>
+      </div>
+    </header>
+
+    <section class="warnings" id="warnings"></section>
+
+    <section class="spend-hero panel">
+      <div><p class="eyebrow">Current segment estimate</p><div id="total-spend" class="money">—</div><p id="spend-note" class="muted"></p></div>
+      <div id="totals" class="metric-strip"></div>
+    </section>
+
+    <main class="grid">
+      <section class="panel overview-panel">
+        <div class="panel-head"><div><h2>Agents in this floop</h2><p>Click an agent to inspect calls and cache boundaries.</p></div><span id="agent-count" class="count"></span></div>
+        <div id="agents" class="agent-list"></div>
+      </section>
+
+      <section class="panel detail-panel">
+        <div class="panel-head detail-head"><div><h2 id="detail-title">Agent drilldown</h2><p id="detail-subtitle"></p></div><label class="run-picker">Request<select id="run-select"></select></label></div>
+        <section id="summary-range" class="summary-range" aria-label="Summary request range">
+          <div class="range-head">
+            <div><span>Summary window</span><strong id="range-value">0 → 0</strong></div>
+            <small id="range-runs">No recorded requests</small>
+          </div>
+          <div class="range-sliders">
+            <label><span>Beginning <b id="range-start-value">0</b></span><input id="range-start" type="range" min="0" max="0" value="0"></label>
+            <label><span>End <b id="range-end-value">0</b></span><input id="range-end" type="range" min="0" max="0" value="0"></label>
+          </div>
+        </section>
+        <div id="detail-metrics" class="metric-strip detail-metrics"></div>
+        <div class="chart-grid">
+          <article class="chart-card"><div class="chart-title"><h3>Tokens by call</h3><span>input, output, provider cache</span></div><div id="token-chart" class="chart"></div></article>
+          <article class="chart-card"><div class="chart-title"><h3>Estimated spend</h3><span>USD per call</span></div><div id="cost-chart" class="chart"></div></article>
+        </div>
+        <article class="heat-card">
+          <div class="chart-title"><h3>Whole-request cache heatmap</h3><span id="heat-caption"></span></div>
+          <div id="heatmap" class="heatmap"></div>
+          <div class="heat-axis"><span>request start</span><span>request end</span></div>
+          <div id="heat-legend" class="heat-legend"></div>
+          <section class="request-inspector">
+            <div class="inspector-head">
+              <div><h4 id="request-content-title">What is cached</h4><span id="request-content-note"></span></div>
+              <div class="format-toggle" aria-label="Request text format">
+                <button type="button" data-request-format="pretty" aria-pressed="true">Pretty</button>
+                <button type="button" data-request-format="raw" aria-pressed="false">Raw</button>
+              </div>
+            </div>
+            <pre id="request-content" class="request-content"></pre>
+          </section>
+        </article>
+      </section>
+    </main>
+  </div>
+  <script src="app.js?v=tw4"></script>
+</body>
+</html>

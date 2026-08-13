@@ -1,0 +1,12 @@
+{
+  "id": "affair_close",
+  "description": "Close the affair currently under review. Requires an active affair_review turn.",
+  "outside_world": false,
+  "args_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  },
+  "exec": ["runtime", "fc_affair_close()"],
+  "timeout_ms": 0
+}

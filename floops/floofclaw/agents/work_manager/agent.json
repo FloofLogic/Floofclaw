@@ -1,0 +1,39 @@
+{
+  "id": "work_manager",
+  "executor": "llm",
+  "model": {
+    "ref": "floofclaw_work_manager"
+  },
+  "bind_task": "open_work",
+  "work_policy": {
+    "max_repair_attempts": 2
+  },
+  "actions": [
+    "gcal",
+    "web_read",
+    "web_fetch",
+    "http_call",
+    "read_file",
+    "read_dir",
+    "write_file",
+    "apply_patch",
+    "rotate_file",
+    "bash",
+    "manage_codex",
+    "manage_claude",
+    "manage_hermes",
+    "counter_bump",
+    "note_add",
+    "affair_open",
+    "affair_close",
+    "defer",
+    "message",
+    "working_memory_append",
+    "work",
+    "work_complete",
+    "work_blocked"
+  ],
+  "listen": [
+    "event"
+  ]
+}

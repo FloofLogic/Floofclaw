@@ -1,0 +1,28 @@
+{
+  "id": "web_read",
+  "description": "Read a web page and return its main readable content as clean text (not HTML). Managed operation: call with op:start; a bounded result containing the URL, title, excerpt, text, length, and truncation status arrives later as an operation_result. Do not expect the result in the same turn.",
+  "outside_world": true,
+  "args_schema": {
+    "type": "object",
+    "required": ["op"],
+    "additionalProperties": false,
+    "properties": {
+      "op": {
+        "type": "string",
+        "enum": ["start", "poll"],
+        "description": "Operation to perform. 'start' fetches and finishes immediately. 'poll' is never needed in practice (start always finishes) but exists to satisfy the managed-operation contract."
+      },
+      "url": {
+        "type": "string",
+        "description": "Absolute HTTP or HTTPS URL to read. Required with op:start."
+      },
+      "handle": {
+        "type": "string",
+        "description": "Only used with op:poll. Ignored otherwise."
+      }
+    }
+  },
+  "exec": ["bash", "run.sh"],
+  "timeout_ms": 45000,
+  "contract": "managed_operation"
+}

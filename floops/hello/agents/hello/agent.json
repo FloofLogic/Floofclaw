@@ -1,0 +1,9 @@
+{
+  "id": "hello",
+  "executor": "llm",
+  "model": { "ref": "hello" },
+  "actions": ["message"],
+  "autocomplete_message_task_on_send": true,
+  "conversational_payload_only": true,
+  "listen": ["tasks"]
+}

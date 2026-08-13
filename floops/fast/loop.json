@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "fast",
+  "description": "Minimal loop for perf testing: noop agent emits one message action_request; action_runner delivers. No sleeps, no LLM, no real I/O.",
+  "steps": [
+    { "id": "noop", "type": "agent",   "agent":   "noop_agent" },
+    { "id": "emit", "type": "builtin", "builtin": "action_runner" }
+  ]
+}

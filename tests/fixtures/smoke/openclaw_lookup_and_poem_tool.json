@@ -1,0 +1,11 @@
+{
+  "calls": [
+    {
+      "name": "bash",
+      "args": {
+        "op": "start",
+        "cmd": "grep -q 'Example Domain' ../tests/fixtures/smoke/example_domain.txt && printf 'confirmed Example Domain from the hermetic example.com fixture\\n'"
+      }
+    }
+  ]
+}

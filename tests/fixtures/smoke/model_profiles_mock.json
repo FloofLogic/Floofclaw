@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "profiles": [
+    {
+      "id": "chat",
+      "provider": "mock",
+      "model": "mock-1"
+    },
+    {
+      "id": "responses",
+      "provider": "mock",
+      "model": "mock-1"
+    },
+    {
+      "id": "default_gemini_flash",
+      "provider": "mock",
+      "model": "mock-1"
+    },
+    {
+      "id": "floofclaw_manager",
+      "provider": "mock",
+      "model": "mock-1"
+    },
+    {
+      "id": "floofclaw_work_manager",
+      "provider": "mock",
+      "model": "mock-1"
+    }
+  ]
+}

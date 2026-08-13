@@ -1,0 +1,296 @@
+{
+  "id": "gcal",
+  "description": "Call this to create, list, search, inspect, update, and delete Google Calendar events; list calendars; check free/busy; or diagnose configured calendar accounts.",
+  "outside_world": true,
+  "private_credentials": true,
+  "args_schema": {
+    "type": "object",
+    "required": [
+      "op"
+    ],
+    "additionalProperties": false,
+    "properties": {
+      "op": {
+        "type": "string",
+        "enum": [
+          "start",
+          "poll"
+        ],
+        "description": "Use start for every model-selected call. poll is runtime-owned and must never be selected by the model."
+      },
+      "kind": {
+        "type": "string",
+        "enum": [
+          "diagnose",
+          "accounts",
+          "calendars",
+          "list",
+          "get",
+          "search",
+          "create",
+          "update",
+          "delete",
+          "freebusy"
+        ],
+        "description": "Required with op:start. diagnose checks one selected/default account; accounts lists safe configured metadata; calendars lists calendars; list lists events; get needs calendar_id+event_id; search needs query; create needs event.summary/start/end; update needs event_id and at least one event field; delete needs event_id+confirm:true; freebusy needs time_min+time_max. Fields for other kinds are rejected."
+      },
+      "account": {
+        "type": "string",
+        "description": "Optional configured lowercase account alias. When the original client_id/client_secret/refresh_token record and account_email exist, that authoritative record is exposed as original and overrides this field. Otherwise omit only when one account exists or an operator default is configured.",
+        "maxLength": 32,
+        "pattern": "^[a-z0-9_-]+$"
+      },
+      "calendar_id": {
+        "type": "string",
+        "description": "Calendar identifier for get/list/search/create/update/delete/freebusy. Omit for primary. Never use a display name unless it is the actual gog calendar selector returned by kind:calendars.",
+        "minLength": 1,
+        "maxLength": 512
+      },
+      "event_id": {
+        "type": "string",
+        "description": "Exact event id returned by Calendar. Required for get, update, and delete; never substitute the title.",
+        "minLength": 1,
+        "maxLength": 512
+      },
+      "time_min": {
+        "type": "string",
+        "description": "Absolute RFC3339 timestamp like 2026-08-01T18:00:00-05:00. Used by list/search and required by freebusy. Never send relative words such as today or tonight."
+      },
+      "time_max": {
+        "type": "string",
+        "description": "Absolute RFC3339 timestamp like 2026-08-02T06:00:00-05:00. Used by list/search and required by freebusy. It must be after time_min; never send relative words."
+      },
+      "query": {
+        "type": "string",
+        "description": "Required non-empty search text for kind:search only.",
+        "minLength": 1,
+        "maxLength": 512
+      },
+      "max_results": {
+        "type": "integer",
+        "description": "For list/search only, integer 1-50. Defaults to 10 for list and 25 for search.",
+        "minimum": 1,
+        "maximum": 50
+      },
+      "confirm": {
+        "type": "boolean",
+        "description": "Required true for kind:delete. Deletion is permanent and attendee notifications are sent. Never use for another kind."
+      },
+      "event": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Event fields for create/update only. create requires summary, start, and end. update changes only supplied fields; an explicitly empty description/location/attendees clears that field. Attendee changes send Google updates.",
+        "properties": {
+          "summary": {
+            "type": "string",
+            "description": "Event title. Required and non-empty for create; optional replacement for update."
+          },
+          "description": {
+            "type": "string",
+            "description": "Plain event notes. An empty string on update clears existing notes."
+          },
+          "location": {
+            "type": "string",
+            "description": "Plain address or URL-bearing location. No place lookup occurs. An empty string on update clears it."
+          },
+          "start": {
+            "type": "string",
+            "description": "Absolute RFC3339 dateTime like 2026-08-01T15:00:00-05:00. Required for create. Never use a relative date or a date without timezone."
+          },
+          "end": {
+            "type": "string",
+            "description": "Absolute RFC3339 dateTime after start, like 2026-08-01T16:00:00-05:00. Required for create. Never use a relative date."
+          },
+          "timezone": {
+            "type": "string",
+            "description": "Optional IANA timezone such as America/Chicago, applied to start and end metadata."
+          },
+          "attendees": {
+            "type": "array",
+            "description": "Attendee email addresses. create invites them; update replaces the attendee list and [] clears it.",
+            "items": {
+              "type": "string",
+              "maxLength": 254,
+              "pattern": "^[^[:space:]@]+@[^[:space:]@]+\\.[^[:space:]@]+$"
+            },
+            "maxItems": 100
+          }
+        }
+      },
+      "handle": {
+        "type": "string",
+        "description": "Runtime-only managed-operation handle used with op:poll; models must omit it."
+      }
+    },
+    "allOf": [
+      {
+        "if": {
+          "required": [
+            "op"
+          ],
+          "properties": {
+            "op": {
+              "const": "start"
+            }
+          }
+        },
+        "then": {
+          "required": [
+            "kind"
+          ]
+        }
+      },
+      {
+        "if": {
+          "required": [
+            "op"
+          ],
+          "properties": {
+            "op": {
+              "const": "poll"
+            }
+          }
+        },
+        "then": {
+          "required": [
+            "handle"
+          ]
+        }
+      },
+      {
+        "if": {
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "get"
+            }
+          }
+        },
+        "then": {
+          "required": [
+            "event_id"
+          ]
+        }
+      },
+      {
+        "if": {
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "search"
+            }
+          }
+        },
+        "then": {
+          "required": [
+            "query"
+          ]
+        }
+      },
+      {
+        "if": {
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "create"
+            }
+          }
+        },
+        "then": {
+          "required": [
+            "event"
+          ],
+          "properties": {
+            "event": {
+              "required": [
+                "summary",
+                "start",
+                "end"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "update"
+            }
+          }
+        },
+        "then": {
+          "required": [
+            "event_id",
+            "event"
+          ],
+          "properties": {
+            "event": {
+              "minProperties": 1
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "delete"
+            }
+          }
+        },
+        "then": {
+          "required": [
+            "event_id",
+            "confirm"
+          ],
+          "properties": {
+            "confirm": {
+              "const": true
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "freebusy"
+            }
+          }
+        },
+        "then": {
+          "required": [
+            "time_min",
+            "time_max"
+          ]
+        }
+      }
+    ]
+  },
+  "exec": [
+    "bash",
+    "run.sh"
+  ],
+  "operator_exec": [
+    "bash",
+    "auth.sh"
+  ],
+  "timeout_ms": 60000,
+  "contract": "managed_operation"
+}

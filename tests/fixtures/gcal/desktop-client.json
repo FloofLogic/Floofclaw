@@ -1,0 +1,9 @@
+{
+  "installed": {
+    "client_id": "fixture-client-id.apps.googleusercontent.com",
+    "client_secret": "fixture-client-secret-never-log",
+    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+    "token_uri": "https://oauth2.googleapis.com/token",
+    "redirect_uris": ["http://localhost"]
+  }
+}

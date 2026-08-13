@@ -1,0 +1,18 @@
+{
+  "id": "defer",
+  "description": "Re-arm the watcher for the affair currently under review. Sets next_review_at_ms = now + duration. Requires an active affair_review turn.",
+  "outside_world": false,
+  "args_schema": {
+    "type": "object",
+    "required": ["value"],
+    "additionalProperties": false,
+    "properties": {
+      "value": {
+        "type": "string",
+        "description": "Duration string like '60s', '5m', '1h', '3d'."
+      }
+    }
+  },
+  "exec": ["runtime", "fc_defer()"],
+  "timeout_ms": 0
+}

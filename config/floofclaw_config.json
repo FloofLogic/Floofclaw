@@ -1,0 +1,24 @@
+{
+  "_comment": "Safe fresh-clone defaults. See config/floofclaw_config.example.json before enabling a channel.",
+  "bot_name": "FloofClaw",
+  "default_floop": "hello",
+  "gateway": {
+    "host": "127.0.0.1",
+    "port": 41004
+  },
+  "affairs": {
+    "cross_context_read": true
+  },
+  "channels": {
+    "ws": {
+      "enabled": false,
+      "path": "/v1/fchat"
+    },
+    "irc": {
+      "enabled": false
+    },
+    "discord": {
+      "enabled": false
+    }
+  }
+}

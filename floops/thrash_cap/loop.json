@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "thrash_cap",
+  "description": "Active-run cap proof: one held script job serializes a prefilled context while intake reaches the static pool ceiling.",
+  "serialize_contexts": true,
+  "steps": [
+    { "id": "hold", "type": "agent", "agent": "hold_agent" }
+  ]
+}

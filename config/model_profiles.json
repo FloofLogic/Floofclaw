@@ -1,0 +1,248 @@
+{
+  "version": 1,
+  "_protocol_note": "protocol is currently unread; provider kind determines the wire format",
+  "profiles": [
+    {
+      "id": "thrash_local",
+      "provider": "local_lmstudio",
+      "model": "qwen/qwen2.5-coder-14b",
+      "protocol": "tool_chat",
+      "effort": "low",
+      "context_size": 16384,
+      "prefer": [
+        "local_lmstudio"
+      ]
+    },
+    {
+      "id": "chat",
+      "provider": "gemini_key",
+      "model": "gemini-2.5-flash-lite",
+      "protocol": "tool_chat",
+      "context_size": 1048576,
+      "prefer": [
+        "gemini_key"
+      ]
+    },
+    {
+      "id": "anthropic_chat",
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-6"
+    },
+    {
+      "id": "responses",
+      "provider": "gemini_key",
+      "model": "gemini-2.5-flash-lite"
+    },
+    {
+      "id": "hello",
+      "provider": "mock",
+      "model": "mock"
+    },
+    {
+      "id": "floofclaw_manager",
+      "provider": "gemini_key",
+      "model": "gemini-2.5-flash",
+      "protocol": "gemini_chat_tools",
+      "effort": "medium",
+      "context_size": 1048576,
+      "prefer": [
+        "gemini_key"
+      ]
+    },
+    {
+      "id": "openrouter_deepseek_v4_flash_free_chat",
+      "provider": "openrouter_chat",
+      "model": "deepseek/deepseek-v4-flash:free",
+      "protocol": "tool_chat",
+      "effort": "medium",
+      "context_size": 131072,
+      "prefer": [
+        "openrouter_chat"
+      ]
+    },
+    {
+      "id": "openrouter_deepseek_v4_flash_free_responses",
+      "provider": "openrouter_responses",
+      "model": "deepseek/deepseek-v4-flash:free",
+      "protocol": "openai_responses_json_actions",
+      "effort": "medium",
+      "context_size": 131072,
+      "prefer": [
+        "openrouter_responses"
+      ]
+    },
+    {
+      "id": "openrouter_gpt_oss_20b_free_chat",
+      "provider": "openrouter_chat",
+      "model": "openai/gpt-oss-20b:free",
+      "protocol": "tool_chat",
+      "effort": "medium",
+      "context_size": 131072,
+      "prefer": [
+        "openrouter_chat"
+      ]
+    },
+    {
+      "id": "openrouter_gpt_oss_20b_free_responses",
+      "provider": "openrouter_responses",
+      "model": "openai/gpt-oss-20b:free",
+      "protocol": "openai_responses_json_actions",
+      "effort": "medium",
+      "context_size": 131072,
+      "prefer": [
+        "openrouter_responses"
+      ]
+    },
+    {
+      "id": "default_qwen14b",
+      "provider": "gemini_key",
+      "model": "gemini-2.5-flash-lite",
+      "protocol": "plain_chat",
+      "context_size": 1048576,
+      "prefer": [
+        "gemini_key"
+      ]
+    },
+    {
+      "id": "default_qwen3_small_vllm",
+      "provider": "local_vllm",
+      "model": "qwen3-small",
+      "protocol": "tool_chat",
+      "effort": "medium",
+      "context_size": 4096,
+      "prefer": [
+        "local_vllm"
+      ]
+    },
+    {
+      "id": "default_gemini_flash_lite",
+      "provider": "gemini_key",
+      "model": "gemini-2.5-flash-lite",
+      "protocol": "gemini_chat_tools",
+      "context_size": 1048576,
+      "prefer": [
+        "gemini_key"
+      ]
+    },
+    {
+      "id": "default_gemini_flash_lite_chat",
+      "provider": "gemini_key",
+      "model": "gemini-2.5-flash-lite",
+      "protocol": "gemini_chat",
+      "context_size": 1048576,
+      "prefer": [
+        "gemini_key"
+      ]
+    },
+    {
+      "id": "default_gemini_flash_lite_tool",
+      "provider": "gemini_key",
+      "model": "gemini-2.5-flash-lite",
+      "protocol": "gemini_tool",
+      "context_size": 1048576,
+      "prefer": [
+        "gemini_key"
+      ]
+    },
+    {
+      "id": "default_gemini_flash",
+      "provider": "gemini_key",
+      "model": "gemini-2.5-flash",
+      "protocol": "gemini_chat_tools",
+      "context_size": 131072,
+      "prefer": [
+        "gemini_key"
+      ]
+    },
+    {
+      "id": "default_gemini_flash_chat",
+      "provider": "gemini_key",
+      "model": "gemini-2.5-flash",
+      "protocol": "gemini_chat",
+      "context_size": 131072,
+      "prefer": [
+        "gemini_key"
+      ]
+    },
+    {
+      "id": "default_gemini_flash_tool",
+      "provider": "gemini_key",
+      "model": "gemini-2.5-flash",
+      "protocol": "gemini_tool",
+      "context_size": 131072,
+      "prefer": [
+        "gemini_key"
+      ]
+    },
+    {
+      "id": "default_gemini_pro",
+      "provider": "gemini_key",
+      "model": "gemini-2.5-pro",
+      "protocol": "gemini_chat_tools",
+      "context_size": 32768,
+      "prefer": [
+        "gemini_key"
+      ]
+    },
+    {
+      "id": "default_openai",
+      "provider": "openai_oauth",
+      "model": "gpt-5.4",
+      "protocol": "plain_chat",
+      "effort": "medium",
+      "context_size": 131072,
+      "prefer": [
+        "openai_oauth",
+        "local_ollama",
+        "local_vllm",
+        "local_lmstudio",
+        "anthropic_oauth",
+        "openai_key",
+        "anthropic_key"
+      ],
+      "unsupported_reason": "preferred provider openai_oauth is not implemented by the new llm transport"
+    },
+    {
+      "id": "default",
+      "provider": "gemini_key",
+      "model": "gemini-2.5-flash-lite",
+      "protocol": "gemini_chat_tools",
+      "context_size": 1048576,
+      "prefer": [
+        "gemini_key"
+      ]
+    },
+    {
+      "id": "localtest",
+      "provider": "gemini_key",
+      "model": "gemini-2.5-flash-lite",
+      "protocol": "gemini_chat_tools",
+      "context_size": 1048576,
+      "prefer": [
+        "gemini_key"
+      ]
+    },
+    {
+      "id": "qwen3_small_vllm",
+      "provider": "local_vllm",
+      "model": "qwen3-small",
+      "protocol": "tool_chat",
+      "effort": "medium",
+      "context_size": 4096,
+      "prefer": [
+        "local_vllm"
+      ]
+    },
+    {
+      "id": "floofclaw_work_manager",
+      "provider": "gemini_key",
+      "model": "gemini-3.6-flash",
+      "protocol": "gemini_chat_tools",
+      "effort": "medium",
+      "context_size": 1048576,
+      "prefer": [
+        "gemini_key"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,89 @@
+{
+  "_notes": {
+    "usage": "Copy the fields you need into config/floofclaw_config.json; keys beginning with an underscore are explanatory and ignored by the runtime.",
+    "bot_name": "The bot's user-facing name and gateway process label.",
+    "default_floop": "The floop used when a command does not pass --floop."
+  },
+  "bot_name": "YOUR_BOT_NAME",
+  "default_floop": "hello",
+  "gateway": {
+    "_notes": {
+      "host": "Local bind address for the gateway WebSocket listener.",
+      "port": "Local gateway port."
+    },
+    "host": "127.0.0.1",
+    "port": 41004
+  },
+  "affairs": {
+    "_notes": {
+      "cross_context_read": "When true, agents may see active affairs from other conversation contexts."
+    },
+    "cross_context_read": true
+  },
+  "actions": {
+    "manage_codex": {
+      "_allowed_project_root_note": "Optional absolute existing directory. Only calls with root=project use it; workspace remains the default.",
+      "allowed_project_root": "/absolute/app-private/projects"
+    }
+  },
+  "channels": {
+    "ws": {
+      "_notes": {
+        "enabled": "Expose the authenticated loopback local-client listener: GET /v1/health, /v1/pulse, /v1/usage and the chat upgrade.",
+        "path": "HTTP path used for the FloofClawWS 1.0 upgrade. Provision its token with: fclaw auth set-stdin local_client_api."
+      },
+      "enabled": false,
+      "path": "/v1/fchat"
+    },
+    "irc": {
+      "_notes": {
+        "enabled": "Connect the IRC adapter when the gateway starts.",
+        "server": "IRC server hostname; irc.libera.chat is a public example.",
+        "port": "Use 6697 for TLS or 6667 for plaintext unless the network documents another port.",
+        "tls": "Encrypt the IRC connection. TLS requires OpenSSL support in the build.",
+        "nick": "Nickname shown in IRC.",
+        "username": "IRC registration username.",
+        "realname": "IRC real-name field shown by WHOIS.",
+        "require_mention_in_channel": "When true, channel messages must mention the bot nick; direct messages are unaffected.",
+        "join": "Channels to join after registration.",
+        "ops_channel": "Default IRC destination for proactive messages."
+      },
+      "enabled": true,
+      "server": "irc.libera.chat",
+      "port": 6697,
+      "tls": true,
+      "nick": "YOUR_BOT_NICK",
+      "username": "YOUR_BOT_USERNAME",
+      "realname": "YOUR_BOT_REALNAME",
+      "require_mention_in_channel": true,
+      "join": [
+        "#YOUR_CHANNEL"
+      ],
+      "ops_channel": "#YOUR_OPS_CHANNEL"
+    },
+    "discord": {
+      "_notes": {
+        "enabled": "Connect the Discord adapter when the gateway starts.",
+        "debug": "Print additional Discord adapter diagnostics to stderr.",
+        "allow_bots": "Accept messages authored by other bots. Leave false for normal installs.",
+        "allow_dms": "Accept direct messages to the bot.",
+        "require_mention_in_guild": "When true, guild messages must mention the bot.",
+        "guild_id": "Discord server ID from Developer Mode.",
+        "allowed_channel_ids": "Guild channel IDs the bot is allowed to read and answer in.",
+        "token_key": "Auth-store key containing the Discord bot token; this is a key name, never the token itself.",
+        "home_channel_id": "Destination for proactive messages; when absent, delivery falls back to allowed_channel_ids[0]."
+      },
+      "enabled": true,
+      "debug": false,
+      "allow_bots": false,
+      "allow_dms": true,
+      "require_mention_in_guild": true,
+      "guild_id": "YOUR_GUILD_ID",
+      "allowed_channel_ids": [
+        "YOUR_CHANNEL_ID"
+      ],
+      "token_key": "discord_token",
+      "home_channel_id": "YOUR_HOME_CHANNEL_ID"
+    }
+  }
+}

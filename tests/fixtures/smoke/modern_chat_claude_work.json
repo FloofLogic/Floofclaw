@@ -1,0 +1,1 @@
+{"calls":[{"name":"work","args":{"work":"Create claude_smoke.md containing a greeting.","done_when":"claude_smoke.md exists."}},{"name":"message","args":{"message":"I’ll have Claude create that file."}}]}

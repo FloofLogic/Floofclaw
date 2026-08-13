@@ -1,0 +1,46 @@
+{
+  "id": "http_call",
+  "description": "Make one controlled HTTP API call. Managed operation: call with op:start; the result arrives on a later turn as an operation_result containing the HTTP status and a bounded response-body excerpt. Use auth_ref to name an environment variable containing a bearer token; never put credentials in args or headers.",
+  "outside_world": true,
+  "args_schema": {
+    "type": "object",
+    "required": ["op"],
+    "additionalProperties": false,
+    "properties": {
+      "op": {
+        "type": "string",
+        "enum": ["start", "poll"],
+        "description": "Operation to perform. 'start' makes the request and finishes immediately; 'poll' exists only for managed-operation contract completeness."
+      },
+      "method": {
+        "type": "string",
+        "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+        "description": "HTTP method. Required with op:start."
+      },
+      "url": {
+        "type": "string",
+        "description": "Absolute HTTP or HTTPS URL. Required with op:start."
+      },
+      "headers": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Optional non-secret headers as 'Name: value' strings. Never put credentials here; use auth_ref."
+      },
+      "body": {
+        "type": "string",
+        "description": "Optional request body."
+      },
+      "auth_ref": {
+        "type": "string",
+        "description": "Optional environment-variable name containing the bearer token. The variable name is logged; its value is never placed in action args or curl argv."
+      },
+      "handle": {
+        "type": "string",
+        "description": "Only used with op:poll."
+      }
+    }
+  },
+  "exec": ["bash", "run.sh"],
+  "timeout_ms": 45000,
+  "contract": "managed_operation"
+}

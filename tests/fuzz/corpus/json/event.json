@@ -1,0 +1,1 @@
+{"event_id":"evt_run_001_000001","type":"user_message","source":"cli","run_id":"run_001","payload":{"text":"synthetic fuzz text event.json","origin_event_id":"bus_000003","channel":"cli","adapter_id":""}}

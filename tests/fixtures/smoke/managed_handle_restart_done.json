@@ -1,0 +1,1 @@
+{"calls":[{"name":"message","args":{"message":"MANAGED_HANDLE_RESTART_OK"}},{"name":"task.update","args":{"task_id":"__TASK_ID__","state":"completed"}}]}

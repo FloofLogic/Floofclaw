@@ -1,0 +1,3 @@
+Example Domain
+Reserved local fixture for FloofClaw's offline lookup smoke.
+The name represents https://example.com without making a network request.

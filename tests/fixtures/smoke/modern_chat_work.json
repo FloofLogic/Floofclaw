@@ -1,0 +1,1 @@
+{"calls":[{"name":"work","args":{"work":"Write notes.md with one line that says hello.","done_when":"notes.md exists with the requested line."}},{"name":"message","args":{"message":"I’ll get that written for you."}}]}

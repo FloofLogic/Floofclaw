@@ -1,0 +1,20 @@
+{
+  "id": "chat_manager",
+  "executor": "llm",
+  "model": { "ref": "floofclaw_manager" },
+  "actions": [
+    "message",
+    "affair_open",
+    "note_add",
+    "working_memory_append",
+    "work"
+  ],
+  "autocomplete_message_task_on_send": true,
+  "listen": [
+    "event",
+    "memory",
+    "affairs",
+    "tasks",
+    "usage"
+  ]
+}

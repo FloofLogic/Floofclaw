@@ -1,0 +1,9 @@
+{
+  "id": "memory_compactor",
+  "executor": "llm",
+  "model": { "ref": "responses" },
+  "capabilities": ["memory"],
+  "actions": ["rotate_file"],
+  "memory_compaction_context_only": true,
+  "listen": ["memory"]
+}

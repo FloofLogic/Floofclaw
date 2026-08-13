@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "name": "openclaw",
+  "description": "Single-agent event-driven chat/tool loop. The same main_claw handles user messages, durable managed-operation results, and affair reviews. It may select another action after each result until it replies or is blocked; tasks and working_memory carry the exact active request across runs.",
+  "one_pass": true,
+  "serialize_contexts": true,
+  "poll_interval_ms": 5000,
+  "steps": [
+    { "id": "memory.before", "type": "agent", "agent": "memory" },
+    { "id": "main", "type": "agent", "agent": "main_claw",
+      "gate": "event_kind:user_message,operation_result,affair_review" },
+    { "id": "operation.poll", "type": "agent", "agent": "operation_poller",
+      "gate": "event_kind:operation_poll" },
+    { "id": "dispatch", "type": "builtin", "builtin": "action_runner" },
+    { "id": "memory.after", "type": "agent", "agent": "memory", "non_critical": true },
+    { "id": "memory.compact", "type": "agent", "agent": "memory_compactor", "gate": "memory_compaction_due" }
+  ]
+}

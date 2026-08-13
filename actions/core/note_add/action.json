@@ -1,0 +1,27 @@
+{
+  "id": "note_add",
+  "description": "Append a note to a standing concern (affair): observations from a review, or details the user adds mid-chat like a URL to check. Targets the affair under review, or an explicit affair_id.",
+  "outside_world": false,
+  "args_schema": {
+    "type": "object",
+    "required": [
+      "text"
+    ],
+    "additionalProperties": false,
+    "properties": {
+      "text": {
+        "type": "string",
+        "description": "Observation to record on the affair."
+      },
+      "affair_id": {
+        "type": "string",
+        "description": "Affair to annotate. Only use an id supplied in your affairs input; defaults to the affair under review."
+      }
+    }
+  },
+  "exec": [
+    "runtime",
+    "fc_note_add()"
+  ],
+  "timeout_ms": 0
+}

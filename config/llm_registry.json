@@ -1,0 +1,115 @@
+{
+  "version": 1,
+  "providers": [
+    {
+      "id": "mock",
+      "kind": "mock"
+    },
+    {
+      "id": "local_vllm",
+      "kind": "openai_compat",
+      "url": "http://127.0.0.1:1234/v1/chat/completions"
+    },
+    {
+      "id": "local_vllm_responses",
+      "kind": "openai_responses",
+      "url": "http://127.0.0.1:1234/v1/responses"
+    },
+    {
+      "id": "local_lmstudio",
+      "kind": "openai_compat",
+      "url": "http://127.0.0.1:1234/v1/chat/completions"
+    },
+    {
+      "id": "local_ollama",
+      "kind": "openai_compat",
+      "url": "http://127.0.0.1:11434/v1/chat/completions"
+    },
+    {
+      "id": "local_litellm",
+      "kind": "openai_compat",
+      "url": "http://127.0.0.1:4000/v1/chat/completions"
+    },
+    {
+      "id": "litellm_bearer",
+      "kind": "openai_compat",
+      "url": "http://127.0.0.1:4000/v1/chat/completions",
+      "auth_endpoint": "openai_key",
+      "auth_env": "LITELLM_API_KEY"
+    },
+    {
+      "id": "anthropic",
+      "kind": "http",
+      "url": "https://api.anthropic.com/v1/messages",
+      "auth_endpoint": "anthropic_key",
+      "auth_env": "ANTHROPIC_API_KEY"
+    },
+    {
+      "id": "anthropic_key",
+      "kind": "http",
+      "url": "https://api.anthropic.com/v1/messages",
+      "auth_endpoint": "anthropic_key",
+      "auth_env": "ANTHROPIC_API_KEY"
+    },
+    {
+      "id": "openai_key",
+      "kind": "openai_compat",
+      "url": "https://api.openai.com/v1/chat/completions",
+      "auth_endpoint": "openai_key",
+      "auth_env": "OPENAI_API_KEY"
+    },
+    {
+      "id": "openai_responses_key",
+      "kind": "openai_responses",
+      "url": "https://api.openai.com/v1/responses",
+      "auth_endpoint": "openai_key",
+      "auth_env": "OPENAI_API_KEY"
+    },
+    {
+      "id": "openrouter_chat",
+      "kind": "openai_compat",
+      "url": "https://openrouter.ai/api/v1/chat/completions",
+      "auth_endpoint": "openrouter_key",
+      "auth_env": "OPENROUTER_API_KEY",
+      "limits": {
+        "rpm": 15,
+        "daily": 500
+      }
+    },
+    {
+      "id": "openrouter_responses",
+      "kind": "openai_responses",
+      "url": "https://openrouter.ai/api/v1/responses",
+      "auth_endpoint": "openrouter_key",
+      "auth_env": "OPENROUTER_API_KEY",
+      "limits": {
+        "rpm": 15,
+        "daily": 500
+      }
+    },
+    {
+      "id": "gemini_key",
+      "kind": "gemini_key",
+      "url": "https://generativelanguage.googleapis.com/v1beta",
+      "auth_endpoint": "gemini_key",
+      "auth_env": "GEMINI_API_KEY",
+      "limits": {
+        "rpm": 15,
+        "daily": 500
+      }
+    },
+    {
+      "id": "openai_oauth",
+      "kind": "openai_codex_oauth",
+      "url": "https://chatgpt.com/backend-api/codex",
+      "unsupported": true,
+      "unsupported_reason": "openai_codex_oauth is not implemented by the runtime LLM transport"
+    },
+    {
+      "id": "anthropic_oauth",
+      "kind": "anthropic_oauth",
+      "unsupported": true,
+      "unsupported_reason": "anthropic_oauth is not implemented by the runtime LLM transport"
+    }
+  ]
+}

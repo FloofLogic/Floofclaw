@@ -1,0 +1,112 @@
+# Prerequisites
+*.d
+
+# Generated Python interpreter caches (existing app generators only)
+__pycache__/
+*.py[cod]
+
+# Object files
+*.o
+*.ko
+*.obj
+*.elf
+
+# Linker output
+*.ilk
+*.map
+*.exp
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Libraries
+*.lib
+*.a
+*.la
+*.lo
+
+# Shared objects (inc. Windows DLLs)
+*.dll
+*.so
+*.so.*
+*.dylib
+
+# Executables
+*.exe
+*.out
+*.app
+*.i*86
+*.x86_64
+*.hex
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# Kernel Module Compile Results
+*.mod*
+*.cmd
+.tmp_versions/
+modules.order
+Module.symvers
+Mkfile.old
+dkms.conf
+
+# debug information files
+*.dwo
+
+# FloofClaw runtime artifacts
+.claude/
+.codex/
+.fclaw/
+workspace/
+app/
+bin/
+dist/
+tmp/
+tests/test_runner
+agents/*/memory/log.jsonl
+agents/*/memory/state.json
+roles/*/memory/log.jsonl
+roles/*/memory/state.json
+!app/
+app/*
+!app/.gitkeep
+!app/README.md
+!app/runtime_flow/
+!app/runtime_flow/**
+!app/runtime_flow2/
+!app/runtime_flow2/**
+!app/pulse/
+!app/pulse/**
+!app/tokenwatch/
+!app/tokenwatch/**
+app/tokenwatch/__pycache__/
+!app/chat_smoke/
+!app/chat_smoke/**
+!app/floofchatv1/
+!app/floofchatv1/sample_web_chat.html
+config/llm_profiles.json
+config/llm_profiles.jsonl
+config/llm_registry.jsonl
+
+# macOS Finder metadata
+.DS_Store
+**/.DS_Store
+
+# Secret store — never commit
+secrets/
+
+# Generated adapter registry (see ADAPTER_REGISTRY in the Makefile)
+build/
+
+# Action areas are local installation surface unless deliberately bundled.
+actions/*
+!actions/common/
+!actions/common/**
+!actions/core/
+!actions/core/**
+actions/**/.DS_Store

@@ -1,0 +1,186 @@
+/* Runtime-function action dispatch.
+ *
+ * Some actions are intrinsics: their "exec" entry in action.json is
+ *   "exec": ["runtime", "fc_name()"]
+ * The kernel dispatches them through a compiled function table rather
+ * than fork+exec'ing a run.sh. This file owns:
+ *   - the kRuntimeActions[] table
+ *   - the generic message and action-catalog intrinsics
+ *   - rt_action_runtime_complete() — the runner-side glue that emits
+ *     action_started + action_succeeded/_failed around the call.
+ * Related intrinsic families live in action_runtime_*.c. */
+
+#include "action_runtime_internal.h"
+#include "support/heap_guard.h"
+#include "support/json.h"
+#include <stdio.h>
+#include <string.h>
+
+typedef struct {
+  const char *name;
+  RuntimeActionFn fn;
+} RuntimeActionEntry;
+
+static int fc_message(RtRun *, const char *, const RtActionDef *,
+                      const char *, char *, size_t, char *, size_t);
+static int fc_action_list(RtRun *, const char *, const RtActionDef *,
+                          const char *, char *, size_t, char *, size_t);
+static const RuntimeActionEntry kRuntimeActions[] = {
+  { "fc_message()", fc_message },
+  { "fc_action_list()", fc_action_list },
+  { "fc_list_directory()", fc_list_directory },
+  { "fc_read_file()", fc_read_file },
+  { "fc_write_file()", fc_write_file },
+  { "fc_rotate_file()", fc_rotate_file_intrinsic },
+  { "fc_manage_codex()", fc_manage_codex },
+  { "fc_manage_claude()", fc_manage_claude },
+  { "fc_note_add()", fc_note_add },
+  { "fc_counter_bump()", fc_counter_bump },
+  { "fc_affair_close()", fc_affair_close },
+  { "fc_defer()", fc_defer },
+  { "fc_work()", fc_work },
+  { "fc_working_memory_append()", fc_working_memory_append },
+  { "fc_work_complete()", fc_work_complete },
+  { "fc_work_blocked()", fc_work_blocked },
+  { "fc_affair_open()", fc_affair_open },
+  { NULL, NULL }
+};
+
+int rt_action_registry_runtime_function_known(const char *name) {
+  for (int i = 0; kRuntimeActions[i].name; ++i)
+    if (strcmp(kRuntimeActions[i].name, name) == 0) return 1;
+  return 0;
+}
+
+static RuntimeActionFn runtime_action_lookup(const char *name) {
+  for (int i = 0; kRuntimeActions[i].name; ++i)
+    if (strcmp(kRuntimeActions[i].name, name) == 0) return kRuntimeActions[i].fn;
+  return NULL;
+}
+
+static int fc_message(RtRun *r, const char *rid, const RtActionDef *def,
+                      const char *args, char *result, size_t result_len,
+                      char *error, size_t error_len) {
+  char message_text[RT_LARGE] = "";
+  char escaped_text[RT_LARGE * 2];
+  (void)r; (void)rid; (void)def;
+  (void)rt_json_get_string(args && *args ? args : "{}", "message", message_text, sizeof(message_text));
+  if (json_escape(message_text, escaped_text, sizeof(escaped_text)) != 0) escaped_text[0] = '\0';
+  snprintf(result, result_len, "{\"message\":\"%s\"}", escaped_text);
+  snprintf(error, error_len, "null");
+  return 0;
+}
+
+static int fc_action_list(RtRun *r, const char *rid, const RtActionDef *def,
+                          const char *args, char *result, size_t result_len,
+                          char *error, size_t error_len) {
+  const RtAgentMeta *meta = NULL;
+  const RtActionDef *selected = NULL;
+  char name[RT_SMALL] = "";
+  char *catalog = NULL;
+  char *escaped = NULL;
+  size_t escaped_len;
+  int idx = rt_action_runner_pending_index(r, rid);
+  (void)def;
+  if (idx >= 0)
+    meta = rt_action_agent_meta_lookup(
+        r->scheduler, r->pending_actions[idx].source_agent);
+  if (!meta) {
+    snprintf(error, error_len,
+             "{\"message\":\"action_list could not resolve its calling agent\"}");
+    snprintf(result, result_len, "{}");
+    return -1;
+  }
+  (void)rt_json_get_string(args && *args ? args : "{}", "name", name,
+                           sizeof(name));
+  catalog = (char *)fc_xmalloc(RT_XL);
+  if (!catalog) {
+    snprintf(error, error_len, "{\"message\":\"action_list allocation failed\"}");
+    snprintf(result, result_len, "{}");
+    return -1;
+  }
+  if (name[0]) {
+    selected = rt_action_registry_find(&r->scheduler->actions, name);
+    if (!selected || !rt_agent_allows_action(meta, selected)) {
+      snprintf(error, error_len,
+               "{\"message\":\"requested action is not in this agent's allowlist\"}");
+      snprintf(result, result_len, "{}");
+      fc_xfree(catalog);
+      return -1;
+    }
+    if (rt_action_render_definition(selected, catalog, RT_XL) != 0) {
+      snprintf(error, error_len,
+               "{\"message\":\"requested action contract is too large\"}");
+      snprintf(result, result_len, "{}");
+      fc_xfree(catalog);
+      return -1;
+    }
+  } else if (rt_action_render_allowed_ids(&r->scheduler->actions, meta,
+                                          catalog, RT_XL) != 0) {
+    snprintf(error, error_len,
+             "{\"message\":\"allowed action id list is too large\"}");
+    snprintf(result, result_len, "{}");
+    fc_xfree(catalog);
+    return -1;
+  }
+  if (strlen(catalog) + strlen(name) + 32U >
+      RT_OPERATION_RESULT_TEXT_MAX) {
+    snprintf(error, error_len,
+             "{\"message\":\"complete action contract exceeds the managed-operation result limit\"}");
+    snprintf(result, result_len, "{}");
+    fc_xfree(catalog);
+    return -1;
+  }
+  escaped_len = strlen(catalog) * 2U + 1U;
+  escaped = (char *)fc_xmalloc(escaped_len);
+  if (!escaped || json_escape(catalog, escaped, escaped_len) != 0) {
+    snprintf(error, error_len, "{\"message\":\"action_list escape failed\"}");
+    snprintf(result, result_len, "{}");
+    fc_xfree(escaped);
+    fc_xfree(catalog);
+    return -1;
+  }
+  if (snprintf(result, result_len, "{\"text\":\"%s%s:\\n%s\"}",
+               name[0] ? "Action contract " : "Allowed action IDs",
+               name[0] ? name : "", escaped) >= (int)result_len) {
+    snprintf(error, error_len,
+             "{\"message\":\"complete action_list result is too large\"}");
+    snprintf(result, result_len, "{}");
+    fc_xfree(escaped);
+    fc_xfree(catalog);
+    return -1;
+  }
+  snprintf(error, error_len, "null");
+  fc_xfree(escaped);
+  fc_xfree(catalog);
+  return 0;
+}
+
+int rt_action_runtime_complete(RtRun *r, const char *rid, const RtActionDef *def,
+                              const char *task_id, const char *args) {
+  RuntimeActionFn fn = runtime_action_lookup(def->exec_arg);
+  char result[RT_XL] = "{}";
+  char error[RT_LARGE] = "null";
+  int idx = rt_action_runner_pending_index(r, rid);
+  int rc;
+  if (!fn) {
+    return rt_action_emit_rejected(
+        r, rid, def->id, task_id, "unknown_action",
+        "Runtime action function is not registered.", "[]",
+        idx >= 0 ? r->pending_actions[idx].sig : "");
+  }
+  if (rt_action_emit_started(r, rid, def->id, NULL, task_id) != 0)
+    return -1;
+  rc = fn(r, rid, def, args && *args ? args : "{}", result, sizeof(result), error, sizeof(error));
+  /* Auto-wrap managed-op intrinsics into the finished-immediately contract.
+   * The operation driver publishes the result on a later operation_result
+   * event; current OpenClaw and FloofClaw both use that event-driven path. */
+  if (rc == 0 && def->managed_operation) {
+    rt_action_wrap_finished_result(result, sizeof(result), rid);
+  }
+  return rt_action_emit_terminal(
+      r, rc == 0 ? "action_succeeded" : "action_failed",
+      rid, def->id, NULL, task_id,
+      rc == 0 ? NULL : "runtime_function_failed",
+      rc == 0 ? result : "{}", rc == 0 ? "null" : error);
+}

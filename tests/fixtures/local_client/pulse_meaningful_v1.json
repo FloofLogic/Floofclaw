@@ -1,0 +1,1 @@
+{"schema_version":1,"meaningful_fields":["bot_name","gateway","affairs","tasks","tasks_archived","operations","messages","runs","warnings","limits"],"limits":{"messages":40,"runs":25,"affairs":32,"tasks":256,"operations":128}}

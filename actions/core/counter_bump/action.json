@@ -1,0 +1,30 @@
+{
+  "id": "counter_bump",
+  "description": "Change one named deterministic counter on an affair. Supply exactly one of delta (additive change) or set (absolute value).",
+  "outside_world": false,
+  "args_schema": {
+    "type": "object",
+    "required": ["affair_id", "name"],
+    "additionalProperties": false,
+    "properties": {
+      "affair_id": {
+        "type": "string",
+        "description": "Affair to update. Copy an affair_id supplied in the affairs or event input."
+      },
+      "name": {
+        "type": "string",
+        "description": "Counter name, 1 to 31 UTF-8 bytes."
+      },
+      "delta": {
+        "type": "integer",
+        "description": "Signed amount to add. Mutually exclusive with set."
+      },
+      "set": {
+        "type": "integer",
+        "description": "Absolute signed 64-bit value. Mutually exclusive with delta."
+      }
+    }
+  },
+  "exec": ["runtime", "fc_counter_bump()"],
+  "timeout_ms": 0
+}

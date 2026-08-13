@@ -1,0 +1,27 @@
+{
+  "id": "rotate_file",
+  "description": "Rotate a workspace file: rename <path> to <path>.1, shift older archives up one slot, drop anything past keep, optionally gzip the new .1. Engine mechanism only — the caller (agent, memory_compactor, whatever) decides which file and when. See docs/concepts/actions.md.",
+  "outside_world": true,
+  "args_schema": {
+    "type": "object",
+    "required": ["path", "keep"],
+    "additionalProperties": false,
+    "properties": {
+      "path": {
+        "type": "string",
+        "description": "Workspace-relative path to rotate. Must not contain '..'."
+      },
+      "keep": {
+        "type": "integer",
+        "description": "Number of rotated archives to retain (.1 through .keep). Anything older is deleted."
+      },
+      "compress": {
+        "type": "string",
+        "enum": ["gzip", "none"],
+        "description": "Compression choice for the newly-rotated .1. Default 'gzip'. Falls back to 'none' if gzip isn't on PATH."
+      }
+    }
+  },
+  "exec": ["runtime", "fc_rotate_file()"],
+  "timeout_ms": 0
+}

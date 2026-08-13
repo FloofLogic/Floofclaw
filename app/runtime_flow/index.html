@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FloofClaw Runtime Flow</title>
+  <link rel="stylesheet" href="styles.css?v=rf3">
+</head>
+<body>
+  <div class="page-shell">
+    <header class="hero compact-hero">
+      <div>
+        <p class="eyebrow">FloofClaw Loop Inspector</p>
+        <h1>Runtime Flow</h1>
+        <p class="hero-copy">Loop profiles, phase qualities, prompts, models, actions, and runtime rules generated from current repo configuration.</p>
+        <nav class="app-nav"><a href="http://127.0.0.1:8003/">Pulse</a><a href="http://127.0.0.1:8004/">Tokenwatch</a></nav>
+        <div class="run-select-row hero-run-select">
+          <label for="run-select">Run overlay</label>
+          <select id="run-select"></select>
+        </div>
+      </div>
+      <div class="snapshot-column">
+        <div id="snapshot-panel" class="snapshot-panel"></div>
+      </div>
+    </header>
+
+    <section class="warnings" id="warnings"></section>
+
+    <section class="panel run-overlay-panel">
+      <div class="panel-head">
+        <div>
+          <h2>Run Overlay</h2>
+          <p>Select a run to overlay actual events, provider calls, and action calls on the configured loop.</p>
+        </div>
+      </div>
+      <div id="run-summary" class="run-summary"></div>
+      <div id="run-analysis" class="run-analysis"></div>
+      <div id="run-passes" class="run-passes"></div>
+    </section>
+
+    <section class="panel loop-panel">
+      <div class="panel-head">
+        <div>
+          <h2>Loops</h2>
+          <p>All floop bundles under <code>floops/</code></p>
+        </div>
+      </div>
+      <div id="loop-list" class="loop-list"></div>
+    </section>
+
+    <section class="layout-grid">
+      <main class="panel phase-panel">
+        <div class="panel-head flow-head">
+          <div>
+            <h2 id="active-loop-title">Loop Flow</h2>
+            <p id="active-loop-desc">Select a loop to inspect configured phases.</p>
+          </div>
+          <div id="active-loop-badges" class="badges"></div>
+        </div>
+        <div id="phase-flow" class="phase-flow"></div>
+      </main>
+
+      <aside class="panel detail-panel">
+        <div class="panel-head">
+          <div>
+            <h2>Phase Detail</h2>
+            <p>Prompt, shapes, source paths, and runtime rules.</p>
+          </div>
+        </div>
+        <div id="detail-view" class="detail-view"></div>
+      </aside>
+    </section>
+
+    <section class="bottom-grid">
+      <div class="panel">
+        <div class="panel-head"><h2>Models</h2><p>Configured model profiles and providers.</p></div>
+        <div id="models" class="mini-grid"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>Actions</h2><p>Outside-world adapters available to action_runner.</p></div>
+        <div id="actions" class="mini-grid"></div>
+      </div>
+      <div class="panel rules-panel">
+        <div class="panel-head"><h2>Runtime Rules</h2><p>Anchored source excerpts for loop mechanics.</p></div>
+        <div id="rules" class="rule-list"></div>
+      </div>
+    </section>
+  </div>
+
+  <script src="app.js?v=rf3"></script>
+</body>
+</html>

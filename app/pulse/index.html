@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FloofClaw Pulse</title>
+  <link rel="stylesheet" href="styles.css?v=pl2">
+</head>
+<body>
+  <div class="page-shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">FloofClaw Live State</p>
+        <h1 id="title">Pulse</h1>
+        <p class="hero-copy">Affairs, background work, runs, and the message log — generated from workspace truth.</p>
+        <nav class="app-nav"><a href="http://127.0.0.1:8002/">Runtime Flow</a><a href="http://127.0.0.1:8004/">Tokenwatch</a></nav>
+      </div>
+      <div class="status-column">
+        <div id="gateway-chip" class="chip"></div>
+        <div id="generated-chip" class="chip subtle"></div>
+        <button id="refresh" class="refresh-btn">Refresh now</button>
+        <label class="auto-row"><input type="checkbox" id="auto" checked> auto-refresh</label>
+      </div>
+    </header>
+
+    <section class="warnings" id="warnings"></section>
+
+    <main class="grid">
+      <section class="panel" id="affairs-panel">
+        <div class="panel-head"><h2>Standing concerns</h2><span class="count" id="affairs-count"></span></div>
+        <div id="affairs"></div>
+      </section>
+
+      <section class="panel" id="work-panel">
+        <div class="panel-head"><h2>Background work</h2><span class="count" id="work-count"></span></div>
+        <div id="work"></div>
+      </section>
+
+      <section class="panel" id="runs-panel">
+        <div class="panel-head"><h2>Recent runs</h2><span class="count" id="runs-count"></span></div>
+        <div id="runs"></div>
+      </section>
+
+      <section class="panel wide" id="messages-panel">
+        <div class="panel-head"><h2>Message log</h2><span class="count" id="messages-count"></span></div>
+        <div id="messages"></div>
+      </section>
+    </main>
+  </div>
+  <script src="app.js?v=pl2"></script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+{
+  "id": "memory",
+  "executor": "native",
+  "capabilities": ["memory"],
+  "recent": 20,
+  "summary": {
+    "enabled": true,
+    "mode": "conversation",
+    "compact_after_messages": 48,
+    "compact_after_tokens": 12000,
+    "keep_recent_messages": 20,
+    "min_compact_messages": 16,
+    "summary_max_tokens": 1600,
+    "recent_summary_max_tokens": 500
+  },
+  "listen": ["memory"]
+}

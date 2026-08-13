@@ -1,0 +1,1 @@
+{"event_id":"evt_run_001_000008","ts":"2026-07-17T23:39:27.590Z","type":"task_updated","source":"action_runner","run_id":"run_001","payload":{"task_id":"task_run_001_000002","state":{"updated_ms":1784331567590,"artifacts":[{"artifact_id":"art_run_001_000008_001","parts":[{"kind":"text","text":"synthetic fuzz text seed_0020.json"}]}]}}}

@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\n' '{"access_token":"fixture-original-access","expires_in":3600,"token_type":"Bearer"}'

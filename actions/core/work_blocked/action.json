@@ -1,0 +1,23 @@
+{
+  "id": "work_blocked",
+  "description": "Block the exact runtime-bound work revision when no reasonable authorized next step remains.",
+  "outside_world": false,
+  "contract": "work_terminal",
+  "args_schema": {
+    "type": "object",
+    "required": ["blocker", "needed"],
+    "additionalProperties": false,
+    "properties": {
+      "blocker": {
+        "type": "string",
+        "description": "Why no reasonable authorized next step remains for this work revision."
+      },
+      "needed": {
+        "type": "string",
+        "description": "What would have to change before meaningful progress could resume."
+      }
+    }
+  },
+  "exec": ["runtime", "fc_work_blocked()"],
+  "timeout_ms": 0
+}

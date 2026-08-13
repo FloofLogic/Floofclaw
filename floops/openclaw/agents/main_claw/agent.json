@@ -1,0 +1,17 @@
+{
+  "id": "main_claw",
+  "executor": "llm",
+  "model": { "ref": "default_gemini_flash" },
+  "output_contract": {
+    "kind": "task_action_or_finalize",
+    "repair_attempts": 2
+  },
+  "actions": ["all_actions"],
+  "listen": [
+    "event",
+    "memory",
+    "tasks",
+    "affairs",
+    "usage"
+  ]
+}

@@ -1,0 +1,1 @@
+{"event_id":"evt_run_001_000001","ts":"2026-07-17T23:39:09.542Z","type":"user_message","source":"cli","run_id":"run_001","payload":{"text":"synthetic fuzz text seed_0013.json","origin_event_id":"bus_000001","channel":"cli","adapter_id":""}}
