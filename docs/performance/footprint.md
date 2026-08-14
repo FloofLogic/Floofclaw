@@ -6,7 +6,7 @@ discipline, see [Heap budget](heap-budget.md).
 The current reproducible source and binary measurements are emitted by
 `make metrics`, including date, platform, compiler, and revision. The detailed
 tables below preserve the 2026-07-20 macOS/arm64 hardening snapshot and must
-not be read as current 0.24.1 values.
+not be read as current release values.
 
 The 2026-08-13 arm64 macOS 0.24.1 source-release measurement (Apple clang 17)
 reports 39,420 runtime C/header lines, a 650,664-byte stripped executable, a

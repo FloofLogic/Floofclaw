@@ -3,6 +3,17 @@
 FloofClaw follows semantic versioning for public source releases. The public
 release tag and `runtime/version.h` carry the same plain `X.Y.Z` version.
 
+## 0.25.0 — 2026-08-14
+
+### Changed
+
+- Rebuilt the project README around FloofClaw's defining advantages: its
+  dependency-free C runtime, database-free durable filesystem, agent-first
+  JSON/JSONL interface, and fully inspectable model-call artifacts.
+- Added compact project badges, an architecture overview, faster onboarding,
+  emoji-led navigation, and a prominent Floof Logic attribution and business
+  contact path above the fold.
+
 ## 0.24.1 — 2026-08-13
 
 ### Changed

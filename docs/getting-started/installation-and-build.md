@@ -67,7 +67,7 @@ harness binaries under `bin/`.
 Expected output (current branch):
 
 ```text
-fclaw 0.24.1
+fclaw 0.25.0
 ```
 
 Then run the routine suite:
