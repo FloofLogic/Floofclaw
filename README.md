@@ -1,12 +1,6 @@
 <div align="center">
 
-<h1>🐾 FloofClaw</h1>
-<h3>Tiny code. Sharp claws. Every agent step in the open.</h3>
-
-<p>
-  Made with ❤️ by <a href="https://flooflogic.com/"><strong>Floof Logic</strong></a> ·
-  <a href="https://flooflogic.com/#subscribeForm"><strong>Let’s build something →</strong></a>
-</p>
+<img width="100%" alt="FloofClaw — Tiny code. Sharp claws." src="docs/assets/floofclaw-github-social-card.png">
 
 <p>
   <img height="20" alt="C11" src="https://img.shields.io/badge/C-C11-A8B9CC?style=flat&amp;logo=c&amp;logoColor=white">
@@ -24,63 +18,12 @@
 
 </div>
 
-**FloofClaw is a transparent agent orchestration runtime written from scratch
-in C.** It runs agents, actions, and long-lived workflows through a durable
-event loop—and leaves an inspectable trail of everything that happened.
+**FloofClaw is a tiny C runtime for durable AI agents.** It turns messages,
+timers, API calls, and worker results into inspectable event-driven runs that
+survive restarts and continue until no work remains.
 
-> [!NOTE]
-> FloofClaw is not another chatbot framework. It is the engine agents run
-> inside when their work needs to survive restarts, stay economical, and be
-> accountable over time.
-
-## ✨ Why FloofClaw feels different
-
-### 🐜 Native C, all the way down
-
-**The engine is written entirely in C from scratch, with no required
-third-party runtime dependencies.** No Node, Python, JVM, framework, or
-language runtime underneath it—just a **~635 KiB C binary**. The only optional
-native libraries are libcurl for HTTP providers and OpenSSL 3 for TLS
-channels.
-
-### 📂 The filesystem is the database
-
-**No PostgreSQL, SQLite, Redis, or vector database.** The filesystem is the
-durable substrate: append-only event logs are truth, state files are
-rebuildable projections, and runs can be replayed after crashes.
-
-### 🤖 Agents are first-class operators
-
-**Every public command speaks structured JSON or JSONL by default.** The
-entire runtime is directly composable by agents, shell scripts, and
-automation. Human-readable output is still one flag away, but machines are
-treated as operators—not an afterthought.
-
-```bash
-fclaw view -a <run_id>  # compact JSONL for an agent
-fclaw view -h <run_id>  # formatted output for a human
-```
-
-### 🔎 Every model call is a glass box
-
-**Every request, response, token record, cache boundary, action call, event,
-and stderr artifact is inspectable.** Runs can be viewed, replayed, costed,
-and traced without treating an opaque “agent turn” as truth.
-
-## 📏 Small enough to audit
-
-Measurements from the 0.24.1 source release on arm64 macOS with Apple clang
-17. Run `make metrics` to reproduce them at the exact measured revision.
-
-| What | Measured result |
-| --- | ---: |
-| Stripped executable | **650,664 bytes (~635 KiB)** |
-| Runtime C/header source | **39,420 lines** |
-| Required third-party libraries | **0** |
-| Optional native libraries | **2** — libcurl and OpenSSL 3 |
-| Mock-backed `hello` run | **0.124 s** |
-| Idle isolated gateway RSS | **~11.6 MiB** |
-| Quiet supervision review | **exactly 1 model call** |
+**~635 KiB single binary · C11 · durable filesystem state · JSON/JSONL by
+default · macOS, Linux, and Android ARM64**
 
 ## 🚀 Quickstart
 
@@ -89,6 +32,8 @@ the committed mock-backed `hello` floop, so it needs no account, API key,
 gateway, or network connection.
 
 ```bash
+git clone https://github.com/FloofLogic/Floofclaw.git
+cd Floofclaw
 make -j4
 ./bin/fclaw run -h --text "hello"
 ```
@@ -125,20 +70,61 @@ bash actions/common/web_read/build.sh
 
 </details>
 
+> [!NOTE]
+> FloofClaw is not another chatbot framework. It is the engine agents run
+> inside when their work needs to survive restarts, stay economical, and be
+> accountable over time.
+
+## ✨ Why FloofClaw feels different
+
+### 🐜 Native C, all the way down
+
+**The engine is written entirely in C from scratch.** No Node, Python, JVM,
+framework, or language runtime sits underneath it—just a **~635 KiB C
+binary**. The full provider/TLS build links libcurl and OpenSSL 3; the
+mock-only build can omit both.
+
+### 📂 The filesystem is the database
+
+**No PostgreSQL, SQLite, Redis, or vector database.** The filesystem is the
+durable substrate: append-only event logs are truth, state files are
+rebuildable projections, and runs can be replayed after crashes.
+
+### 🤖 Agents are first-class operators
+
+**Every public command speaks structured JSON or JSONL by default.** The
+entire runtime is directly composable by agents, shell scripts, and
+automation. Human-readable output is still one flag away, but machines are
+treated as operators—not an afterthought.
+
+```bash
+fclaw view -a <run_id>  # compact JSONL for an agent
+fclaw view -h <run_id>  # formatted output for a human
+```
+
+### 🔎 Every model call is a glass box
+
+**Every request, response, token record, cache boundary, action call, event,
+and stderr artifact is inspectable.** Runs can be viewed, replayed, costed,
+and traced without treating an opaque “agent turn” as truth.
+
+## 📏 Small enough to audit
+
+Measurements from the 0.24.1 source release on arm64 macOS with Apple clang
+17. Run `make metrics` to reproduce them at the exact measured revision.
+
+| What | Measured result |
+| --- | ---: |
+| Stripped executable | **650,664 bytes (~635 KiB)** |
+| Runtime C/header source | **39,420 lines** |
+| Full provider/TLS build libraries | **2** — libcurl and OpenSSL 3; the mock-only build can omit both |
+| Mock-backed `hello` run | **0.124 s** |
+| Idle isolated gateway RSS | **~11.6 MiB** |
+| Quiet supervision review | **exactly 1 model call** |
+
 ## 🧭 How it works
 
-```mermaid
-flowchart LR
-    Input["📨 CLI · Discord · IRC · WebSocket"] --> Bus["📬 Event bus"]
-    Bus --> Floop["🧭 Floop profile"]
-    Floop --> Step["🤖 Agent or native step"]
-    Step -->|call intent| Runtime["⚙️ C runtime"]
-    Runtime --> Action["🛠️ Action"]
-    Runtime -->|append| Log["📜 Event log"]
-    Action -->|result event| Log
-    Log --> State["♻️ Rebuildable state"]
-    Log -.->|wake or continue| Floop
-```
+![A floop accepts an event, evaluates state, runs the next eligible AI or non-AI step, emits events, and repeats until the system is stable.](docs/assets/floop-stability-loop.png)
 
 A **floop** is a declarative profile of ordered, event-gated steps. The C
 kernel walks that profile, validates envelopes, runs jobs, appends events, and
