@@ -39,6 +39,12 @@ typedef struct {
   long long last_checked_ms;
   int needs_input;
   char final_text[RT_LARGE];
+  /* Completion capability, threaded IN MEMORY from the runtime's
+   * preallocated pending action into the forked supervising runner.
+   * Deliberately never serialized into state.json and never exposed to
+   * the provider CLI's environment or prompt. */
+  char fc_operation_id[RT_SMALL];
+  char fc_completion_token[RT_OPERATION_TOKEN_HEX + 1];
 } CodexOpState;
 
 static int managed_worker_bind_task(RtRun *r, const char *rid,
@@ -46,7 +52,13 @@ static int managed_worker_bind_task(RtRun *r, const char *rid,
   int pidx;
   if (!r || !rid || !st) return -1;
   pidx = rt_action_runner_pending_index(r, rid);
-  if (pidx < 0 || !r->pending_actions[pidx].task_id[0]) return 0;
+  if (pidx < 0) return 0;
+  /* Completion capability from the runtime's launch-time allocation. */
+  snprintf(st->fc_operation_id, sizeof(st->fc_operation_id), "%s",
+           r->pending_actions[pidx].op_id);
+  snprintf(st->fc_completion_token, sizeof(st->fc_completion_token), "%s",
+           r->pending_actions[pidx].op_token);
+  if (!r->pending_actions[pidx].task_id[0]) return 0;
   snprintf(st->bound_task_id, sizeof(st->bound_task_id), "%s",
            r->pending_actions[pidx].task_id);
   return rt_task_working_memory_of(st->bound_task_id, st->working_memory,
@@ -381,6 +393,62 @@ static int load_codex_state(const RtRun *r, const char *op_id, CodexOpState *st)
   return 0;
 }
 
+/* Runner-side terminalization: the supervising fork already owns the
+ * durable exit code; compute the honest terminal state — including the
+ * named-deliverable override that used to live in the poll path — then
+ * submit the completion claim through the bus. This is runtime-owned C
+ * executing in the detached process, strictly stronger than instructing
+ * the model-driven worker to call the helper. */
+static void runner_finalize_and_submit(CodexOpState *st, const char *tool) {
+  if (!st) return;
+  if (read_long_file(st->exit_path, &st->exit_code) != 0 || st->exit_code < 0)
+    st->exit_code = 127;
+  if (read_text_clip(st->final_path, st->final_text,
+                     sizeof(st->final_text)) != 0)
+    (void)read_text_clip(st->stdout_path, st->final_text,
+                         sizeof(st->final_text));
+  if (!st->final_text[0])
+    snprintf(st->final_text, sizeof(st->final_text), "%s %s.",
+             tool, st->exit_code == 0 ? "completed" : "failed");
+  snprintf(st->state, sizeof(st->state), "%s",
+           st->exit_code == 0 ? "succeeded" : "failed");
+  if (st->expected_path[0] && strcmp(st->state, "succeeded") == 0) {
+    char rel[PATH_MAX];
+    char abs[PATH_MAX];
+    const char *root = st->root_path[0] ? st->root_path : st->launch_path;
+    int present = 0;
+    if (st->launch_path[0] &&
+        snprintf(rel, sizeof(rel), "%s/%s", st->launch_path,
+                 st->expected_path) < (int)sizeof(rel) &&
+        realpath(rel, abs) && path_is_within(root, abs) &&
+        fs_file_exists(abs))
+      present = 1;
+    if (!present) {
+      /* Trust the runtime over the exit code: a named deliverable that
+       * is not on disk means the op did not actually succeed. */
+      char missing[PATH_MAX];
+      snprintf(missing, sizeof(missing), "%s", st->expected_path);
+      st->expected_path[0] = '\0';
+      snprintf(st->state, sizeof(st->state), "failed");
+      snprintf(st->final_text, sizeof(st->final_text),
+               "%s exited 0 but the named deliverable %s is not present.",
+               tool, missing);
+    }
+  }
+  st->last_checked_ms = (long long)timing_wall_ms();
+  (void)write_codex_state(st);
+  if (st->fc_operation_id[0] && st->fc_completion_token[0]) {
+    for (int attempt = 0; attempt < 3; ++attempt) {
+      if (rt_operation_publish_worker_claim(
+              st->fc_operation_id, st->fc_completion_token,
+              strcmp(st->state, "succeeded") == 0 ? "succeeded" : "failed",
+              st->final_text) == 0)
+        break;
+      sleep(1);
+    }
+  }
+}
+
 static char *managed_worker_prompt_dup(const CodexOpState *st,
                                        const char *instructions) {
   static const char shared_instruction[] =
@@ -470,6 +538,7 @@ static int expose_action_cli_to_worker(const char *bound_task_id) {
 
 static int spawn_codex_runner(CodexOpState *st, const char *cwd_abs,
                               const char *binary,
+                              const char *model,
                               const char *instructions_path,
                               char *err, size_t err_len) {
   int pipefd[2];
@@ -530,24 +599,35 @@ static int spawn_codex_runner(CodexOpState *st, const char *cwd_abs,
         }
         if (chdir(cwd_abs) != 0) _exit(126);
         snprintf(perm, sizeof(perm), "%s", st->permission_mode[0] ? st->permission_mode : "safe");
-        if (strcmp(perm, "dangerous") == 0) {
-          execlp(binary, binary, "exec", "--json",
-                 "-o", final_abs,
-                 "-C", cwd_abs,
-                 "--dangerously-bypass-approvals-and-sandbox",
-                 "--skip-git-repo-check",
-                 "-", (char *)NULL);
-        } else {
-          /* `codex exec` is already non-interactive — it never prompts
-           * for approval. Earlier flag --ask-for-approval was removed
-           * from the CLI; passing it makes the codex binary error out
-           * (real-codex smoke 2026-05-27). */
-          execlp(binary, binary, "exec", "--json",
-                 "-o", final_abs,
-                 "-C", cwd_abs,
-                 "--sandbox", "workspace-write",
-                 "--skip-git-repo-check",
-                 "-", (char *)NULL);
+        {
+          char *child_argv[20];
+          int ai = 0;
+          child_argv[ai++] = (char *)binary;
+          child_argv[ai++] = "exec";
+          child_argv[ai++] = "--json";
+          child_argv[ai++] = "-o";
+          child_argv[ai++] = final_abs;
+          child_argv[ai++] = "-C";
+          child_argv[ai++] = (char *)cwd_abs;
+          if (model && *model) {
+            child_argv[ai++] = "--model";
+            child_argv[ai++] = (char *)model;
+          }
+          if (strcmp(perm, "dangerous") == 0) {
+            child_argv[ai++] =
+                "--dangerously-bypass-approvals-and-sandbox";
+          } else {
+            /* `codex exec` is already non-interactive — it never prompts
+             * for approval. Earlier flag --ask-for-approval was removed
+             * from the CLI; passing it makes the codex binary error out
+             * (real-codex smoke 2026-05-27). */
+            child_argv[ai++] = "--sandbox";
+            child_argv[ai++] = "workspace-write";
+          }
+          child_argv[ai++] = "--skip-git-repo-check";
+          child_argv[ai++] = "-";
+          child_argv[ai] = NULL;
+          execvp(binary, child_argv);
         }
         _exit(127);
       }
@@ -559,6 +639,9 @@ static int spawn_codex_runner(CodexOpState *st, const char *cwd_abs,
         (void)write_long_file(st->exit_path, 127);
       }
     }
+    /* Terminal result is durable; the knock is next. The runner — not
+     * the model-driven worker — verifies and submits completion. */
+    runner_finalize_and_submit(st, "Codex");
     _exit(0);
   }
   close(pipefd[1]);
@@ -577,10 +660,18 @@ static int spawn_codex_runner(CodexOpState *st, const char *cwd_abs,
   return 0;
 }
 
-static int codex_result_json(const CodexOpState *st, char *out, size_t out_len) {
+/* `contract` selects the result shape. The start op speaks the managed
+ * contract (status/handle) so the driver records the detachment; status
+ * and abort ops deliberately omit those keys — they are immediate
+ * informational calls about ANOTHER operation, and echoing its running
+ * state as this call's contract would bind a phantom worker to this
+ * call's own preallocated operation. */
+static int codex_result_json(const CodexOpState *st, int contract,
+                             char *out, size_t out_len) {
   char eop[RT_MED], estate[RT_MED], eroot[RT_MED];
   char ecwd[PATH_MAX * 2], efinal[RT_LARGE * 2];
   char elogdir[PATH_MAX * 2], epath[PATH_MAX * 2];
+  char contract_field[RT_MED + 64] = "";
   char path_field[PATH_MAX * 2 + 32] = "";
   char log_dir[PATH_MAX] = "";
   if (!st || !out || out_len == 0) return -1;
@@ -605,18 +696,18 @@ static int codex_result_json(const CodexOpState *st, char *out, size_t out_len) 
     if (json_escape(relative, epath, sizeof(epath)) != 0) return -1;
     snprintf(path_field, sizeof(path_field), ",\"path\":\"%s\"", epath);
   }
-  /* Managed-operation contract fields (status/handle/text) ride
-   * alongside the legacy shape (op_id/state/final_text) so existing
-   * consumers keep working while the operation driver gets its
-   * provider-neutral lifecycle. */
+  if (contract)
+    snprintf(contract_field, sizeof(contract_field),
+             "\"status\":\"%s\",\"handle\":\"%s\",",
+             strcmp(st->state, "running") == 0 ? "running" : "finished",
+             eop);
   return snprintf(out, out_len,
-                  "{\"op_id\":\"%s\",\"handle\":\"%s\","
-                  "\"status\":\"%s\",\"state\":\"%s\",\"tool\":\"manage_codex\","
+                  "{\"op_id\":\"%s\",%s"
+                  "\"state\":\"%s\",\"tool\":\"manage_codex\","
                   "\"root\":\"%s\",\"cwd\":\"%s\",\"last_checked_ms\":%lld,"
                   "\"needs_input\":%s,\"pending_input\":null,"
                   "\"text\":\"%s\",\"final_text\":\"%s\",\"log_dir\":\"%s\"%s}",
-                  eop, eop,
-                  strcmp(st->state, "running") == 0 ? "running" : "finished",
+                  eop, contract_field,
                   estate, eroot, ecwd, st->last_checked_ms,
                   st->needs_input ? "true" : "false",
                   efinal, efinal, elogdir, path_field) >= (int)out_len ? -1 : 0;
@@ -691,6 +782,9 @@ int fc_manage_codex(RtRun *r, const char *rid, const RtActionDef *def,
   char binary_abs[PATH_MAX];
   char workspace_root[PATH_MAX], op_base[PATH_MAX];
   const char *binary = getenv("FCLAW_CODEX_BIN");
+  const char *model = rt_action_cached_config(
+      r && r->scheduler ? &r->scheduler->actions : NULL,
+      def ? def->id : NULL, "model");
   if (!binary || !*binary) binary = "codex";
   if (binary[0] != '/' && strchr(binary, '/')) {
     char launch_cwd[PATH_MAX];
@@ -778,7 +872,7 @@ int fc_manage_codex(RtRun *r, const char *rid, const RtActionDef *def,
     if (def && def->dir[0])
       (void)snprintf(instructions_path, sizeof(instructions_path),
                      "%s/AGENTS.md", def->dir);
-    if (spawn_codex_runner(&st, cwd_abs, binary, instructions_path,
+    if (spawn_codex_runner(&st, cwd_abs, binary, model, instructions_path,
                            err_obj, sizeof(err_obj)) != 0) {
       snprintf(error, error_len, "%s", err_obj);
       snprintf(result, result_len, "{}");
@@ -795,7 +889,7 @@ int fc_manage_codex(RtRun *r, const char *rid, const RtActionDef *def,
         }
       }
     }
-    (void)codex_result_json(&st, result, result_len);
+    (void)codex_result_json(&st, 1, result, result_len);
     snprintf(error, error_len, "null");
     return 0;
   }
@@ -806,7 +900,7 @@ int fc_manage_codex(RtRun *r, const char *rid, const RtActionDef *def,
       return -1;
     }
     (void)refresh_codex_state(r, &st);
-    if (codex_result_json(&st, result, result_len) != 0) {
+    if (codex_result_json(&st, 0, result, result_len) != 0) {
       snprintf(error, error_len, "{\"message\":\"codex status result too large\"}");
       snprintf(result, result_len, "{}");
       return -1;
@@ -826,7 +920,9 @@ int fc_manage_codex(RtRun *r, const char *rid, const RtActionDef *def,
     st.exit_code = 130;
     st.last_checked_ms = (long long)timing_wall_ms();
     (void)write_codex_state(&st);
-    (void)codex_result_json(&st, result, result_len);
+    (void)rt_operation_submit_abort_claim(st.op_id,
+                                          "Codex operation aborted.");
+    (void)codex_result_json(&st, 0, result, result_len);
     snprintf(error, error_len, "null");
     return 0;
   }
@@ -991,6 +1087,9 @@ static int spawn_claude_runner(ClaudeOpState *st, const char *cwd_abs,
         (void)write_long_file(st->exit_path, 127);
       }
     }
+    /* Terminal result is durable; the knock is next. The runner — not
+     * the model-driven worker — verifies and submits completion. */
+    runner_finalize_and_submit(st, "Claude");
     fc_xfree(managed_prompt);
     _exit(0);
   }
@@ -1010,9 +1109,13 @@ static int spawn_claude_runner(ClaudeOpState *st, const char *cwd_abs,
   return 0;
 }
 
-static int claude_result_json(const ClaudeOpState *st, char *out, size_t out_len) {
+/* Same contract split as codex_result_json: only the start op emits the
+ * managed status/handle fields. */
+static int claude_result_json(const ClaudeOpState *st, int contract,
+                              char *out, size_t out_len) {
   char eop[RT_MED], estate[RT_MED], ecwd[PATH_MAX * 2], efinal[RT_LARGE * 2];
   char elogdir[PATH_MAX * 2], epath[PATH_MAX * 2];
+  char contract_field[RT_MED + 64] = "";
   char path_field[PATH_MAX * 2 + 32] = "";
   char log_dir[PATH_MAX] = "";
   if (!st || !out || out_len == 0) return -1;
@@ -1029,14 +1132,18 @@ static int claude_result_json(const ClaudeOpState *st, char *out, size_t out_len
     if (json_escape(st->expected_path, epath, sizeof(epath)) != 0) return -1;
     snprintf(path_field, sizeof(path_field), ",\"path\":\"%s\"", epath);
   }
+  if (contract)
+    snprintf(contract_field, sizeof(contract_field),
+             "\"status\":\"%s\",\"handle\":\"%s\",",
+             strcmp(st->state, "running") == 0 ? "running" : "finished",
+             eop);
   return snprintf(out, out_len,
-                  "{\"op_id\":\"%s\",\"handle\":\"%s\","
-                  "\"status\":\"%s\",\"state\":\"%s\",\"tool\":\"manage_claude\","
+                  "{\"op_id\":\"%s\",%s"
+                  "\"state\":\"%s\",\"tool\":\"manage_claude\","
                   "\"cwd\":\"%s\",\"last_checked_ms\":%lld,"
                   "\"needs_input\":%s,\"pending_input\":null,"
                   "\"text\":\"%s\",\"final_text\":\"%s\",\"log_dir\":\"%s\"%s}",
-                  eop, eop,
-                  strcmp(st->state, "running") == 0 ? "running" : "finished",
+                  eop, contract_field,
                   estate, ecwd, st->last_checked_ms,
                   st->needs_input ? "true" : "false",
                   efinal, efinal, elogdir, path_field) >= (int)out_len ? -1 : 0;
@@ -1150,6 +1257,7 @@ int fc_manage_claude(RtRun *r, const char *rid, const RtActionDef *def,
     snprintf(st.state, sizeof(st.state), "running");
     snprintf(st.permission_mode, sizeof(st.permission_mode), "%s", permission_mode);
     snprintf(st.cwd, sizeof(st.cwd), "%s", cwd_arg);
+    snprintf(st.launch_path, sizeof(st.launch_path), "%s", cwd_abs);
     snprintf(st.task, sizeof(st.task), "%s", task);
     {
       /* The named-deliverable heuristic applies to the CURRENT work
@@ -1190,7 +1298,7 @@ int fc_manage_claude(RtRun *r, const char *rid, const RtActionDef *def,
         }
       }
     }
-    (void)claude_result_json(&st, result, result_len);
+    (void)claude_result_json(&st, 1, result, result_len);
     snprintf(error, error_len, "null");
     return 0;
   }
@@ -1201,7 +1309,7 @@ int fc_manage_claude(RtRun *r, const char *rid, const RtActionDef *def,
       return -1;
     }
     (void)refresh_claude_state(r, &st);
-    if (claude_result_json(&st, result, result_len) != 0) {
+    if (claude_result_json(&st, 0, result, result_len) != 0) {
       snprintf(error, error_len, "{\"message\":\"claude status result too large\"}");
       snprintf(result, result_len, "{}");
       return -1;
@@ -1221,7 +1329,9 @@ int fc_manage_claude(RtRun *r, const char *rid, const RtActionDef *def,
     st.exit_code = 130;
     st.last_checked_ms = (long long)timing_wall_ms();
     (void)write_claude_state(&st);
-    (void)claude_result_json(&st, result, result_len);
+    (void)rt_operation_submit_abort_claim(st.op_id,
+                                          "Claude operation aborted.");
+    (void)claude_result_json(&st, 0, result, result_len);
     snprintf(error, error_len, "null");
     return 0;
   }

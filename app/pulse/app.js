@@ -105,9 +105,10 @@ function renderWork(data) {
     card.appendChild(el("p", "main", t.work));
     if (t.done_when) card.appendChild(el("p", "sub", `done when: ${t.done_when}`));
     if (op.handle) {
-      const nextPoll = op.next_poll_at_ms
-        ? ` · next poll ${fmtDelta(op.next_poll_at_ms, data.now_ms)}` : "";
-      card.appendChild(el("p", "sub", `attempt ${op.handle} (rev ${op.work_rev})${nextPoll}`));
+      const deadline = op.deadline_ms
+        ? ` · deadline ${fmtDelta(op.deadline_ms, data.now_ms)}` : "";
+      const worker = op.worker_handle ? ` worker ${op.worker_handle}` : "";
+      card.appendChild(el("p", "sub", `attempt ${op.handle}${worker} (rev ${op.work_rev})${deadline}`));
     }
     if ((t.external || {}).result_excerpt)
       card.appendChild(el("p", "sub", `result: ${t.external.result_excerpt}`));

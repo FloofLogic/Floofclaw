@@ -158,7 +158,8 @@ set on the job.
 RT_RUN_READY                 // can advance synchronously
 RT_RUN_RUNNING               // currently advancing through profile steps
 RT_RUN_WAITING_JOBS          // agent or action subprocess jobs in flight
-RT_RUN_WAITING_EVENT         // reserved for future real event/deadline waits
+RT_RUN_WAITING_EVENT         // claimed inbound (outbox wake / completion claim)
+                             // whose first behavioral append is not yet proven
 RT_RUN_WAITING_ACTION_SLOT    // pending action request, slot held by another run
 RT_RUN_DONE
 RT_RUN_FAILED
@@ -237,7 +238,10 @@ The poll timeout is no longer hardcoded. Each module's
 
 - jobrunner: min over running jobs of `deadline_ms` / `sigterm_at_ms + kill_grace`
 - bus_intake: `now` if inbox is non-empty
-- runtime: `now` if any run is `RT_RUN_READY` or any job is `JOB_FINISHED`/`JOB_FAILED`
+- runtime: `now` if any run is `RT_RUN_READY` or any job is
+  `JOB_FINISHED`/`JOB_FAILED`; otherwise the earliest managed-operation
+  completion deadline, so a silent worker's timeout fires without any
+  periodic wakeup
 - irc: `next_reconnect_ms` while `IRC_DISCONNECTED`
 
 The reactor takes the min across modules, clamps to `default_timeout_ms`,

@@ -23,14 +23,7 @@ safe_id="$(printf '%s' "$request_id" | tr -cd '[:alnum:]_-')"
 [ -n "$safe_id" ] || safe_id="request"
 handle="http_${safe_id:0:80}"
 
-if [ "$op" = "poll" ]; then
-  supplied="$(jq -r '.args.handle // ""' <<<"$input")"
-  [ -z "$supplied" ] || handle="$supplied"
-  jq -cn --arg handle "$handle" \
-    '{events:[],result:{status:"finished",handle:$handle,text:"http_call completes synchronously; call op:start."},error:null}'
-  exit 0
-fi
-[ "$op" = "start" ] || emit_error "BAD_ARGS" "args.op must be start or poll"
+[ "$op" = "start" ] || emit_error "BAD_ARGS" "args.op must be start"
 
 method="$(jq -r '.args.method // ""' <<<"$input")"
 url="$(jq -r '.args.url // ""' <<<"$input")"

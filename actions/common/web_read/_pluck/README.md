@@ -22,6 +22,13 @@ zig build
 zig build test
 ```
 
+For an optimized binary:
+
+```sh
+zig build -Doptimize=ReleaseSafe
+./zig-out/bin/pluck --help
+```
+
 ## Usage
 
 ```sh
@@ -75,3 +82,17 @@ optional Node baseline using Mozilla Readability.
 - JS-heavy pages need `--render`
 - The extractor aims for behaviorally similar output, not Firefox parity
 - Very short pages and app-like layouts can still fail the article heuristic
+
+## Releases
+
+The public repository is intentionally a release-only history: one snapshot
+commit and one annotated `vX.Y.Z` tag per version. Commit messages describe
+user-visible features and fixes rather than the private development process.
+The public tree is complete source code and can be built normally.
+
+Release mechanics and the private/public history boundary are documented in
+[`RELEASING.md`](RELEASING.md).
+
+## License
+
+Pluck is available under the [MIT License](LICENSE).

@@ -4,7 +4,8 @@
  * comparing integers, never by reading prose:
  *
  *   no attempt recorded                       -> start at current work_rev
- *   attempt running                           -> poll (only on a poll event)
+ *   attempt running                           -> wait (completion arrives as
+ *                                                its own bus-driven result run)
  *   attempt terminal, rev == current work_rev -> stop; do nothing
  *   attempt terminal, rev <  current work_rev -> start one attempt at the
  *                                                current work_rev, feeding
@@ -18,7 +19,7 @@
  * an ordinary registered action implementing the managed-operation
  * contract. This phase emits ordinary call intent; the calls flow
  * through the normal action_request -> action_runner path, so every
- * start and poll is visible in the event log like any other call. */
+ * start is visible in the event log like any other call. */
 
 #include "../agents.h"
 #include "../runtime.h"
@@ -62,7 +63,6 @@ int rt_agent_workers_run(const RtContext *ctx, const RtStep *step,
     char handle[RT_SMALL] = "", status[RT_SMALL] = "", excerpt[RT_MED] = "";
     long long attempt_rev = 0;
     int has_attempt = 0;
-    int poll_event = strcmp(ctx->event_kind, "operation_poll") == 0;
     if (external[0] && strcmp(external, "null") != 0 &&
         json_ref_from_text(external, &ext) == 0 && ext.type == JSON_REF_OBJECT &&
         json_ref_object_get_string(&ext, "handle", handle, sizeof(handle)) == 0 &&
@@ -73,27 +73,16 @@ int rt_agent_workers_run(const RtContext *ctx, const RtStep *step,
       (void)json_ref_object_get_string(&ext, "result_excerpt", excerpt, sizeof(excerpt));
     }
     if (has_attempt && strcmp(status, "running") == 0) {
-      if (!poll_event) return emit_calls(stdout_buf, stdout_cap, "");
-      {
-        char etask[RT_MED], ehandle[RT_MED], call[RT_LARGE];
-        if (json_escape(task_id, etask, sizeof(etask)) != 0 ||
-            json_escape(handle, ehandle, sizeof(ehandle)) != 0) return 1;
-        snprintf(call, sizeof(call),
-                 "{\"name\":\"%s\",\"args\":{\"task_id\":\"%s\",\"op\":\"poll\","
-                 "\"op_id\":\"%s\"}}",
-                 meta->handler, etask, ehandle);
-        return emit_calls(stdout_buf, stdout_cap, call);
-      }
+      /* The attempt is detached. Completion arrives as its own
+       * correlated operation_result run (or the deadline's timeout);
+       * nothing here polls, restarts, or judges. */
+      return emit_calls(stdout_buf, stdout_cap, "");
     }
     if (has_attempt && attempt_rev >= work_rev) {
       /* Terminal attempt for the current revision: quiescent. The
        * manager decides what the returned text means — answered
        * (complete the task) or blocked (leave it open); the handler
        * never restarts and never judges. */
-      return emit_calls(stdout_buf, stdout_cap, "");
-    }
-    if (!has_attempt && poll_event) {
-      /* Stale poll with no recorded attempt: nothing to do. */
       return emit_calls(stdout_buf, stdout_cap, "");
     }
     {

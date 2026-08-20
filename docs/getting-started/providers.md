@@ -88,6 +88,10 @@ placeholder with an ID available to your account:
 
 The registry also ships `openai_responses_key` for the OpenAI Responses wire
 format. Select it from a profile when that endpoint is the better match.
+A profile `"effort"` on that transport is emitted as
+`"reasoning": {"effort": ...}`; profiles without `effort` omit `reasoning`.
+The engine does not whitelist values — the provider validates them. See
+[Executors and model profiles](../concepts/executors.md#model-effort).
 
 ## Anthropic
 

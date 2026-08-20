@@ -21,6 +21,21 @@ static int load_bot_name(char *out, size_t out_len) {
   free(text);
   return rc;
 }
+
+/* Standing operator-curated facts about the user, config/user.md.
+ * Deployment-owned like floofclaw_config.json and unreachable from the
+ * workspace-scoped file actions, so only the operator writes it. Absent
+ * file renders empty so shipped floops may reference @{user}
+ * unconditionally; a file the prompt boundary can never fit fails
+ * loudly instead of silently dropping the operator's facts. */
+static int load_user_info(char **out) {
+  int rc;
+  if (!out) return -1;
+  *out = NULL;
+  rc = fs_read_text("config/user.md", out, RT_XL);
+  if (rc == FS_READ_TOO_LARGE) return -1;
+  return 0;
+}
 /* Wall-clock now, in the deployment's local zone, phrased for a model
  * rather than for a parser: "It's 9:26 PM CDT on 7/28/26".
  *
@@ -77,8 +92,9 @@ static size_t text_count(const char *text, const char *needle) {
   return count;
 }
 
-static int render_prompt_vars(const char *raw, const char *json, const char *tools,
-                              char *out, size_t out_len, int *overflow) {
+static int render_prompt_vars_with(const char *raw, const char *json,
+                                   const char *tools, const char *user_info,
+                                   char *out, size_t out_len, int *overflow) {
   size_t i = 0, pos = 0;
   char bot_name[RT_SMALL];
   int bot_name_loaded = 0;
@@ -130,6 +146,11 @@ static int render_prompt_vars(const char *raw, const char *json, const char *too
           if (overflow) *overflow = 1;
           return -1;
         }
+      } else if (name_len == 4 && strncmp(name, "user", 4) == 0) {
+        if (rt_append_text(out, out_len, &pos, user_info ? user_info : "") != 0) {
+          if (overflow) *overflow = 1;
+          return -1;
+        }
       } else {
         return -1;
       }
@@ -143,6 +164,19 @@ static int render_prompt_vars(const char *raw, const char *json, const char *too
     i++;
   }
   return 0;
+}
+
+static int render_prompt_vars(const char *raw, const char *json, const char *tools,
+                              char *out, size_t out_len, int *overflow) {
+  char *user_info = NULL;
+  int rc;
+  if (raw && strstr(raw, "@{user}")) {
+    if (load_user_info(&user_info) != 0) return -1;
+  }
+  rc = render_prompt_vars_with(raw, json, tools, user_info,
+                               out, out_len, overflow);
+  free(user_info);
+  return rc;
 }
 
 static int build_agent_input(const RtContext *ctx, const char *agent_dir, const char *executor,
@@ -213,7 +247,8 @@ static int build_agent_input(const RtContext *ctx, const char *agent_dir, const 
         else
           snprintf(err, err_len,
                    "agent %s prompt template is invalid; fix: use only "
-                   "{{json}}, {{tools}}, @{bot_name}, and @{now} variables",
+                   "{{json}}, {{tools}}, @{bot_name}, @{now}, and @{user} "
+                   "variables",
                    agent_id);
       }
       goto done;

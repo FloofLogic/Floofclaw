@@ -151,6 +151,7 @@ RUNTIME_SRC = \
 	runtime/work_state.c \
 	runtime/operation_state.c \
 	runtime/operation_driver.c \
+	runtime/operation_cli.c \
 	runtime/task_artifacts.c \
 	runtime/task_json.c \
 	runtime/task_archive.c \
@@ -159,7 +160,6 @@ RUNTIME_SRC = \
 	runtime/native_agents/noop.c \
 	runtime/native_agents/memory.c \
 	runtime/native_agents/workers.c \
-	runtime/native_agents/operation_poller.c \
 	runtime/trace.c \
 	runtime/view.c \
 	runtime/pulse_projection.c \
@@ -167,6 +167,7 @@ RUNTIME_SRC = \
 	runtime/cacheview.c \
 	runtime/inspection_stream.c \
 	runtime/action_cli.c \
+	runtime/config_cli.c \
 	runtime/qol_cli.c \
 	runtime/auth_cli.c \
 	runtime/bus_cli.c \
@@ -359,9 +360,11 @@ test: unit integration bin/fclaw_local_client_probe
 	./tests/run_in_isolated_copy.sh bash ./tests/test_version_contract.sh
 	./tests/run_in_isolated_copy.sh ./tests/test_local_client_api.sh
 	./tests/run_in_isolated_copy.sh bash ./tests/test_action_cli.sh
+	./tests/run_in_isolated_copy.sh bash ./tests/test_config_cli.sh
 	./tests/run_in_isolated_copy.sh bash ./tests/test_web_read_action.sh
 	./tests/run_in_isolated_copy.sh bash ./tests/test_tokenwatch_app.sh
 	./tests/run_in_isolated_copy.sh bash ./tests/test_managed_handle_restart.sh
+	./tests/run_in_isolated_copy.sh bash ./tests/test_manage_hermes_completion.sh
 	./tests/test_android_arm64_build_contract.sh
 	./tests/smoke_lookup_and_poem.sh
 

@@ -44,7 +44,10 @@ typedef enum {
   RT_RUN_READY,                /* can advance synchronously */
   RT_RUN_RUNNING,              /* currently advancing through profile steps */
   RT_RUN_WAITING_JOBS,         /* paused on one or more jobrunner jobs */
-  RT_RUN_WAITING_EVENT,        /* reserved for future real event/deadline waits */
+  RT_RUN_WAITING_EVENT,        /* claimed inbound (outbox wake or completion
+                                * claim) whose first behavioral append is not
+                                * yet proven; drained by the inbound-claim
+                                * retry in ports.c */
   RT_RUN_WAITING_ACTION_SLOT,   /* action request pending; slot held by another run */
   RT_RUN_DONE,
   RT_RUN_FAILED
@@ -77,8 +80,14 @@ typedef struct {
   char sig[RT_MED];    /* source+action+args hash, used to catch duplicate intents */
   char task_id[RT_SMALL]; /* optional existing runtime-owned task reference */
   long long work_rev;  /* trusted controller binding; 0 for ordinary calls */
-  char trigger_event_id[RT_SMALL]; /* exact work consequence; empty for polls/legacy */
+  char trigger_event_id[RT_SMALL]; /* exact work consequence; empty for legacy */
   int  started;        /* action_started seen */
+  /* Managed-operation identity + capability, allocated by the runtime
+   * before dispatch reaches the action. In-memory only: the durable
+   * copies live in the operation store, and the token must never reach
+   * events, artifacts, or model-visible text. */
+  char op_id[RT_SMALL];
+  char op_token[RT_OPERATION_TOKEN_HEX + 1];
 } RtPendingAction;
 
 typedef struct {
@@ -237,5 +246,16 @@ void rt_operation_driver_on_terminal(RtRun *r, const char *type, const char *act
                                      const char *task_id, long long work_rev,
                                      const char *args_json,
                                      const char *result_json);
+/* Preallocate operation_id + completion token + deadline for a managed
+ * call, durably, before dispatch reaches the action. Idempotent for a
+ * recovery relaunch of the same durable request id. */
+int rt_operation_allocate_for_call(RtRun *r, const RtActionDef *def,
+                                   RtPendingAction *p);
+/* Post-admission projection hook for a bus completion/timeout claim:
+ * the claim run's first behavioral event has already flipped the store;
+ * this projects the terminal into the owning task and narrates. */
+void rt_operation_on_claim_committed(RtRun *r, const char *op_id,
+                                     const char *status,
+                                     const char *excerpt);
 
 #endif

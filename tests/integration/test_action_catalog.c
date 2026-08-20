@@ -247,6 +247,8 @@ int configured_action_catalog_is_ordered_faithful_growable_and_loud(void) {
   int fixtures_installed = 0;
   int rc = 0;
 
+  char *saved_cfg = NULL;
+  rc |= test_config_enable_all(&saved_cfg);
   rc |= test_reset_workspace();
   rc |= test_remove_path(A1_FIXTURE_AREA);
   rc |= test_remove_path("floops/" A1_FIXTURE_FLOOP);
@@ -497,5 +499,96 @@ int configured_action_catalog_is_ordered_faithful_growable_and_loud(void) {
   (void)test_reset_workspace();
   a1_restore_env("LLM_MOCK_RESPONSE_PATHS", saved_paths);
   a1_restore_env("FCLAW_MODEL_PROFILES", saved_profiles);
+  test_config_restore(saved_cfg);
+  return rc;
+}
+
+/* config `force_disable` is the deployment's mask over registered actions:
+ * the floop allowlist that names a masked action still loads (the declared
+ * intent survives), the rendered catalog omits it, a call that arrives
+ * anyway is rejected with the deployment fact, and an id the registry does
+ * not hold is inert. */
+int force_disabled_action_is_masked_rejected_and_still_declared(void) {
+  const char *saved_profiles = a1_capture_env("FCLAW_MODEL_PROFILES");
+  const char *saved_paths = a1_capture_env("LLM_MOCK_RESPONSE_PATHS");
+  const char *declared[] = { "gcal", "manage_codex", "message" };
+  char *request = NULL;
+  char *event_log = NULL;
+  char run_id[RT_SMALL] = "";
+  char err[RT_LARGE] = "";
+  char *saved_cfg = NULL;
+  int fixtures_installed = 0;
+  int rc = 0;
+
+  (void)test_read_file("config/floofclaw_config.json", &saved_cfg);
+  rc |= test_reset_workspace();
+  rc |= test_remove_path(A1_FIXTURE_AREA);
+  rc |= test_remove_path("floops/" A1_FIXTURE_FLOOP);
+  fixtures_installed = 1;
+  rc |= expect(a1_set_shipped_areas_loaded(0) == 0,
+               "shipped action areas unload for the mask fixture");
+  rc |= a1_write_actions(0);
+  rc |= a1_write_floop();
+  rc |= test_write_file(
+      "floops/" A1_FIXTURE_FLOOP "/masked_call_response.json",
+      "{\"calls\":[{\"name\":\"gcal\",\"args\":{}}]}\n");
+  (void)setenv("FCLAW_MODEL_PROFILES",
+               "tests/fixtures/smoke/model_profiles_mock.json", 1);
+  rc |= a1_write_agent(declared, sizeof(declared) / sizeof(declared[0]));
+  rc |= test_write_file("config/floofclaw_config.json",
+                        "{\"bot_name\":\"FloofClaw\","
+                        "\"default_floop\":\"hello\","
+                        "\"force_disable\":[\"gcal\",\"not_a_real_action\"]}\n");
+
+  {
+    RtScheduler *scheduler = NULL;
+    rc |= expect(a1_scheduler_init(&scheduler, err, sizeof(err)) == 0,
+                 "floop with a force-disabled allowlist entry still loads");
+    if (scheduler) {
+      const RtActionDef *masked =
+          rt_action_registry_find(&scheduler->actions, "gcal");
+      const RtActionDef *open_def =
+          rt_action_registry_find(&scheduler->actions, "manage_codex");
+      rc |= expect(masked && masked->force_disabled,
+                   "registry marks the masked action");
+      rc |= expect(open_def && !open_def->force_disabled,
+                   "unlisted actions stay enabled and the inert id changed nothing");
+    }
+    a1_scheduler_close(scheduler);
+  }
+
+  rc |= expect(a1_run("floops/" A1_FIXTURE_FLOOP "/empty_response.json",
+                      &request, run_id, sizeof(run_id)) == 0,
+               "masked catalog fixture run completes");
+  if (request) {
+    rc |= expect(test_count_substr(request, "\"name\": \"gcal\"") == 0,
+                 "rendered catalog omits the force-disabled action");
+    rc |= expect(test_count_substr(request, "\"name\": \"manage_codex\"") == 1 &&
+                 test_count_substr(request, "\"name\": \"message\"") == 1,
+                 "rendered catalog keeps the other allowlisted actions");
+  }
+  free(request);
+  request = NULL;
+
+  rc |= expect(a1_run("floops/" A1_FIXTURE_FLOOP "/masked_call_response.json",
+                      NULL, run_id, sizeof(run_id)) == 0,
+               "run carrying a masked call still completes");
+  rc |= test_read_run_event_log(run_id, &event_log);
+  rc |= expect_substr(event_log, "\"reason\":\"force_disabled\"",
+                      "dispatch rejects the masked call with the deployment fact");
+  rc |= expect(test_count_substr(event_log, "\"type\":\"action_started\"") == 0,
+               "the masked call never starts");
+
+  free(event_log);
+  if (fixtures_installed) {
+    rc |= test_remove_path(A1_FIXTURE_AREA);
+    rc |= test_remove_path("floops/" A1_FIXTURE_FLOOP);
+    rc |= expect(a1_set_shipped_areas_loaded(1) == 0,
+                 "shipped action areas reload after the mask fixture");
+  }
+  (void)test_reset_workspace();
+  a1_restore_env("LLM_MOCK_RESPONSE_PATHS", saved_paths);
+  a1_restore_env("FCLAW_MODEL_PROFILES", saved_profiles);
+  test_config_restore(saved_cfg);
   return rc;
 }

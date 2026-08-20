@@ -20,6 +20,19 @@
     },
     "cross_context_read": true
   },
+  "_force_disable_notes": {
+    "what": "Action ids this deployment refuses to run. Masked actions stay registered — floop allowlists keep declaring intent and still validate — but they are omitted from every agent catalog and rejected at dispatch.",
+    "why_shipped_populated": "Each listed action needs operator setup before it can work (a built helper, credentials, or an installed CLI). Complete the setup, then delete the id from this list to enable it. See each action's SETUP_<NAME>.md or README under actions/common/.",
+    "entries": "Ids only (action.json id), never directory names. Unknown ids are inert, so one list travels across deployment branches."
+  },
+  "force_disable": [
+    "web_read",
+    "gcal",
+    "git_github",
+    "manage_codex",
+    "manage_claude",
+    "manage_hermes"
+  ],
   "actions": {
     "manage_codex": {
       "_allowed_project_root_note": "Optional absolute existing directory. Only calls with root=project use it; workspace remains the default.",

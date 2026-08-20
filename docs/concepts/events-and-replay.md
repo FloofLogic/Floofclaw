@@ -136,12 +136,15 @@ Affair-domain events (see [Architecture: Affair Watcher](../architecture.md)):
 
 Managed-operation events:
 
-- `operation_started` — records a running handle and its task/context/work
-  revision correlation in the durable operation store.
-- `operation_poll` — timer-driven bus event that re-enters a floop to poll a
-  running handle; stale timers are no-ops.
-- `operation_result` — exactly-once terminal publication for a handle, routed
-  through normal intake to the floop's configured result turn.
+- `operation_started` — allocated BEFORE the action executes: records the
+  runtime-owned operation id with its task/context/work-revision correlation
+  and completion deadline in the durable operation store.
+- `operation_result` — the one canonical terminal per operation (status
+  `succeeded`, `failed`, or `timed_out`), routed through normal intake to the
+  floop's configured result turn. For a bus-submitted completion claim
+  (`operation_completed` ingress envelopes — not themselves behavioral
+  events), the admitted claim IS the result run's first event; duplicates and
+  forged claims are rejected before any run exists.
 
 Task-domain state events, when a profile includes them:
 

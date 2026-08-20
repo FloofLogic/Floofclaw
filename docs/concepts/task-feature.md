@@ -88,8 +88,9 @@ runtime-supplied IDs but may not mint or overwrite them.
 
 The `work` action creates or revises the context's work task. A fixed native
 workers phase may start a configured managed operation at the current
-`work_rev`, store its opaque handle under `state.external`, poll it, and
-publish exactly one `operation_result` when terminal.
+`work_rev` and project the attempt under `state.external`; the detached
+worker's completion claim — or the deadline's timeout claim — then produces
+exactly one `operation_result` when terminal. Nothing polls in between.
 
 A generic controller may instead declare `bind_task: "open_work"` and a
 `work_consequence` gate. The runtime, not the model, chooses the exact

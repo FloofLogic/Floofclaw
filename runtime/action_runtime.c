@@ -108,6 +108,13 @@ static int fc_action_list(RtRun *r, const char *rid, const RtActionDef *def,
       fc_xfree(catalog);
       return -1;
     }
+    if (selected->force_disabled) {
+      snprintf(error, error_len,
+               "{\"message\":\"requested action is listed in config force_disable\"}");
+      snprintf(result, result_len, "{}");
+      fc_xfree(catalog);
+      return -1;
+    }
     if (rt_action_render_definition(selected, catalog, RT_XL) != 0) {
       snprintf(error, error_len,
                "{\"message\":\"requested action contract is too large\"}");
@@ -171,6 +178,15 @@ int rt_action_runtime_complete(RtRun *r, const char *rid, const RtActionDef *def
   }
   if (rt_action_emit_started(r, rid, def->id, NULL, task_id) != 0)
     return -1;
+  /* Preallocate the operation identity + completion capability +
+   * deadline durably before the intrinsic can spawn a worker. */
+  if (def->managed_operation && idx >= 0 &&
+      rt_operation_allocate_for_call(r, def, &r->pending_actions[idx]) != 0) {
+    return rt_action_emit_terminal(
+        r, "action_failed", rid, def->id, NULL, task_id,
+        "operation_allocation_failed", "{}",
+        "{\"message\":\"managed-operation identity allocation failed\"}");
+  }
   rc = fn(r, rid, def, args && *args ? args : "{}", result, sizeof(result), error, sizeof(error));
   /* Auto-wrap managed-op intrinsics into the finished-immediately contract.
    * The operation driver publishes the result on a later operation_result

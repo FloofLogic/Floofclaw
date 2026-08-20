@@ -64,23 +64,29 @@ static int name_looks_like_secret(const char *s) {
 static int action_config_value(const RtActionDef *def, int index,
                                char *value, size_t value_len) {
   char *text = NULL;
-  JsonRef root, actions, mine;
+  JsonRef root, actions, mine, configured;
+  const char *key;
   int found = 0;
   if (!def || index < 0 || index >= def->config_count ||
       !value || value_len == 0)
     return -1;
   value[0] = '\0';
+  key = def->config_keys[index][0]
+            ? def->config_keys[index]
+            : def->config_names[index];
   if (fs_read_text("config/floofclaw_config.json", &text,
                    FS_READ_TEXT_DEFAULT_CAP) == 0 && text &&
       json_ref_first_object(text, &root) == 0 &&
       json_ref_object_get_object(&root, "actions", &actions) == 0 &&
       json_ref_object_get_object(&actions, def->id, &mine) == 0 &&
-      json_ref_object_get_string(&mine,
-          def->typed_config_index == (unsigned char)(index + 1)
-              ? def->typed_config_key
-              : def->config_names[index],
-          value, value_len) == 0 && value[0])
-    found = 1;
+      json_ref_object_get(&mine, key, &configured) == 0) {
+    if (configured.type != JSON_REF_STRING ||
+        json_ref_object_get_string(&mine, key, value, value_len) != 0 ||
+        !value[0])
+      found = -1;
+    else
+      found = 1;
+  }
   free(text);
   return found;
 }
@@ -94,7 +100,8 @@ int rt_action_resolve_config(const RtActionDef *def, void *out_buf,
   for (i = 0; i < def->config_count; ++i) {
     char value[RT_MED] = "";
     int found = action_config_value(def, i, value, sizeof(value));
-    if (!found) {
+    if (found < 0) return -1;
+    if (found == 0) {
       if (def->config_required[i]) return -1;
       continue;
     }
@@ -151,46 +158,6 @@ static int copy_ref_compact(const JsonRef *v, char *out, size_t out_len) {
   char raw[RT_ACTION_SCHEMA_MAX];
   if (json_ref_value_copy(v, raw, sizeof(raw)) != 0) return -1;
   return json_compact(raw, out, out_len);
-}
-
-static int poll_handle_schema_valid(const JsonRef *schema, const char *arg) {
-  JsonRef props, prop;
-  char type[RT_SMALL] = "";
-  return schema && arg && *arg &&
-         json_ref_object_get_object(schema, "properties", &props) == 0 &&
-         json_ref_object_get_object(&props, arg, &prop) == 0 &&
-         json_ref_object_get_string(&prop, "type", type, sizeof(type)) == 0 &&
-         strcmp(type, "string") == 0;
-}
-
-static int poll_handle_arg_reserved(const char *arg) {
-  static const char *reserved[] = {
-    "op", "task_id", "work_rev", "event_id", "run_id", "request_id",
-    "job_id", "source", "created_by", NULL
-  };
-  if (!arg) return 0;
-  for (size_t i = 0; reserved[i]; ++i)
-    if (strcmp(arg, reserved[i]) == 0) return 1;
-  return 0;
-}
-
-static int poll_op_schema_valid(const JsonRef *schema) {
-  JsonRef props, op, values, value;
-  char type[RT_SMALL] = "", candidate[RT_SMALL] = "";
-  if (!schema ||
-      json_ref_object_get_object(schema, "properties", &props) != 0 ||
-      json_ref_object_get_object(&props, "op", &op) != 0 ||
-      json_ref_object_get_string(&op, "type", type, sizeof(type)) != 0 ||
-      strcmp(type, "string") != 0 ||
-      json_ref_object_get_array(&op, "enum", &values) != 0)
-    return 0;
-  for (size_t i = 0; i < json_ref_array_size(&values); ++i) {
-    if (json_ref_array_get(&values, i, &value) == 0 &&
-        json_ref_string_copy(&value, candidate, sizeof(candidate)) == 0 &&
-        strcmp(candidate, "poll") == 0)
-      return 1;
-  }
-  return 0;
 }
 
 static int parse_exec(const JsonRef *root, RtActionDef *def, char *err, size_t err_len) {
@@ -333,28 +300,24 @@ static int load_action_contract(const char *area_id, const char *dir,
           return -1;
         }
         if (json_ref_object_get_string(&entry, "kind", kind,
-                                       sizeof(kind)) == 0 &&
-            strcmp(kind, "existing_directory") != 0) {
-          snprintf(err, err_len, "%s: config entry %zu has unknown kind %s",
-                   manifest, i, kind);
-          fc_xfree(text);
-          return -1;
-        }
-        snprintf(def->config_names[def->config_count],
-                 sizeof(def->config_names[0]), "%s", name);
-        if (kind[0]) {
-          if (def->typed_config_index) {
-            snprintf(err, err_len,
-                     "%s: only one typed config entry is supported",
-                     manifest);
+                                       sizeof(kind)) == 0) {
+          if (strcmp(kind, "existing_directory") == 0)
+            def->config_kinds[def->config_count] =
+                RT_ACTION_CONFIG_EXISTING_DIRECTORY;
+          else if (strcmp(kind, "string") == 0)
+            def->config_kinds[def->config_count] = RT_ACTION_CONFIG_STRING;
+          else {
+            snprintf(err, err_len, "%s: config entry %zu has unknown kind %s",
+                     manifest, i, kind);
             fc_xfree(text);
             return -1;
           }
-          def->typed_config_index =
-              (unsigned char)(def->config_count + 1);
-          snprintf(def->typed_config_key,
-                   sizeof(def->typed_config_key), "%s", key);
-        } else if (strcmp(key, name) != 0) {
+        }
+        snprintf(def->config_names[def->config_count],
+                 sizeof(def->config_names[0]), "%s", name);
+        snprintf(def->config_keys[def->config_count],
+                 sizeof(def->config_keys[0]), "%s", key);
+        if (!kind[0] && strcmp(key, name) != 0) {
           snprintf(err, err_len,
                    "%s: config key overrides require a typed config entry",
                    manifest);
@@ -384,49 +347,45 @@ static int load_action_contract(const char *area_id, const char *dir,
   }
   {
     JsonRef poll_arg;
-    int has_poll_arg = json_ref_object_get(&root, "poll_handle_arg",
-                                           &poll_arg) == 0;
-    if (has_poll_arg &&
-        (json_ref_string_copy(&poll_arg, def->poll_handle_arg,
-                              sizeof(def->poll_handle_arg)) != 0 ||
-         !is_safe_id(def->poll_handle_arg))) {
+    long long default_timeout = 0, max_timeout = 0;
+    if (json_ref_object_get(&root, "poll_handle_arg", &poll_arg) == 0) {
       snprintf(err, err_len,
-               "%s: poll_handle_arg must name a safe string argument",
+               "%s: poll_handle_arg is no longer supported; managed "
+               "operations complete through the bus completion contract "
+               "(declare default_timeout_ms instead)",
                manifest);
       fc_xfree(text);
       return -1;
     }
-    if (has_poll_arg && !def->managed_operation) {
+    (void)json_ref_object_get_long(&root, "default_timeout_ms",
+                                   &default_timeout);
+    (void)json_ref_object_get_long(&root, "max_timeout_ms", &max_timeout);
+    if (def->managed_operation && default_timeout <= 0) {
       snprintf(err, err_len,
-               "%s: poll_handle_arg requires contract managed_operation",
+               "%s: contract managed_operation requires default_timeout_ms "
+               "(the action-owned completion deadline)",
                manifest);
       fc_xfree(text);
       return -1;
     }
-    if (has_poll_arg && poll_handle_arg_reserved(def->poll_handle_arg)) {
+    if (!def->managed_operation && (default_timeout > 0 || max_timeout > 0)) {
       snprintf(err, err_len,
-               "%s: poll_handle_arg cannot use reserved runtime argument %s; "
-               "fix: name the action's distinct string handle property",
-               manifest, def->poll_handle_arg);
-      fc_xfree(text);
-      return -1;
-    }
-    if (has_poll_arg &&
-        !poll_handle_schema_valid(&schema, def->poll_handle_arg)) {
-      snprintf(err, err_len,
-               "%s: poll_handle_arg %s must name a string property in args_schema",
-               manifest, def->poll_handle_arg);
-      fc_xfree(text);
-      return -1;
-    }
-    if (has_poll_arg && !poll_op_schema_valid(&schema)) {
-      snprintf(err, err_len,
-               "%s: poll_handle_arg requires args_schema.properties.op "
-               "to be a string enum containing \"poll\"",
+               "%s: default_timeout_ms/max_timeout_ms require contract "
+               "managed_operation",
                manifest);
       fc_xfree(text);
       return -1;
     }
+    if (max_timeout > 0 && max_timeout < default_timeout) {
+      snprintf(err, err_len,
+               "%s: max_timeout_ms must be >= default_timeout_ms",
+               manifest);
+      fc_xfree(text);
+      return -1;
+    }
+    def->default_timeout_ms = (int)default_timeout;
+    def->max_timeout_ms =
+        (int)(max_timeout > 0 ? max_timeout : default_timeout);
   }
   if (parse_exec(&root, def, err, err_len) != 0) {
     fc_xfree(text);
@@ -480,29 +439,54 @@ static int append_action(ActionScan *scan, const RtActionDef *def) {
 
 static int cache_typed_config(RtActionRegistry *reg, RtActionDef *def,
                               char *err, size_t err_len) {
-  if (def && def->typed_config_index) {
-    int i = (int)def->typed_config_index - 1;
+  if (!def) return 0;
+  for (int i = 0; i < def->config_count; ++i) {
     char configured[PATH_MAX] = "";
-    char canonical[PATH_MAX];
+    char canonical[PATH_MAX] = "";
     struct stat st;
     int found;
     RtActionCachedConfig *entry;
+    RtActionConfigKind kind = (RtActionConfigKind)def->config_kinds[i];
+    const char *key = def->config_keys[i][0]
+                          ? def->config_keys[i]
+                          : def->config_names[i];
+    if (kind == RT_ACTION_CONFIG_PLAIN) continue;
     found = action_config_value(def, i, configured, sizeof(configured));
-    if (!found) {
-      if (def->config_required[i]) {
+    if (found < 0) {
+      if (kind == RT_ACTION_CONFIG_EXISTING_DIRECTORY)
         snprintf(err, err_len,
-                 "%s: actions.%s.%s is required and must name an existing directory",
-                 def->manifest_path, def->id, def->typed_config_key);
+                 "%s: actions.%s.%s must name an existing directory; fix the deployment config",
+                 def->manifest_path, def->id, key);
+      else
+        snprintf(err, err_len,
+                 "%s: actions.%s.%s must be a non-empty string",
+                 def->manifest_path, def->id, key);
+      return -1;
+    }
+    if (found == 0) {
+      if (def->config_required[i]) {
+        if (kind == RT_ACTION_CONFIG_EXISTING_DIRECTORY)
+          snprintf(err, err_len,
+                   "%s: actions.%s.%s is required and must name an existing directory",
+                   def->manifest_path, def->id, key);
+        else
+          snprintf(err, err_len,
+                   "%s: actions.%s.%s is required and must be a non-empty string",
+                   def->manifest_path, def->id, key);
         return -1;
       }
-      return 0;
+      continue;
     }
-    if (!realpath(configured, canonical) ||
-        stat(canonical, &st) != 0 || !S_ISDIR(st.st_mode)) {
-      snprintf(err, err_len,
-               "%s: actions.%s.%s must name an existing directory; fix the deployment config",
-               def->manifest_path, def->id, def->typed_config_key);
-      return -1;
+    if (kind == RT_ACTION_CONFIG_EXISTING_DIRECTORY) {
+      if (!realpath(configured, canonical) ||
+          stat(canonical, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        snprintf(err, err_len,
+                 "%s: actions.%s.%s must name an existing directory; fix the deployment config",
+                 def->manifest_path, def->id, key);
+        return -1;
+      }
+    } else {
+      snprintf(canonical, sizeof(canonical), "%s", configured);
     }
     if (!reg || reg->cached_config_count >= RT_ACTION_TYPED_CONFIG_MAX) {
       snprintf(err, err_len,
@@ -512,7 +496,7 @@ static int cache_typed_config(RtActionRegistry *reg, RtActionDef *def,
     }
     entry = &reg->cached_configs[reg->cached_config_count++];
     snprintf(entry->action_id, sizeof(entry->action_id), "%s", def->id);
-    snprintf(entry->key, sizeof(entry->key), "%s", def->typed_config_key);
+    snprintf(entry->key, sizeof(entry->key), "%s", key);
     snprintf(entry->value, sizeof(entry->value), "%s", canonical);
   }
   return 0;
@@ -658,6 +642,36 @@ static int scan_actions_tree(ActionScan *scan) {
   return rc;
 }
 
+/* The deployment's `force_disable` list masks registered actions without
+ * touching floop files: allowlists keep declaring intent, the mask says
+ * what this deployment currently runs. Entries are action ids (never
+ * directory groupings, which are display-only). An id the registry does
+ * not hold is inert — an absent action needs no disabling — so one config
+ * stays portable across deployment branches. */
+static void apply_force_disable(RtActionRegistry *reg) {
+  char *text = NULL;
+  JsonRef root, list, entry;
+  if (fs_read_text("config/floofclaw_config.json", &text,
+                   FS_READ_TEXT_DEFAULT_CAP) != 0 || !text)
+    return;
+  if (json_ref_first_object(text, &root) == 0 &&
+      json_ref_object_get_array(&root, "force_disable", &list) == 0) {
+    for (size_t i = 0; i < json_ref_array_size(&list); ++i) {
+      char id[RT_SMALL];
+      if (json_ref_array_get(&list, i, &entry) != 0 ||
+          json_ref_string_copy(&entry, id, sizeof(id)) != 0)
+        continue;
+      for (size_t j = 0; j < reg->count; ++j) {
+        if (strcmp(reg->defs[j].id, id) == 0) {
+          reg->defs[j].force_disabled = 1;
+          break;
+        }
+      }
+    }
+  }
+  free(text);
+}
+
 int rt_action_registry_load(RtActionRegistry *reg, char *err, size_t err_len) {
   ActionScan scan;
   if (!reg) return -1;
@@ -672,6 +686,7 @@ int rt_action_registry_load(RtActionRegistry *reg, char *err, size_t err_len) {
     if (err) snprintf(err, err_len, "action registry loaded zero enabled actions");
     return -1;
   }
+  apply_force_disable(reg);
   for (size_t i = 0; i < reg->count; ++i) {
     if (cache_typed_config(reg, &reg->defs[i], err, err_len) != 0)
       return -1;
@@ -849,6 +864,41 @@ static int render_available_action(const RtActionDef *def, int visible,
   return 0;
 }
 
+int rt_action_render_registry(const RtActionRegistry *reg,
+                              char *out, size_t out_len) {
+  size_t pos = 0;
+  int visible = 0;
+  if (!reg || !out || !out_len) return -1;
+  out[0] = '\0';
+  if (rt_append_text(out, out_len, &pos, "[") != 0) return -1;
+  for (size_t i = 0; i < reg->count; ++i) {
+    const RtActionDef *def = &reg->defs[i];
+    if (def->force_disabled) {
+      /* The operator listing states the whole registry, mask included --
+       * only model-facing catalogs omit masked actions. */
+      char id[RT_MED], desc[RT_LARGE], header[RT_LARGE];
+      int n;
+      if (json_escape(def->id, id, sizeof(id)) != 0 ||
+          json_escape(def->description, desc, sizeof(desc)) != 0)
+        return -1;
+      n = snprintf(header, sizeof(header),
+                   "%s\n  {\n    \"name\": \"%s\",\n"
+                   "    \"force_disabled\": true,\n"
+                   "    \"description\": \"%s\",\n    \"args\": ",
+                   visible ? "," : "", id, desc);
+      if (n < 0 || (size_t)n >= sizeof(header) ||
+          rt_append_text(out, out_len, &pos, header) != 0 ||
+          rt_append_text(out, out_len, &pos, def->args_schema) != 0 ||
+          rt_append_text(out, out_len, &pos, "\n  }") != 0)
+        return -1;
+    } else if (render_available_action(def, visible, out, out_len, &pos) != 0) {
+      return -1;
+    }
+    visible++;
+  }
+  return rt_append_text(out, out_len, &pos, visible ? "\n]" : "]");
+}
+
 int rt_action_render_available(const RtActionRegistry *reg, const RtAgentMeta *meta,
                               char *out, size_t out_len) {
   size_t pos = 0;
@@ -860,11 +910,14 @@ int rt_action_render_available(const RtActionRegistry *reg, const RtAgentMeta *m
     /* agent.json order is product policy. Resolve each configured entry back
      * to authoritative manifests without string matching on the hot path.
      * all_actions expands in place and deliberately does not deduplicate
-     * explicit entries; overlap is visible configuration, not renderer policy. */
+     * explicit entries; overlap is visible configuration, not renderer policy.
+     * Force-disabled entries stay listed in the allowlist but never reach
+     * the rendered catalog. */
     for (size_t i = 0; i < meta->action_count; ++i) {
       unsigned int id = meta->action_ids[i];
       if (id == RT_ACTION_PRESENT_ALL) {
         for (size_t j = 0; j < reg->count; ++j) {
+          if (reg->defs[j].force_disabled) continue;
           if (render_available_action(&reg->defs[j], visible,
                                       out, out_len, &pos) != 0)
             return -1;
@@ -872,14 +925,16 @@ int rt_action_render_available(const RtActionRegistry *reg, const RtAgentMeta *m
         }
       } else {
         const RtActionDef *def = id < reg->count ? &reg->defs[id] : NULL;
-        if (!def ||
-            render_available_action(def, visible, out, out_len, &pos) != 0)
+        if (!def) return -1;
+        if (def->force_disabled) continue;
+        if (render_available_action(def, visible, out, out_len, &pos) != 0)
           return -1;
         visible++;
       }
     }
   } else if (meta) {
     for (size_t i = 0; i < reg->count; ++i) {
+      if (reg->defs[i].force_disabled) continue;
       if (render_available_action(&reg->defs[i], visible,
                                   out, out_len, &pos) != 0)
         return -1;
@@ -912,6 +967,7 @@ int rt_action_render_allowed_ids(const RtActionRegistry *reg,
     char escaped[RT_MED], item[RT_MED + 4];
     const RtActionDef *def = &reg->defs[i];
     int n;
+    if (def->force_disabled) continue;
     if (!rt_agent_allows_action(meta, def)) continue;
     if (json_escape(def->id, escaped, sizeof(escaped)) != 0) return -1;
     n = snprintf(item, sizeof(item), "%s\"%s\"", visible ? "," : "",

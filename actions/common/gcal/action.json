@@ -13,10 +13,9 @@
       "op": {
         "type": "string",
         "enum": [
-          "start",
-          "poll"
+          "start"
         ],
-        "description": "Use start for every model-selected call. poll is runtime-owned and must never be selected by the model."
+        "description": "Use start for every call; gcal finishes synchronously."
       },
       "kind": {
         "type": "string",
@@ -116,10 +115,6 @@
             "maxItems": 100
           }
         }
-      },
-      "handle": {
-        "type": "string",
-        "description": "Runtime-only managed-operation handle used with op:poll; models must omit it."
       }
     },
     "allOf": [
@@ -137,23 +132,6 @@
         "then": {
           "required": [
             "kind"
-          ]
-        }
-      },
-      {
-        "if": {
-          "required": [
-            "op"
-          ],
-          "properties": {
-            "op": {
-              "const": "poll"
-            }
-          }
-        },
-        "then": {
-          "required": [
-            "handle"
           ]
         }
       },
@@ -292,5 +270,7 @@
     "auth.sh"
   ],
   "timeout_ms": 60000,
-  "contract": "managed_operation"
+  "contract": "managed_operation",
+  "default_timeout_ms": 300000,
+  "max_timeout_ms": 600000
 }

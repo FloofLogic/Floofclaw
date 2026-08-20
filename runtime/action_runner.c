@@ -355,6 +355,16 @@ int rt_action_runner_recover_started(RtRun *r) {
             "gateway stopped, so its outside-world effect will not be "
             "replayed",
             action[0] ? action : "(unknown action)");
+        /* A preallocated managed-operation record for this request must
+         * close with the ambiguity blocker as its terminal truth —
+         * otherwise the deadline would later add a second, conflicting
+         * timeout consequence for the same request. */
+        if (def && def->managed_operation) {
+          char op_id[RT_SMALL];
+          if (rt_operation_id_for_request(request_id, op_id,
+                                          sizeof(op_id)) == 0)
+            (void)rt_operation_close_without_result(op_id);
+        }
         if (task_id[0] && work_rev > 0 && trigger_event_id[0]) {
           blocked = rt_task_block_bound_work(
               &r->ctx, task_id, work_rev, request_id, action,
@@ -405,6 +415,17 @@ static int validate_pending_action(RtRun *r, RtPendingAction *p,
                r, p->request_id, p->action, p->task_id, "unknown_action",
                "Action is not registered.", "[]", p->sig) == 0 ? -1 : -2;
   }
+  /* The catalog renderer already hides force-disabled actions; a call that
+   * arrives anyway (stale context, hallucinated id) is rejected with the
+   * deployment fact rather than executed. The action_cli transport is the
+   * operator's own hands — `fclaw action exec` is how setup gets verified
+   * before an id is removed from force_disable — so it bypasses the mask. */
+  if (def->force_disabled && strcmp(p->source_agent, "action_cli") != 0) {
+    return rt_action_emit_rejected(
+               r, p->request_id, p->action, p->task_id, "force_disabled",
+               "Action is listed in config force_disable.", "[]",
+               p->sig) == 0 ? -1 : -2;
+  }
   if (!rt_agent_allows_action(meta, def)) {
     return rt_action_emit_rejected(
                r, p->request_id, p->action, p->task_id, "not_allowed",
@@ -447,20 +468,6 @@ static int validate_pending_action(RtRun *r, RtPendingAction *p,
    * p->args_json). */
   if (p->args_json && p->args_json[0])
     (void)rt_action_coerce_args(def->args_schema, p->args_json, strlen(p->args_json) + 1U);
-  if (p->trigger_event_id[0] && def->managed_operation) {
-    char op[RT_SMALL] = "";
-    if (rt_json_get_string(p->args_json && p->args_json[0]
-                               ? p->args_json : "{}",
-                           "op", op, sizeof(op)) == 0 &&
-        strcmp(op, "poll") == 0) {
-      return rt_action_emit_rejected(
-                 r, p->request_id, p->action, p->task_id,
-                 "native_operation_poller_required",
-                 "Managed-operation polling is runtime-owned; choose the "
-                 "work action, not op=poll.",
-                 "[]", p->sig) == 0 ? -1 : -2;
-    }
-  }
   if (rt_action_validate_args(def, p->args_json && p->args_json[0] ? p->args_json : "{}",
                              errors, sizeof(errors),
                              message, sizeof(message)) != 0) {

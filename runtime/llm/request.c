@@ -476,6 +476,14 @@ static int serialize_openai_responses(const LlmProfile *profile,
     }
     if (writer_text(w, "]}]") != 0) return -1;
   }
+  /* Effort passes through unvalidated; the provider is the authority on
+   * which values a model accepts, so e.g. "minimal" is not filtered here. */
+  if (profile->effort[0]) {
+    if (writer_text(w, ",\"reasoning\":{\"effort\":") != 0 ||
+        writer_json_string(w, profile->effort) != 0 ||
+        writer_text(w, "}") != 0)
+      return -1;
+  }
   return writer_text(w,
                      ",\"temperature\":0,\"store\":false,\"stream\":false}");
 }

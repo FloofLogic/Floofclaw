@@ -1,29 +1,33 @@
 {
   "id": "manage_hermes",
-  "description": "Run a Hermes Agent job as a managed external operation. Call op:start with task, then let the operation driver poll with op:poll and op_id. The adapter uses HERMES_API_URL and the API_SERVER_KEY bearer credential from its environment; never put secrets in action args.",
+  "description": "Run a Hermes Agent job as a managed external operation. op:start submits the job and detaches a local completion waiter; the result returns through the runtime's bus completion contract. The adapter uses HERMES_API_URL and the API_SERVER_KEY bearer credential from its environment; never put secrets in action args.",
   "outside_world": true,
   "args_schema": {
     "type": "object",
-    "required": ["op"],
+    "required": [
+      "op"
+    ],
     "additionalProperties": false,
     "properties": {
       "op": {
         "type": "string",
-        "enum": ["start", "poll"],
-        "description": "Start a Hermes run or poll an existing managed-operation handle."
+        "enum": [
+          "start"
+        ],
+        "description": "Start a Hermes run."
       },
       "task": {
         "type": "string",
         "description": "Task text. Required with op:start."
-      },
-      "op_id": {
-        "type": "string",
-        "description": "Opaque managed-operation handle. Required with op:poll."
       }
     }
   },
-  "exec": ["bash", "run.sh"],
+  "exec": [
+    "bash",
+    "run.sh"
+  ],
   "timeout_ms": 30000,
   "contract": "managed_operation",
-  "poll_handle_arg": "op_id"
+  "default_timeout_ms": 600000,
+  "max_timeout_ms": 3600000
 }

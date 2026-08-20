@@ -359,11 +359,50 @@ int test_cleanup_fixtures(void) {
   return rc;
 }
 
+static int test_reset_workspace_once(void);
+
+/* The checkout ships config/floofclaw_config.json with the setup-needing
+ * common actions in `force_disable` — deployment truth, not test truth. A
+ * test that renders or dispatches one of those actions swaps in a neutral
+ * config with an empty mask, and puts the shipped file back before
+ * returning because every later test in the process reads the same path. */
+int test_config_enable_all(char **saved) {
+  if (saved) {
+    *saved = NULL;
+    (void)test_read_file("config/floofclaw_config.json", saved);
+  }
+  return test_write_file("config/floofclaw_config.json",
+                         "{\"bot_name\":\"FloofClaw\","
+                         "\"default_floop\":\"hello\","
+                         "\"force_disable\":[]}\n");
+}
+
+void test_config_restore(char *saved) {
+  if (!saved) return;
+  (void)test_write_file("config/floofclaw_config.json", saved);
+  free(saved);
+}
+
 int test_reset_workspace(void) {
   /* Skip the gateway-stop probe — integration tests run in-process
    * and don't start a daemon. If a stale gateway from an earlier
    * dev session is running, the embedded owner lock will detect it
-   * and channel_synchronous will route to the daemon instead. */
+   * and channel_synchronous will route to the daemon instead.
+   *
+   * Bounded retry: a prior test's detached worker runner (session-
+   * detached by design) may still be writing state or a completion
+   * claim while this reset deletes the tree, turning one rm -rf into a
+   * transient ENOTEMPTY. Retrying for up to ~2s absorbs the straggler
+   * instead of failing the NEXT test silently. */
+  int rc = -1;
+  for (int attempt = 0; attempt < 20 && rc != 0; ++attempt) {
+    if (attempt > 0) usleep(100000);
+    rc = test_reset_workspace_once();
+  }
+  return rc;
+}
+
+static int test_reset_workspace_once(void) {
   int rc = 0;
   rc |= test_cleanup_fixtures();
   rc |= test_remove_path("workspace/runs");

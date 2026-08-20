@@ -51,6 +51,13 @@ fi
 
 export FCLAW_MODEL_PROFILES="$PWD/tests/fixtures/smoke/model_profiles_mock.json"
 
+# The shipped config force-disables the setup-needing actions (manage_codex
+# among them); this smoke fakes codex via FCLAW_CODEX_BIN, so enable it the
+# way an operator would. Safe in place: this copy of the tree is isolated.
+cat > config/floofclaw_config.json <<'CFG'
+{ "bot_name": "FloofClaw", "default_floop": "hello", "force_disable": [] }
+CFG
+
 openclaw_prompt="How are you doing, what's your name, and please look up example.com on the internet and write a short poem about it in POEM.md."
 modern_prompt="Make a small Frogger web app at frogger.html — single page, playable in the browser."
 

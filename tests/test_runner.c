@@ -93,8 +93,10 @@ static const BudgetOverride kBudgetOverrides[] = {
   /* Builds a registry-max catalog, captures two mock provider requests,
    * and exercises duplicate/unknown/overflow startup boundaries. */
   { "configured_action_catalog_is_ordered_faithful_growable_and_loud", 5000 },
+  { "force_disabled_action_is_masked_rejected_and_still_declared", 5000 },
   { "deterministic_work_controller_binding_and_terminal_controls", 5000 },
-  { "deterministic_operation_poller_uses_durable_handle_contract", 20000 },
+  { "deterministic_completion_claims_use_durable_operation_contract", 20000 },
+  { "operation_completion_deadline_and_recovery_contract", 20000 },
   { "default_floofclaw_admitted_work_reaches_result_manager_reply", 20000 },
   /* Each drives the shipped floop through one failed subprocess attempt and
    * a later semantic controller turn using hermetic provider responses. */
@@ -129,7 +131,7 @@ static const BudgetOverride kBudgetOverrides[] = {
   { "openclaw_same_main_claw_completes_multi_tool_chain", 5000 },
   { "openclaw_action_list_discovers_wildcard_grant", 5000 },
   { "one_pass_run_does_not_complete_input_task", 3000 },
-  { "openclaw_progress_and_input_task_poll_reach_final_reply", 10000 },
+  { "openclaw_progress_and_detached_completion_reach_final_reply", 10000 },
   { "openclaw_long_operation_result_reaches_same_main_claw", 3000 },
   { "openclaw_managed_failure_and_rejection_return_to_main_claw", 5000 },
   { "openclaw_main_claw_owns_affair_review", 3000 },
@@ -145,7 +147,7 @@ static const BudgetOverride kBudgetOverrides[] = {
    * deliberate worker sleeps. */
   { "opgeneric_fake_one_full_lifecycle",               8000 },
   { "opgeneric_rebind_fake_two_config_only",           8000 },
-  { "opgeneric_stale_poll_after_terminal_is_noop",     10000 },
+  { "opgeneric_stale_claim_after_terminal_is_noop",     10000 },
   { "opgeneric_terminal_attempt_never_restarts_itself", 10000 },
   { "opgeneric_retry_reuses_committed_calls",          8000 },
   { "opgeneric_serialize_contexts_orders_runs",        10000 },

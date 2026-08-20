@@ -60,7 +60,7 @@ test -f workspace/memory/state/operations.json
 
 while IFS= read -r request_id; do
   [[ -n "$request_id" ]] || continue
-  grep -Fq "\"handle\":\"$request_id\"" workspace/memory/state/operations.json
+  grep -Fq "\"handle\":\"op_$request_id\"" workspace/memory/state/operations.json
 done <<<"$request_ids"
 
 if grep -q '"handle":"intr_' workspace/memory/state/operations.json; then

@@ -102,7 +102,10 @@ static int write_exec(const char *path, const char *text) {
 
 /* actions/testfx: two interchangeable fake managed-operation adapters.
  * fake_one/fake_two differ only in their state dir, handle prefix, and
- * result wording — proving handler substitution is config-only. */
+ * result wording — proving handler substitution is config-only. Each
+ * start detaches a fake worker that submits its completion through the
+ * public `fclaw operation complete` helper using the trusted env
+ * capability, exercising the full worker-side callback path. */
 static int write_fake_adapter(const char *id, const char *statedir, const char *prefix,
                               const char *wording) {
   char path[512], body[4096];
@@ -113,16 +116,15 @@ static int write_fake_adapter(const char *id, const char *statedir, const char *
            "  \"description\": \"Test managed-operation adapter.\",\n"
            "  \"outside_world\": false,\n"
            "  \"contract\": \"managed_operation\",\n"
-           "  \"poll_handle_arg\": \"op_id\",\n"
+           "  \"default_timeout_ms\": 60000,\n"
            "  \"args_schema\": {\n"
            "    \"type\": \"object\",\n"
            "    \"required\": [\"op\"],\n"
            "    \"additionalProperties\": false,\n"
            "    \"properties\": {\n"
-           "      \"op\": {\"type\": \"string\", \"enum\": [\"start\", \"poll\"],"
-           " \"description\": \"start or poll\"},\n"
-           "      \"task\": {\"type\": \"string\", \"description\": \"work text\"},\n"
-           "      \"op_id\": {\"type\": \"string\", \"description\": \"operation handle\"}\n"
+           "      \"op\": {\"type\": \"string\", \"enum\": [\"start\"],"
+           " \"description\": \"start\"},\n"
+           "      \"task\": {\"type\": \"string\", \"description\": \"work text\"}\n"
            "    }\n"
            "  },\n"
            "  \"exec\": [\"bash\", \"run.sh\"],\n"
@@ -134,38 +136,36 @@ static int write_fake_adapter(const char *id, const char *statedir, const char *
            "#!/usr/bin/env bash\n"
            "set -euo pipefail\n"
            "input=\"$(cat)\"\n"
-           "python3 - \"$input\" <<'PY'\n"
+           "root=\"${FCLAW_WORKSPACE_ROOT:-workspace}\"\n"
+           "d=\"$root/%s\"\n"
+           "mkdir -p \"$d\"\n"
+           "h=\"$(python3 - \"$input\" <<'PY'\n"
            "import json, os, sys\n"
            "req = json.loads(sys.argv[1])\n"
            "args = req.get(\"args\", {})\n"
-           "op = args.get(\"op\", \"\")\n"
            "root = os.environ.get(\"FCLAW_WORKSPACE_ROOT\", \"workspace\")\n"
            "d = os.path.join(root, \"%s\")\n"
-           "os.makedirs(d, exist_ok=True)\n"
-           "def out(result):\n"
-           "    print(json.dumps({\"events\": [], \"result\": result, \"error\": None}))\n"
-           "if op == \"start\":\n"
-           "    c = os.path.join(d, \"starts\")\n"
-           "    n = int(open(c).read()) if os.path.exists(c) else 0\n"
-           "    n += 1\n"
-           "    open(c, \"w\").write(str(n))\n"
-           "    h = \"%s_%%03d\" %% n\n"
-           "    open(os.path.join(d, h + \".task\"), \"w\").write(args.get(\"task\", \"\"))\n"
-           "    open(os.path.join(d, h + \".polls\"), \"w\").write(\"0\")\n"
-           "    out({\"status\": \"running\", \"handle\": h})\n"
-           "elif op == \"poll\":\n"
-           "    h = args.get(\"op_id\") or args.get(\"handle\") or \"\"\n"
-           "    p = int(open(os.path.join(d, h + \".polls\")).read()) + 1\n"
-           "    open(os.path.join(d, h + \".polls\"), \"w\").write(str(p))\n"
-           "    task = open(os.path.join(d, h + \".task\")).read()\n"
-           "    if p >= 2:\n"
-           "        out({\"status\": \"finished\", \"handle\": h, \"text\": \"%s: \" + task})\n"
-           "    else:\n"
-           "        out({\"status\": \"running\", \"handle\": h})\n"
-           "else:\n"
-           "    print(json.dumps({\"events\": [], \"result\": {}, \"error\": {\"message\": \"bad op\"}}))\n"
-           "PY\n",
-           statedir, prefix, wording);
+           "c = os.path.join(d, \"starts\")\n"
+           "n = int(open(c).read()) if os.path.exists(c) else 0\n"
+           "n += 1\n"
+           "open(c, \"w\").write(str(n))\n"
+           "h = \"%s_%%03d\" %% n\n"
+           "open(os.path.join(d, h + \".task\"), \"w\").write(args.get(\"task\", \"\"))\n"
+           "print(h)\n"
+           "PY\n"
+           ")\"\n"
+           "task=\"$(cat \"$d/$h.task\")\"\n"
+           "# Detached fake worker: submits the completion claim through the\n"
+           "# public helper. The WHOLE subshell redirects away from the\n"
+           "# action's pipes so the job's stdout closes the moment this\n"
+           "# script exits, letting the driver record the worker handle\n"
+           "# before the claim lands.\n"
+           "( sleep 0.45; \"${FCLAW_BIN:-fclaw}\" operation complete -a \\\n"
+           "    --status succeeded --text \"%s: $task\" ) \\\n"
+           "    >>\"$d/$h.completion.log\" 2>&1 </dev/null &\n"
+           "printf '{\"events\":[],\"result\":{\"status\":\"running\","
+           "\"handle\":\"%%s\"},\"error\":null}\\n' \"$h\"\n",
+           statedir, statedir, prefix, wording);
   return write_exec(path, body);
 }
 
@@ -181,8 +181,7 @@ static int setup_testfx_actions(void) {
 /* Generic one-shot floop bound to a configurable handler. The manager
  * is a plain script: user_message with work in it -> create work;
  * anything else -> no calls. */
-static int setup_opgeneric_floop(const char *floop, const char *handler,
-                                 int poll_interval_ms) {
+static int setup_opgeneric_floop(const char *floop, const char *handler) {
   char path[512], body[2048];
   int rc = 0;
   snprintf(path, sizeof(path), "floops/%s/loop.json", floop);
@@ -193,15 +192,14 @@ static int setup_opgeneric_floop(const char *floop, const char *handler,
            "  \"description\": \"generic managed-operation lifecycle fixture\",\n"
            "  \"one_pass\": true,\n"
            "  \"serialize_contexts\": true,\n"
-           "  \"poll_interval_ms\": %d,\n"
            "  \"steps\": [\n"
            "    {\"id\": \"manage\", \"type\": \"agent\", \"agent\": \"opg_manager\",\n"
            "     \"gate\": \"event_kind:user_message,operation_result\"},\n"
            "    {\"id\": \"dispatch\", \"type\": \"builtin\", \"builtin\": \"action_runner\"},\n"
            "    {\"id\": \"workers\", \"type\": \"agent\", \"agent\": \"workers\",\n"
-           "     \"gate\": \"event_kind:user_message,operation_poll,operation_result\"}\n"
+           "     \"gate\": \"event_kind:user_message,operation_result\"}\n"
            "  ]\n"
-           "}\n", floop, poll_interval_ms);
+           "}\n", floop);
   rc |= test_write_file(path, body);
   snprintf(path, sizeof(path), "floops/%s/agents/opg_manager/agent.json", floop);
   rc |= test_write_file(path,
@@ -232,34 +230,36 @@ static int setup_opgeneric_floop(const char *floop, const char *handler,
   return rc;
 }
 
-static int write_a3_adapter(const char *id, const char *prefix,
-                            const char *handle_arg, int declare_poll_arg) {
-  char path[512], body[8192], metadata[256] = "";
-  if (declare_poll_arg)
-    snprintf(metadata, sizeof(metadata),
-             "  \"poll_handle_arg\": \"%s\",\n", handle_arg);
+/* A3 deterministic completion fixture: start records a worker handle
+ * and returns running (or finished with FCLAW_A3_FINISH_IMMEDIATE=1).
+ * It never self-completes — tests submit completion claims
+ * deterministically through the runtime's own publisher, so no timing
+ * or polling participates. It also records the completion capability it
+ * received through the trusted env so tests can prove and use it. */
+static int write_a3_adapter_with_deadline(const char *id, const char *prefix,
+                                          int default_timeout_ms) {
+  char path[512], body[8192];
   snprintf(path, sizeof(path), "actions/testfx/%s/action.json", id);
   snprintf(body, sizeof(body),
            "{\n"
            "  \"id\": \"%s\",\n"
-           "  \"description\": \"A3 deterministic poll fixture.\",\n"
+           "  \"description\": \"A3 deterministic completion fixture.\",\n"
            "  \"outside_world\": false,\n"
            "  \"contract\": \"managed_operation\",\n"
-           "%s"
+           "  \"default_timeout_ms\": %d,\n"
            "  \"args_schema\": {\n"
            "    \"type\": \"object\",\n"
            "    \"required\": [\"op\"],\n"
            "    \"additionalProperties\": false,\n"
            "    \"properties\": {\n"
-           "      \"op\": {\"type\":\"string\",\"enum\":[\"start\",\"poll\"]},\n"
-           "      \"task\": {\"type\":\"string\"},\n"
-           "      \"%s\": {\"type\":\"string\"}\n"
+           "      \"op\": {\"type\":\"string\",\"enum\":[\"start\"]},\n"
+           "      \"task\": {\"type\":\"string\"}\n"
            "    }\n"
            "  },\n"
            "  \"exec\": [\"bash\", \"run.sh\"],\n"
            "  \"timeout_ms\": 30000\n"
            "}\n",
-           id, metadata, handle_arg);
+           id, default_timeout_ms);
   if (test_write_file(path, body) != 0) return -1;
   snprintf(path, sizeof(path), "actions/testfx/%s/run.sh", id);
   snprintf(body, sizeof(body),
@@ -282,6 +282,8 @@ static int write_a3_adapter(const char *id, const char *prefix,
            "  n=\"$(bump starts)\"\n"
            "  printf -v h '%s_%%03d' \"$n\"\n"
            "  printf '%%s' \"$h\" > \"$d/handle\"\n"
+           "  printf '%%s' \"${FCLAW_OPERATION_ID:-}\" > \"$d/operation_id\"\n"
+           "  printf '%%s' \"${FCLAW_COMPLETION_TOKEN:-}\" > \"$d/token\"\n"
            "  if [[ \"${FCLAW_A3_FINISH_IMMEDIATE:-}\" == 1 ]]; then\n"
            "    printf '{\"events\":[],\"result\":{\"status\":\"finished\","
            "\"handle\":\"%%s\",\"text\":\"A3 immediate complete\"},"
@@ -290,20 +292,16 @@ static int write_a3_adapter(const char *id, const char *prefix,
            "    printf '{\"events\":[],\"result\":{\"status\":\"running\","
            "\"handle\":\"%%s\"},\"error\":null}\\n' \"$h\"\n"
            "  fi\n"
-           "elif [[ \"$input\" == *'\"op\":\"poll\"'* ]]; then\n"
-           "  h=\"$(printf '%%s' \"$input\" | sed -n "
-           "'s/.*\"%s\":\"\\([^\"]*\\)\".*/\\1/p')\"\n"
-           "  bump polls >/dev/null\n"
-           "  printf '%%s' \"$h\" > \"$d/last_poll_handle\"\n"
-           "  printf '{\"events\":[],\"result\":{\"status\":\"finished\","
-           "\"handle\":\"%%s\",\"text\":\"A3 fixture complete\"},"
-           "\"error\":null}\\n' \"$h\"\n"
            "else\n"
            "  printf '%%s\\n' '{\"events\":[],\"result\":{},"
            "\"error\":{\"message\":\"bad op\"}}'\n"
            "fi\n",
-           id, prefix, handle_arg);
+           id, prefix);
   return write_exec(path, body);
+}
+
+static int write_a3_adapter(const char *id, const char *prefix) {
+  return write_a3_adapter_with_deadline(id, prefix, 60000);
 }
 
 static int write_a3_controller_catalog(const char *floop,
@@ -327,11 +325,7 @@ static int write_a3_floop(const char *floop, const char *action,
                           int controller_enabled) {
   char path[512], body[4096];
   const char *controller_gate =
-      !controller_enabled
-          ? "event_kind:disabled"
-          : strcmp(action, "a3_missing_poll") == 0
-                ? "work_consequence"
-                : "event_kind:user_message";
+      controller_enabled ? "event_kind:user_message" : "event_kind:disabled";
   int rc = 0;
   snprintf(path, sizeof(path), "floops/%s/loop.json", floop);
   snprintf(body, sizeof(body),
@@ -339,14 +333,10 @@ static int write_a3_floop(const char *floop, const char *action,
             * revision while an action is in flight and require the
             * controller to select again for it inside the same run --
             * that is the "cycle and let the agents observe the new state"
-            * behavior, which only a looping profile has. The fixture used
-            * to claim one_pass and still loop, because the engine ignored
-            * the declaration at the mid-profile wait. It no longer does,
-            * so the fixture declares what it actually relies on. */
+            * behavior, which only a looping profile has. */
            "{\n"
-           "  \"version\":1,\"name\":\"%s\",\"description\":\"A3 poll fixture\","
-           "\"one_pass\":false,\"serialize_contexts\":true,"
-           "\"poll_interval_ms\":60000,\n"
+           "  \"version\":1,\"name\":\"%s\",\"description\":\"A3 completion fixture\","
+           "\"one_pass\":false,\"serialize_contexts\":true,\n"
            "  \"steps\":[\n"
            "    {\"id\":\"admit\",\"type\":\"agent\",\"agent\":\"a3_admit\","
            "\"gate\":\"event_kind:user_message\"},\n"
@@ -355,10 +345,6 @@ static int write_a3_floop(const char *floop, const char *action,
            "    {\"id\":\"select\",\"type\":\"agent\",\"agent\":\"a3_controller\","
            "\"gate\":\"%s\"},\n"
            "    {\"id\":\"select.dispatch\",\"type\":\"builtin\","
-           "\"builtin\":\"action_runner\"},\n"
-           "    {\"id\":\"poll\",\"type\":\"agent\",\"agent\":\"operation_poller\","
-           "\"gate\":\"event_kind:operation_poll\"},\n"
-           "    {\"id\":\"poll.dispatch\",\"type\":\"builtin\","
            "\"builtin\":\"action_runner\"}\n"
            "  ]\n"
            "}\n",
@@ -393,10 +379,6 @@ static int write_a3_floop(const char *floop, const char *action,
            "\"args\":{\"op\":\"start\",\"task\":\"do A3 work\"}}]}'\n",
            action);
   rc |= write_exec(path, body);
-  snprintf(path, sizeof(path),
-           "floops/%s/agents/operation_poller/agent.json", floop);
-  rc |= test_write_file(path,
-      "{\"id\":\"operation_poller\",\"executor\":\"native\"}\n");
   return rc;
 }
 
@@ -438,8 +420,7 @@ static int write_a4_floop(const char *floop) {
       "{\n"
       "  \"version\":1,\"name\":\"a4flow\","
       "\"description\":\"A4 product-neutral consequence routing fixture\","
-      "\"one_pass\":true,\"serialize_contexts\":true,"
-      "\"poll_interval_ms\":60000,\n"
+      "\"one_pass\":true,\"serialize_contexts\":true,\n"
       "  \"steps\":[\n"
       "    {\"id\":\"admit\",\"type\":\"agent\",\"agent\":\"a4_admit\","
       "\"gate\":\"event_kind:user_message,affair_review\"},\n"
@@ -448,11 +429,6 @@ static int write_a4_floop(const char *floop) {
       "    {\"id\":\"work.select\",\"type\":\"agent\","
       "\"agent\":\"a4_controller\",\"gate\":\"work_consequence\"},\n"
       "    {\"id\":\"work.dispatch\",\"type\":\"builtin\","
-      "\"builtin\":\"action_runner\"},\n"
-      "    {\"id\":\"poll\",\"type\":\"agent\","
-      "\"agent\":\"operation_poller\","
-      "\"gate\":\"event_kind:operation_poll\"},\n"
-      "    {\"id\":\"poll.dispatch\",\"type\":\"builtin\","
       "\"builtin\":\"action_runner\"},\n"
       "    {\"id\":\"result\",\"type\":\"agent\",\"agent\":\"a4_result\","
       "\"gate\":\"terminal_work_outcome\"},\n"
@@ -527,11 +503,6 @@ static int write_a4_floop(const char *floop) {
       "  echo '{\"calls\":[{\"name\":\"work_complete\","
       "\"args\":{\"summary\":\"both A4 steps are durable\"}}]}'\n"
       "fi\n");
-  snprintf(path, sizeof(path),
-           "floops/%s/agents/operation_poller/agent.json", floop);
-  rc |= test_write_file(
-      path,
-      "{\"id\":\"operation_poller\",\"executor\":\"native\"}\n");
   snprintf(path, sizeof(path), "floops/%s/agents/a4_result/agent.json", floop);
   rc |= test_write_file(
       path,
@@ -877,8 +848,8 @@ int core_web_fetch_terminal_publishes_one_correlated_operation_result(void) {
       }
     }
   }
-  rc |= expect(strcmp(handle, "actionreq_run_001_000005") == 0,
-               "web_fetch reuses its durable request ID as the handle");
+  rc |= expect(strcmp(handle, "op_actionreq_run_001_000005") == 0,
+               "web_fetch uses its preallocated runtime operation id");
   snprintf(handle_needle, sizeof(handle_needle), "\"handle\":\"%s\"", handle);
   rc |= expect_substr(logs, handle_needle,
                       "action terminal and event log share the handle");
@@ -934,20 +905,24 @@ done:
   return rc;
 }
 
-/* Publish a raw operation envelope directly into the bus inbox (the
- * driver normally does this; tests use it to inject stale timers). */
-static int publish_operation_envelope(const char *type, const char *handle,
-                                      const char *action, const char *task_id) {
+/* Publish a raw completion-claim envelope directly into the bus inbox
+ * (workers normally use the helper; tests use it to inject forged,
+ * duplicate, and stale claims deterministically). */
+static int publish_claim_envelope(const char *operation_id,
+                                  const char *token,
+                                  const char *status,
+                                  const char *text) {
   static int seq = 0;
   char path[512], body[1024];
   seq++;
   snprintf(path, sizeof(path), "workspace/bus/inbox/bus_9%05d.json", seq);
   snprintf(body, sizeof(body),
            "{\"event_id\":\"bus_9%05d\",\"ts\":\"2026-07-11T00:00:00Z\","
-           "\"channel\":\"tests\",\"type\":\"%s\","
-           "\"payload\":{\"handle\":\"%s\",\"action\":\"%s\",\"task_id\":\"%s\","
-           "\"context_id\":\"chat:tests\",\"channel\":\"tests\",\"adapter_id\":\"\",\"ref\":null}}\n",
-           seq, type, handle, action, task_id);
+           "\"channel\":\"operations\",\"type\":\"operation_completed\","
+           "\"payload\":{\"operation_id\":\"%s\",\"completion_token\":\"%s\","
+           "\"cause\":\"worker\",\"result\":{\"status\":\"%s\","
+           "\"text\":\"%s\"}}}\n",
+           seq, operation_id, token, status, text);
   return test_write_file(path, body);
 }
 
@@ -997,23 +972,25 @@ static int drive_for_ms(HarnessGateway *g, int ms) {
   return 0;
 }
 
-int deterministic_operation_poller_uses_durable_handle_contract(void) {
+int deterministic_completion_claims_use_durable_operation_contract(void) {
   HarnessGateway *g = NULL;
   RtActionRegistry *registry = NULL;
   RtOperationSnapshot snapshot;
   const RtActionDef *def;
   char registry_err[RT_LARGE] = "";
-  char *logs = NULL, *ops = NULL, *polls = NULL;
-  char first_task_id[RT_SMALL] = "";
+  char *logs = NULL, *ops = NULL;
+  char op_id[RT_SMALL] = "";
+  char token[RT_OPERATION_TOKEN_HEX + 1] = "";
   int rc = 0;
 
-  /* Scenario 1: a handle-style action survives removal from the selecting
-   * controller's catalog. Forged envelope action/task fields are inert. */
+  /* Registry boundary: the polling contract is gone; the completion
+   * contract requires an action-owned deadline. */
+  char *saved_cfg = NULL;
+  rc |= test_config_enable_all(&saved_cfg);
   rc |= fx_reset();
   rc |= setup_testfx_actions();
-  rc |= write_a3_adapter("a3_fake_a", "a3a", "handle", 1);
-  rc |= write_a3_adapter("a3_fake_b", "a3b", "op_id", 1);
-  rc |= write_a3_adapter("a3_missing_poll", "a3m", "op_id", 0);
+  rc |= write_a3_adapter("a3_fake_a", "a3a");
+  rc |= write_a3_adapter("a3_fake_b", "a3b");
   rc |= write_a3_floop("a3poll", "a3_fake_a", 1);
   registry = (RtActionRegistry *)calloc(1, sizeof(*registry));
   rc |= expect(registry != NULL, "allocate A3 action registry fixture");
@@ -1022,18 +999,19 @@ int deterministic_operation_poller_uses_durable_handle_contract(void) {
                                        sizeof(registry_err)) == 0,
                "A3 fixture action registry loads");
   def = rt_action_registry_find(registry, "manage_codex");
-  rc |= expect(def && strcmp(def->poll_handle_arg, "op_id") == 0,
-               "manage_codex declares its legacy op_id poll handle");
+  rc |= expect(def && def->default_timeout_ms > 0 &&
+                   def->max_timeout_ms >= def->default_timeout_ms,
+               "manage_codex declares its completion deadline policy");
   def = rt_action_registry_find(registry, "manage_claude");
-  rc |= expect(def && strcmp(def->poll_handle_arg, "op_id") == 0,
-               "manage_claude declares its legacy op_id poll handle");
+  rc |= expect(def && def->default_timeout_ms > 0,
+               "manage_claude declares its completion deadline policy");
   def = rt_action_registry_find(registry, "manage_hermes");
-  rc |= expect(def && strcmp(def->poll_handle_arg, "op_id") == 0,
-               "manage_hermes declares its legacy op_id poll handle");
-  rc |= test_write_file("actions/testfx/a3_bad_enum/action.json",
-      "{\"id\":\"a3_bad_enum\",\"description\":\"invalid poll schema\","
+  rc |= expect(def && def->default_timeout_ms > 0,
+               "manage_hermes declares its completion deadline policy");
+  rc |= test_write_file("actions/testfx/a3_legacy_poll/action.json",
+      "{\"id\":\"a3_legacy_poll\",\"description\":\"legacy poll metadata\","
       "\"outside_world\":false,\"contract\":\"managed_operation\","
-      "\"poll_handle_arg\":\"op_id\","
+      "\"default_timeout_ms\":60000,\"poll_handle_arg\":\"op_id\","
       "\"args_schema\":{\"type\":\"object\",\"properties\":{"
       "\"op\":{\"type\":\"string\",\"enum\":[\"start\"]},"
       "\"op_id\":{\"type\":\"string\"}}},"
@@ -1041,313 +1019,193 @@ int deterministic_operation_poller_uses_durable_handle_contract(void) {
   registry_err[0] = '\0';
   rc |= expect(rt_action_registry_load(registry, registry_err,
                                        sizeof(registry_err)) != 0,
-               "poll metadata without op=poll fails registry load");
-  rc |= expect_substr(registry_err, "actions/testfx/a3_bad_enum/action.json",
-                      "invalid poll schema error names its manifest");
-  rc |= expect_substr(registry_err, "enum containing \"poll\"",
-                      "invalid poll schema error names the exact fix");
-  rc |= test_remove_path("actions/testfx/a3_bad_enum");
-  rc |= test_write_file("actions/testfx/a3_reserved_handle/action.json",
-      "{\"id\":\"a3_reserved_handle\",\"description\":\"invalid poll key\","
+               "poll_handle_arg fails registry load loudly");
+  rc |= expect_substr(registry_err, "poll_handle_arg is no longer supported",
+                      "legacy poll metadata error names the removal");
+  rc |= test_remove_path("actions/testfx/a3_legacy_poll");
+  rc |= test_write_file("actions/testfx/a3_no_deadline/action.json",
+      "{\"id\":\"a3_no_deadline\",\"description\":\"missing deadline\","
       "\"outside_world\":false,\"contract\":\"managed_operation\","
-      "\"poll_handle_arg\":\"task_id\","
       "\"args_schema\":{\"type\":\"object\",\"properties\":{"
-      "\"op\":{\"type\":\"string\",\"enum\":[\"start\",\"poll\"]},"
-      "\"task_id\":{\"type\":\"string\"}}},"
+      "\"op\":{\"type\":\"string\",\"enum\":[\"start\"]}}},"
       "\"exec\":[\"bash\",\"run.sh\"],\"timeout_ms\":1}\n");
   registry_err[0] = '\0';
   rc |= expect(rt_action_registry_load(registry, registry_err,
                                        sizeof(registry_err)) != 0,
-               "reserved poll handle name fails registry load");
-  rc |= expect_substr(registry_err, "reserved runtime argument task_id",
-                      "reserved poll handle error names the collision");
-  rc |= test_remove_path("actions/testfx/a3_reserved_handle");
-  rc |= test_write_file("actions/testfx/a3_reserved_op/action.json",
-      "{\"id\":\"a3_reserved_op\",\"description\":\"invalid poll key\","
+               "managed contract without default_timeout_ms fails loudly");
+  rc |= expect_substr(registry_err, "default_timeout_ms",
+                      "missing deadline error names the required field");
+  rc |= test_remove_path("actions/testfx/a3_no_deadline");
+  rc |= test_write_file("actions/testfx/a3_bad_max/action.json",
+      "{\"id\":\"a3_bad_max\",\"description\":\"inverted deadline bounds\","
       "\"outside_world\":false,\"contract\":\"managed_operation\","
-      "\"poll_handle_arg\":\"op\","
+      "\"default_timeout_ms\":60000,\"max_timeout_ms\":1000,"
       "\"args_schema\":{\"type\":\"object\",\"properties\":{"
-      "\"op\":{\"type\":\"string\",\"enum\":[\"start\",\"poll\"]}}},"
+      "\"op\":{\"type\":\"string\",\"enum\":[\"start\"]}}},"
       "\"exec\":[\"bash\",\"run.sh\"],\"timeout_ms\":1}\n");
   registry_err[0] = '\0';
   rc |= expect(rt_action_registry_load(registry, registry_err,
                                        sizeof(registry_err)) != 0,
-               "op cannot double as its poll handle argument");
-  rc |= expect_substr(registry_err, "reserved runtime argument op",
-                      "reserved op error names the duplicate-key collision");
-  rc |= test_remove_path("actions/testfx/a3_reserved_op");
+               "max below default fails registry load loudly");
+  rc |= expect_substr(registry_err, "max_timeout_ms must be >=",
+                      "inverted bounds error names the constraint");
+  rc |= test_remove_path("actions/testfx/a3_bad_max");
   free(registry);
   registry = NULL;
 
+  /* Preallocated identity: the start detaches; the durable record is
+   * keyed by the runtime operation id, carries correlation and a
+   * deadline, and holds a bound completion token that reached the
+   * worker only through trusted env. */
   g = harness_gateway_init("a3poll");
-  rc |= expect(g != NULL, "A3 poll floop loads");
+  rc |= expect(g != NULL, "A3 completion floop loads");
   if (!g) return 1;
   rc |= expect(harness_gateway_publish(g, "tests", "create A3 work") == 0,
                "publish A3 work");
   rc |= expect(drive_until_file_contains(
                    g, "workspace/memory/state/operations.json",
-                   "\"handle\":\"a3a_001\"", 8000) == 0,
-               "handle-style operation is durably running");
+                   "\"worker_handle\":\"a3a_001\"", 8000) == 0,
+               "operation is durably running with its worker handle");
   harness_gateway_close(g);
   g = NULL;
-  rc |= expect(rt_operation_snapshot("a3a_001", &snapshot) == 0,
-               "durable operation snapshot resolves by handle");
+  rc |= test_read_file("workspace/memory/state/operations.json", &ops);
+  rc |= expect(ops != NULL, "operation store exists");
+  if (ops) {
+    const char *start = strstr(ops, "\"handle\":\"");
+    if (start) {
+      const char *end;
+      start += strlen("\"handle\":\"");
+      end = strchr(start, '"');
+      if (end && (size_t)(end - start) < sizeof(op_id)) {
+        memcpy(op_id, start, (size_t)(end - start));
+        op_id[end - start] = '\0';
+      }
+    }
+    free(ops);
+    ops = NULL;
+  }
+  rc |= expect(strncmp(op_id, "op_actionreq_", 13) == 0,
+               "operation id is the runtime-owned preallocated identity");
+  rc |= expect(rt_operation_snapshot(op_id, &snapshot) == 0,
+               "durable operation snapshot resolves by operation id");
   rc |= expect(strcmp(snapshot.action, "a3_fake_a") == 0,
                "snapshot owns the selected action");
+  rc |= expect(strcmp(snapshot.worker_handle, "a3a_001") == 0,
+               "snapshot records the worker handle as metadata");
   rc |= expect(snapshot.task_id[0] && snapshot.work_rev == 1,
                "snapshot owns the exact task revision");
   rc |= expect(strcmp(snapshot.status, "running") == 0,
                "snapshot owns running status");
+  rc |= expect(snapshot.deadline_ms > 0,
+               "operation carries a durable completion deadline");
   rc |= expect(strcmp(snapshot.context_id, "chat:tests") == 0 &&
                snapshot.origin_event_id[0],
                "snapshot round-trips context and origin event");
-  snprintf(first_task_id, sizeof(first_task_id), "%s", snapshot.task_id);
-  rc |= test_read_file("workspace/memory/state/operations.json", &ops);
-  if (ops) {
-    rc |= expect_substr(ops, "\"origin_event_id\":",
-                        "operation store persists origin_event_id");
-    rc |= expect_substr(ops, snapshot.origin_event_id,
-                        "operation store round-trips the origin id");
-  }
-  free(ops);
-  ops = NULL;
-
-  /* A is absent from the controller catalog after restart. The envelope lies
-   * that B/task-forged should run; the native poller must still call stored A
-   * with A's manifest-declared `handle` argument. */
-  rc |= write_a3_controller_catalog("a3poll", "a3_fake_b", NULL);
-  g = harness_gateway_init("a3poll");
-  rc |= expect(g != NULL, "A3 floop reloads after catalog removal");
-  if (!g) return 1;
-  rc |= expect(publish_operation_envelope("operation_poll", "a3a_001",
-                                          "a3_fake_b",
-                                          "task_forged_999") == 0,
-               "publish forged continuation envelope");
-  rc |= expect(drive_until_file_contains(
-                   g, "workspace/memory/state/operations.json",
-                   "\"status\":\"finished\"", 8000) == 0,
-               "stored A finishes despite catalog removal");
-  drive_for_ms(g, 250);
-  harness_gateway_close(g);
-  g = NULL;
-  logs = read_all_run_logs();
-  rc |= expect_substr(logs,
-      "\"action\":\"a3_fake_a\",\"args\":{\"op\":\"poll\","
-      "\"handle\":\"a3a_001\"",
-      "poll request uses stored A and its handle-style manifest contract");
-  rc |= expect_file_not_exists("workspace/a3_a3_fake_b/starts");
-  rc |= expect_file_not_exists("workspace/a3_a3_fake_b/polls");
-  rc |= test_read_file("workspace/a3_a3_fake_a/last_poll_handle", &polls);
-  rc |= expect(polls && strcmp(polls, "a3a_001") == 0,
-               "fake A receives exactly the durable handle");
-  free(polls);
-  polls = NULL;
-  free(logs);
-  logs = NULL;
-
-  /* A terminal handle and an unknown/stale handle both retire quietly. */
-  g = harness_gateway_init("a3poll");
-  rc |= expect(g != NULL, "A3 floop restarts for stale polls");
-  if (!g) return 1;
-  rc |= expect(publish_operation_envelope("operation_poll", "a3a_001",
-                                          "a3_fake_b", first_task_id) == 0,
-               "publish terminal-handle poll");
-  rc |= expect(publish_operation_envelope("operation_poll", "unknown_404",
-                                          "a3_fake_b", first_task_id) == 0,
-               "publish unknown-handle poll");
-  drive_for_ms(g, 500);
-  harness_gateway_close(g);
-  g = NULL;
-  rc |= test_read_file("workspace/a3_a3_fake_a/polls", &polls);
-  rc |= expect(polls && strcmp(polls, "1") == 0,
-               "terminal and unknown polls execute no action");
-  free(polls);
-  polls = NULL;
-  rc |= expect(count_provider_request_artifacts() == 0,
-               "operation poll runs create no provider request");
-
-  /* The same native poller preserves the legacy op_id contract used by
-   * manage_codex/manage_claude/manage_hermes. */
-  rc |= fx_reset();
-  rc |= setup_testfx_actions();
-  rc |= write_a3_adapter("a3_fake_a", "a3a", "handle", 1);
-  rc |= write_a3_adapter("a3_fake_b", "a3b", "op_id", 1);
-  rc |= write_a3_adapter("a3_missing_poll", "a3m", "op_id", 0);
-  rc |= write_a3_floop("a3poll", "a3_fake_b", 1);
-  g = harness_gateway_init("a3poll");
-  rc |= expect(g != NULL, "op_id poll fixture loads");
-  if (!g) return 1;
-  rc |= expect(harness_gateway_publish(g, "tests", "create A3 work") == 0,
-               "publish op_id work");
-  rc |= expect(drive_until_file_contains(
-                   g, "workspace/memory/state/operations.json",
-                   "\"handle\":\"a3b_001\"", 8000) == 0,
-               "op_id operation is durably running");
-  harness_gateway_close(g);
-  g = NULL;
-  rc |= write_a3_controller_catalog("a3poll", "a3_fake_a", NULL);
-  g = harness_gateway_init("a3poll");
-  rc |= expect(g != NULL, "op_id fixture reloads without B in controller");
-  if (!g) return 1;
-  rc |= expect(publish_operation_envelope("operation_poll", "a3b_001",
-                                          "a3_fake_a", "forged") == 0,
-               "publish forged op_id continuation");
-  rc |= expect(drive_until_file_contains(
-                   g, "workspace/memory/state/operations.json",
-                   "\"status\":\"finished\"", 8000) == 0,
-               "stored op_id action finishes");
-  harness_gateway_close(g);
-  g = NULL;
-  logs = read_all_run_logs();
-  rc |= expect_substr(logs,
-      "\"action\":\"a3_fake_b\",\"args\":{\"op\":\"poll\","
-      "\"op_id\":\"a3b_001\"",
-      "new poller emits the legacy op_id continuation contract");
-  rc |= expect_file_not_exists("workspace/a3_a3_fake_a/polls");
-  rc |= expect(count_provider_request_artifacts() == 0,
-               "op_id poll creates no provider request");
-  free(logs);
-  logs = NULL;
-
-  /* Exercise the shipped manage_codex runtime adapter through the new native
-   * poller, not only through the legacy fixed workers phase. The fake binary
-   * is local and writes one deterministic final result; no provider or
-   * external channel is involved. */
+  rc |= expect(rt_operation_token_of(op_id, token, sizeof(token)) == 0 &&
+               token[0],
+               "completion token is durably bound before the worker runs");
   {
-    char *saved_codex = fx_capture_env("FCLAW_CODEX_BIN");
-    char *saved_sync = fx_capture_env("FCLAW_CODEX_START_SYNC_MS");
-    char codex_handle[RT_SMALL] = "";
-    char codex_exit_path[1024];
-    JsonRef root, operations, item;
-
-    rc |= fx_reset();
-    rc |= setup_testfx_actions();
-    rc |= write_a3_adapter("a3_fake_b", "a3b", "op_id", 1);
-    rc |= write_a3_floop("a3codex", "manage_codex", 1);
-    rc |= write_a3_controller_catalog(
-        "a3codex", "manage_codex", "working_memory_append");
-    rc |= write_exec(
-        "floops/a3codex/agents/a3_controller/run.sh",
-        "#!/usr/bin/env bash\n"
-        "cat >/dev/null\n"
-        "echo '{\"calls\":[{\"name\":\"manage_codex\",\"args\":{"
-        "\"op\":\"start\",\"task\":\"do A3 work\"}},{\"name\":"
-        "\"working_memory_append\",\"args\":{\"working_memory\":"
-        "\"A3 shared discovery\"}}]}'\n");
-    rc |= write_exec(
-        "workspace/fixtures/a3_fake_codex.sh",
-        "#!/usr/bin/env bash\n"
-        "set -euo pipefail\n"
-        "out=\"\"\n"
-        "while [ \"$#\" -gt 0 ]; do\n"
-        "  case \"$1\" in\n"
-        "    -o) out=\"$2\"; shift 2 ;;\n"
-        "    -C) shift 2 ;;\n"
-        "    *) shift ;;\n"
-        "  esac\n"
-        "done\n"
-        "prompt=\"$(cat)\"\n"
-        "printf '%s' \"$prompt\" > \"$FCLAW_ACTION_ROOT/workspace/fixtures/a3_prompt.txt\"\n"
-        "printf '%s' \"${FCLAW_BOUND_TASK_ID:-}\" > \"$FCLAW_ACTION_ROOT/workspace/fixtures/a3_bound_task.txt\"\n"
-        "printf 'A3 actual manage_codex complete\\n' > \"$out\"\n"
-        "printf '%s\\n' '{\"type\":\"result\",\"text\":\"done\"}'\n");
-    (void)setenv("FCLAW_CODEX_BIN",
-                 "workspace/fixtures/a3_fake_codex.sh", 1);
-    (void)unsetenv("FCLAW_CODEX_START_SYNC_MS");
-
-    g = harness_gateway_init("a3codex");
-    rc |= expect(g != NULL, "actual manage_codex poll fixture loads");
-    if (g) {
-      rc |= expect(harness_gateway_publish(g, "tests",
-                                           "create A3 work") == 0,
-                   "publish actual manage_codex work");
-      rc |= expect(drive_until_file_contains(
-                       g, "workspace/memory/state/operations.json",
-                       "\"action\":\"manage_codex\"", 8000) == 0,
-                   "actual manage_codex operation is durably running");
-      harness_gateway_close(g);
-      g = NULL;
-    }
-    rc |= test_read_file("workspace/memory/state/operations.json", &ops);
-    if (ops && json_ref_top_object(ops, &root) == 0 &&
-        json_ref_object_get_array(&root, "operations", &operations) == 0 &&
-        json_ref_array_size(&operations) == 1 &&
-        json_ref_array_get(&operations, 0, &item) == 0)
-      (void)json_ref_object_get_string(&item, "handle", codex_handle,
-                                       sizeof(codex_handle));
-    rc |= expect(codex_handle[0] != '\0',
-                 "actual manage_codex handle is readable from durable state");
-    free(ops);
-    ops = NULL;
-    snprintf(codex_exit_path, sizeof(codex_exit_path),
-             "workspace/logs/codex_ops/%s/exit_code", codex_handle);
-    rc |= expect(codex_handle[0] &&
-                 wait_until_file_contains(codex_exit_path, "0", 8000) == 0,
-                 "actual manage_codex runner publishes terminal exit status");
-    {
-      char *prompt = NULL, *bound_task = NULL, *codex_state = NULL;
-      char state_path[1024];
-      rc |= test_read_file("workspace/fixtures/a3_prompt.txt", &prompt);
-      rc |= test_read_file("workspace/fixtures/a3_bound_task.txt", &bound_task);
-      snprintf(state_path, sizeof(state_path),
-               "workspace/logs/codex_ops/%s/state.json", codex_handle);
-      rc |= test_read_file(state_path, &codex_state);
-      rc |= expect_substr(prompt, "A3 shared discovery",
-                          "managed Codex receives current shared working_memory");
-      rc |= expect_substr(prompt, "working_memory_append",
-                          "managed Codex receives the base append instruction");
-      rc |= expect(bound_task && strncmp(bound_task, "task_run_", 9) == 0,
-                   "managed Codex action CLI inherits exact task routing");
-      rc |= expect_substr(codex_state,
-                          "\"working_memory\":\"A3 shared discovery\"",
-                          "managed operation state retains its launch-time working memory");
-      free(prompt);
-      free(bound_task);
-      free(codex_state);
-    }
-
-    g = harness_gateway_init("a3codex");
-    rc |= expect(g != NULL, "actual manage_codex fixture reloads for poll");
-    if (g && codex_handle[0]) {
-      rc |= expect(publish_operation_envelope(
-                       "operation_poll", codex_handle,
-                       "a3_fake_b", "task_forged_999") == 0,
-                   "publish forged envelope for actual manage_codex handle");
-      rc |= expect(drive_until_file_contains(
-                       g, "workspace/memory/state/operations.json",
-                       "\"status\":\"finished\"", 8000) == 0,
-                   "new poller finishes actual manage_codex operation");
-      harness_gateway_close(g);
-      g = NULL;
-    } else if (g) {
-      harness_gateway_close(g);
-      g = NULL;
-    }
-    logs = read_all_run_logs();
-    rc |= expect_substr(logs,
-        "\"action\":\"manage_codex\",\"args\":{\"op\":\"poll\","
-        "\"op_id\":\"",
-        "new poller calls actual manage_codex with legacy op_id");
-    rc |= expect_substr(logs, "A3 actual manage_codex complete",
-                        "actual manage_codex result returns through driver");
-    rc |= expect_file_not_exists("workspace/a3_a3_fake_b/polls");
-    rc |= expect(count_provider_request_artifacts() == 0,
-                 "actual manage_codex polling creates no provider request");
-    free(logs);
-    logs = NULL;
-    fx_restore_env("FCLAW_CODEX_START_SYNC_MS", saved_sync);
-    fx_restore_env("FCLAW_CODEX_BIN", saved_codex);
+    char *recorded = NULL;
+    rc |= test_read_file("workspace/a3_a3_fake_a/operation_id", &recorded);
+    rc |= expect(recorded && strcmp(recorded, op_id) == 0,
+                 "worker receives the operation id through trusted env");
+    free(recorded);
+    recorded = NULL;
+    rc |= test_read_file("workspace/a3_a3_fake_a/token", &recorded);
+    rc |= expect(recorded && strcmp(recorded, token) == 0,
+                 "worker receives the completion token through trusted env");
+    free(recorded);
   }
 
-  /* A controller-selected revision is captured before its async action
-   * finishes. Even if durable task state advances while the subprocess is
-   * in flight, operation_started keeps the selected revision rather than
-   * sampling the newer task state at terminal time. */
+  /* Forged claims are rejected before any run exists; a valid claim
+   * opens exactly one result run; a duplicate is inert. */
+  g = harness_gateway_init("a3poll");
+  rc |= expect(g != NULL, "A3 floop reloads for claim admission");
+  if (!g) return 1;
+  rc |= expect(publish_claim_envelope(op_id, "forged-token",
+                                      "succeeded", "forged text") == 0,
+               "publish forged completion claim");
+  rc |= expect(publish_claim_envelope("op_unknown_404", token,
+                                      "succeeded", "stray text") == 0,
+               "publish unknown-operation claim");
+  rc |= expect(drive_until_file_contains(
+                   g, "workspace/logs/rejected_events.jsonl",
+                   "completion_token_mismatch", 8000) == 0,
+               "forged token is rejected inspectably");
+  rc |= expect(drive_until_file_contains(
+                   g, "workspace/logs/rejected_events.jsonl",
+                   "unknown_operation", 8000) == 0,
+               "unknown operation id is rejected inspectably");
+  {
+    char body[1024];
+    snprintf(body, sizeof(body),
+             "{\"event_id\":\"bus_988888\",\"ts\":\"2026-07-11T00:00:00Z\","
+             "\"channel\":\"operations\",\"type\":\"operation_completed\","
+             "\"payload\":{\"operation_id\":\"%s\",\"completion_token\":\"%s\","
+             "\"task_id\":\"task_forged\",\"cause\":\"worker\","
+             "\"result\":{\"status\":\"succeeded\",\"text\":\"forged corr\"}}}\n",
+             op_id, token);
+    rc |= expect(test_write_file("workspace/bus/inbox/bus_988888.json",
+                                 body) == 0,
+                 "publish claim carrying caller-authored correlation");
+  }
+  rc |= expect(drive_until_file_contains(
+                   g, "workspace/logs/rejected_events.jsonl",
+                   "claim_carries_runtime_owned_field", 8000) == 0,
+               "caller-authored correlation is rejected, not stripped");
+  rc |= expect(rt_operation_snapshot(op_id, &snapshot) == 0 &&
+               strcmp(snapshot.status, "running") == 0,
+               "forged claims cannot terminalize the operation");
+  rc |= expect(rt_operation_publish_worker_claim(
+                   op_id, token, "succeeded", "A3 fixture complete") == 0,
+               "publish the genuine completion claim");
+  rc |= expect(drive_until_file_contains(
+                   g, "workspace/memory/state/operations.json",
+                   "\"status\":\"finished\"", 8000) == 0,
+               "genuine claim terminalizes the operation");
+  rc |= expect(drive_until_file_contains(
+                   g, "workspace/memory/state/tasks.json",
+                   "A3 fixture complete", 8000) == 0,
+               "task external carries the completion excerpt");
+  rc |= expect(publish_claim_envelope(op_id, token,
+                                      "succeeded", "duplicate text") == 0,
+               "publish duplicate completion claim");
+  rc |= expect(drive_until_file_contains(
+                   g, "workspace/logs/rejected_events.jsonl",
+                   "operation_already_terminal", 8000) == 0,
+               "duplicate claim is rejected as already terminal");
+  drive_for_ms(g, 300);
+  harness_gateway_close(g);
+  g = NULL;
+  logs = read_all_run_logs();
+  rc |= expect(count_substr(logs, "\"type\":\"operation_result\"") == 1,
+               "exactly one canonical operation_result exists");
+  rc |= expect(count_substr(logs, "\"type\":\"operation_started\"") == 1,
+               "exactly one operation_started exists");
+  rc |= expect_no_substr(logs, "operation_poll",
+                         "no polling artifact appears anywhere");
+  rc |= expect_substr(logs, "A3 fixture complete",
+                      "claim text reaches the result run unchanged");
+  rc |= expect_substr(logs, "\"status\":\"succeeded\"",
+                      "canonical result carries its terminal status");
+  rc |= expect_no_substr(logs, "forged text",
+                         "forged claim text never becomes behavioral truth");
+  rc |= expect_no_substr(logs, "duplicate text",
+                         "duplicate claim text never becomes behavioral truth");
+  rc |= expect_no_substr(logs, "\"type\":\"run_failed\"",
+                         "claim admission has no failed run");
+  rc |= expect(count_provider_request_artifacts() == 0,
+               "claim admission creates no provider request");
+  free(logs);
+  logs = NULL;
+
+  /* In-flight revision capture: the preallocated record keeps the
+   * selected revision even when durable task state advances while the
+   * start subprocess is still in flight. */
   rc |= fx_reset();
   rc |= setup_testfx_actions();
-  rc |= write_a3_adapter("a3_fake_a", "a3a", "handle", 1);
-  rc |= write_a3_adapter("a3_fake_b", "a3b", "op_id", 1);
-  rc |= write_a3_adapter("a3_missing_poll", "a3m", "op_id", 0);
+  rc |= write_a3_adapter("a3_fake_a", "a3a");
+  rc |= write_a3_adapter("a3_fake_b", "a3b");
   rc |= write_a3_floop("a3poll", "a3_fake_a", 1);
   (void)setenv("FCLAW_A3_START_DELAY", "0.30", 1);
   g = harness_gateway_init("a3poll");
@@ -1386,249 +1244,385 @@ int deterministic_operation_poller_uses_durable_handle_contract(void) {
   }
   rc |= expect(drive_until_file_contains(
                    g, "workspace/memory/state/operations.json",
-                   "\"handle\":\"a3a_001\"", 8000) == 0,
-               "delayed action records its operation");
+                   "\"worker_handle\":\"a3a_001\"", 8000) == 0,
+               "delayed action records its worker handle");
   harness_gateway_close(g);
   g = NULL;
   unsetenv("FCLAW_A3_START_DELAY");
-  rc |= expect(rt_operation_snapshot("a3a_001", &snapshot) == 0 &&
+  op_id[0] = '\0';
+  rc |= test_read_file("workspace/memory/state/operations.json", &ops);
+  if (ops) {
+    const char *start = strstr(ops, "\"handle\":\"");
+    if (start) {
+      const char *end;
+      start += strlen("\"handle\":\"");
+      end = strchr(start, '"');
+      if (end && (size_t)(end - start) < sizeof(op_id)) {
+        memcpy(op_id, start, (size_t)(end - start));
+        op_id[end - start] = '\0';
+      }
+    }
+    free(ops);
+    ops = NULL;
+  }
+  rc |= expect(op_id[0] && rt_operation_snapshot(op_id, &snapshot) == 0 &&
                snapshot.work_rev == 1,
                "operation snapshot keeps selected revision 1");
   rc |= expect(count_provider_request_artifacts() == 0,
                "in-flight revision proof uses no provider");
 
-  /* The no-record immediate-finished path uses the same trusted selection
-   * revision before considering the legacy current-task fallback. */
-  rc |= fx_reset();
-  rc |= setup_testfx_actions();
-  rc |= write_a3_adapter("a3_fake_a", "a3a", "handle", 1);
-  rc |= write_a3_adapter("a3_fake_b", "a3b", "op_id", 1);
-  rc |= write_a3_adapter("a3_missing_poll", "a3m", "op_id", 0);
-  rc |= write_a3_floop("a3poll", "a3_fake_a", 1);
-  (void)setenv("FCLAW_A3_START_DELAY", "0.30", 1);
-  (void)setenv("FCLAW_A3_FINISH_IMMEDIATE", "1", 1);
-  g = harness_gateway_init("a3poll");
-  rc |= expect(g != NULL, "immediate-finished revision fixture loads");
-  if (!g) return 1;
-  rc |= expect(harness_gateway_publish(g, "tests", "create A3 work") == 0,
-               "publish delayed immediate-finished work");
-  rc |= expect(drive_until_file_contains(
-                   g, "workspace/runs/run_001/event_log.jsonl",
-                   "\"action\":\"a3_fake_a\"", 8000) == 0,
-               "immediate-finished action starts");
-  {
-    char task_id[RT_SMALL] = "", work[RT_LARGE] = "", done[RT_LARGE] = "";
-    char external[RT_LARGE] = "", etask[RT_MED], update[RT_LARGE];
-    long long task_rev = 0;
-    rc |= expect(rt_task_open_work_snapshot(
-                     "chat:tests", task_id, sizeof(task_id),
-                     work, sizeof(work), done, sizeof(done), &task_rev,
-                     external, sizeof(external)) == 0 &&
-                 task_rev == 1,
-                 "immediate-finished action selected revision 1");
-    if (json_escape(task_id, etask, sizeof(etask)) == 0) {
-      snprintf(update, sizeof(update),
-               "{\"task_id\":\"%s\",\"state\":{\"status\":\"open\","
-               "\"work\":\"A3 immediate raced revision\","
-               "\"done_when\":\"new done\",\"updated_ms\":1785088000001}}",
-               etask);
-      rc |= expect(rt_task_apply_event("task_updated", update) == 0,
-                   "immediate-finished task advances while action is in flight");
-    } else {
-      rc |= expect(0, "escape immediate-finished task id");
-    }
-  }
-  rc |= expect(drive_until_file_contains(
-                   g, "workspace/memory/state/tasks.json",
-                   "A3 immediate complete", 8000) == 0,
-               "immediate-finished result reaches task external state");
-  harness_gateway_close(g);
-  g = NULL;
-  unsetenv("FCLAW_A3_START_DELAY");
-  unsetenv("FCLAW_A3_FINISH_IMMEDIATE");
-  {
-    char *race_tasks = NULL;
-    rc |= test_read_file("workspace/memory/state/tasks.json", &race_tasks);
-    rc |= expect(race_tasks != NULL,
-                 "immediate-finished race task projection exists");
-    if (race_tasks) {
-      rc |= expect_substr(race_tasks, "\"work_rev\":2",
-                          "task remains on its newer revision");
-      rc |= expect_substr(
-          race_tasks,
-          "\"external\":{\"handle\":\"a3a_002\",\"action\":\"a3_fake_a\","
-          "\"status\":\"finished\",\"work_rev\":2",
-          "new revision replaces stale immediate-finished projection");
-    }
-    free(race_tasks);
-  }
-  rc |= expect(rt_operation_snapshot("a3a_001", &snapshot) == 0 &&
-               snapshot.work_rev == 1 &&
-               strcmp(snapshot.status, "finished") == 0,
-               "stale revision 1 completion remains durable operation evidence");
-  rc |= expect(count_provider_request_artifacts() == 0,
-               "immediate-finished revision proof uses no provider");
-
-  /* Scenario 2: a newer work revision makes the old running handle stale.
-   * The old operation remains durable truth but cannot execute against the
-   * newer task revision. */
-  rc |= fx_reset();
-  rc |= setup_testfx_actions();
-  rc |= write_a3_adapter("a3_fake_a", "a3a", "handle", 1);
-  rc |= write_a3_adapter("a3_fake_b", "a3b", "op_id", 1);
-  rc |= write_a3_adapter("a3_missing_poll", "a3m", "op_id", 0);
-  rc |= write_a3_floop("a3poll", "a3_fake_a", 1);
-  g = harness_gateway_init("a3poll");
-  rc |= expect(g != NULL, "stale-revision fixture loads");
-  if (!g) return 1;
-  rc |= expect(harness_gateway_publish(g, "tests", "create A3 work") == 0,
-               "publish first A3 revision");
-  rc |= expect(drive_until_file_contains(
-                   g, "workspace/memory/state/operations.json",
-                   "\"handle\":\"a3a_001\"", 8000) == 0,
-               "first revision operation starts");
-  harness_gateway_close(g);
-  g = NULL;
+  /* Stale revision: completing the old running attempt after a newer
+   * revision exists remains durable evidence but cannot restart work or
+   * advance the newer revision. */
   rc |= write_a3_floop("a3poll", "a3_fake_a", 0);
   g = harness_gateway_init("a3poll");
-  rc |= expect(g != NULL, "controller-disabled revision fixture loads");
+  rc |= expect(g != NULL, "controller-disabled stale-revision fixture loads");
   if (!g) return 1;
-  rc |= expect(harness_gateway_publish(g, "tests", "revise A3 work") == 0,
-               "publish work revision");
-  rc |= expect(drive_until_file_contains(g,
-                                         "workspace/memory/state/tasks.json",
-                                         "\"work_rev\":2", 8000) == 0,
-               "work advances to revision 2");
-  rc |= expect(publish_operation_envelope("operation_poll", "a3a_001",
-                                          "a3_fake_b", "forged") == 0,
-               "publish old-revision poll");
-  drive_for_ms(g, 500);
-  harness_gateway_close(g);
-  g = NULL;
-  rc |= expect_file_not_exists("workspace/a3_a3_fake_a/polls");
-  rc |= expect(count_provider_request_artifacts() == 0,
-               "stale-revision poll creates no provider request");
-
-  /* Scenario 3: returning running without metadata cannot create an
-   * unpollable durable operation. It fails with a manifest-specific fix and
-   * blocks exactly the current work revision. */
-  rc |= fx_reset();
-  rc |= setup_testfx_actions();
-  rc |= write_a3_adapter("a3_fake_a", "a3a", "handle", 1);
-  rc |= write_a3_adapter("a3_fake_b", "a3b", "op_id", 1);
-  rc |= write_a3_adapter("a3_missing_poll", "a3m", "op_id", 0);
-  rc |= write_a3_floop("a3missing", "a3_missing_poll", 1);
-  g = harness_gateway_init("a3missing");
-  rc |= expect(g != NULL, "missing-metadata fixture loads as immediate-capable");
-  if (!g) return 1;
-  rc |= expect(harness_gateway_publish(g, "tests", "create A3 work") == 0,
-               "publish missing-metadata work");
-  rc |= expect(drive_until_file_contains(g,
-                                         "workspace/memory/state/tasks.json",
-                                         "\"status\":\"blocked\"", 8000) == 0,
-               "running-without-metadata blocks work");
-  rc |= expect(drive_until_file_contains(
-                   g, "workspace/runs/run_001/event_log.jsonl",
-                   "\"type\":\"run_done\"", 8000) == 0,
-               "missing-metadata run retires done");
-  rc |= expect(drive_until_file_contains(
-                   g, "workspace/runs/run_002/event_log.jsonl",
-                   "\"type\":\"work_outcome\"", 8000) == 0,
-               "missing-metadata block publishes its terminal wake");
-  harness_gateway_close(g);
-  g = NULL;
-  logs = read_all_run_logs();
-  rc |= expect_substr(logs, "actions/testfx/a3_missing_poll/action.json",
-                      "missing metadata error names its manifest");
-  rc |= expect_substr(logs, "poll_handle_arg",
-                      "missing metadata error names the exact fix");
-  rc |= expect(count_substr(logs, "\"type\":\"work_blocked\"") == 1,
-               "missing metadata appends one terminal block");
-  rc |= expect_no_substr(logs, "\"type\":\"operation_started\"",
-                         "unpollable running result is never recorded");
-  rc |= expect_no_substr(logs, "\"type\":\"run_failed\"",
-                         "missing metadata retires through durable block");
-  rc |= expect_substr(logs, "\"type\":\"run_done\"",
-                      "missing metadata run reaches terminal handling");
-  rc |= expect(count_lines_with_both(
-                   logs, "\"type\":\"work_outcome\"",
-                   "\"blocker\":\"managed operation a3_missing_poll "
-                   "returned status=running") == 1,
-               "mechanical terminal wake projects the concrete blocker");
-  rc |= expect(count_lines_with_both(
-                   logs, "\"type\":\"work_outcome\"",
-                   "\"needed\":\"fix: add") == 1,
-               "mechanical terminal wake projects the exact repair");
-  rc |= expect_file_not_exists("workspace/logs/deliveries.jsonl");
-  rc |= expect(rt_operation_snapshot("a3m_001", &snapshot) == 1,
-               "unpollable operation has no durable record");
-  rc |= expect(count_provider_request_artifacts() == 0,
-               "metadata failure creates no provider request");
-  free(logs);
-  logs = NULL;
-
-  /* Scenario 4: continuation also requires the stored action to remain
-   * registered. Removing its manifest after start blocks with a concrete
-   * restore-manifest fix; it never redirects to configured B. */
-  rc |= fx_reset();
-  rc |= setup_testfx_actions();
-  rc |= write_a3_adapter("a3_fake_a", "a3a", "handle", 1);
-  rc |= write_a3_adapter("a3_fake_b", "a3b", "op_id", 1);
-  rc |= write_a3_adapter("a3_missing_poll", "a3m", "op_id", 0);
-  rc |= write_a3_floop("a3poll", "a3_fake_a", 1);
-  g = harness_gateway_init("a3poll");
-  rc |= expect(g != NULL, "missing-manifest fixture loads before removal");
-  if (!g) return 1;
-  rc |= expect(harness_gateway_publish(g, "tests", "create A3 work") == 0,
-               "publish operation before manifest removal");
+  rc |= expect(rt_operation_token_of(op_id, token, sizeof(token)) == 0 &&
+               token[0],
+               "stale operation still holds its completion capability");
+  rc |= expect(rt_operation_publish_worker_claim(
+                   op_id, token, "succeeded", "stale revision result") == 0,
+               "publish stale-revision completion claim");
   rc |= expect(drive_until_file_contains(
                    g, "workspace/memory/state/operations.json",
-                   "\"handle\":\"a3a_001\"", 8000) == 0,
-               "operation starts before manifest removal");
+                   "\"status\":\"finished\"", 8000) == 0,
+               "stale-revision claim terminalizes its own operation");
+  drive_for_ms(g, 400);
   harness_gateway_close(g);
   g = NULL;
-  rc |= test_remove_path("actions/testfx/a3_fake_a");
-  rc |= write_a3_controller_catalog("a3poll", "a3_fake_b", NULL);
-  g = harness_gateway_init("a3poll");
-  rc |= expect(g != NULL, "floop reloads without the stored action manifest");
+  {
+    char *tasks = NULL, *starts = NULL;
+    rc |= test_read_file("workspace/memory/state/tasks.json", &tasks);
+    rc |= expect(tasks != NULL, "stale-revision task projection exists");
+    if (tasks) {
+      rc |= expect_substr(tasks, "\"work_rev\":2",
+                          "task remains on its newer revision");
+      rc |= expect_substr(tasks, "\"status\":\"open\"",
+                          "stale completion cannot complete newer work");
+      free(tasks);
+    }
+    rc |= test_read_file("workspace/a3_a3_fake_a/starts", &starts);
+    rc |= expect(starts && strcmp(starts, "1") == 0,
+                 "stale completion restarts nothing");
+    free(starts);
+  }
+  rc |= expect(rt_operation_snapshot(op_id, &snapshot) == 0 &&
+               snapshot.work_rev == 1 &&
+               strcmp(snapshot.status, "finished") == 0,
+               "stale revision completion remains durable evidence");
+
+  /* Exercise the shipped manage_codex runtime adapter end to end: the
+   * supervising runner itself verifies and submits completion — no poll
+   * envelope, no poller agent, no test-side claim. */
+  {
+    char *saved_codex = fx_capture_env("FCLAW_CODEX_BIN");
+    char *saved_sync = fx_capture_env("FCLAW_CODEX_START_SYNC_MS");
+
+    rc |= fx_reset();
+    rc |= setup_testfx_actions();
+    rc |= write_a3_adapter("a3_fake_b", "a3b");
+    rc |= write_a3_floop("a3codex", "manage_codex", 1);
+    rc |= write_a3_controller_catalog(
+        "a3codex", "manage_codex", "working_memory_append");
+    rc |= write_exec(
+        "floops/a3codex/agents/a3_controller/run.sh",
+        "#!/usr/bin/env bash\n"
+        "cat >/dev/null\n"
+        "echo '{\"calls\":[{\"name\":\"manage_codex\",\"args\":{"
+        "\"op\":\"start\",\"task\":\"do A3 work\"}},{\"name\":"
+        "\"working_memory_append\",\"args\":{\"working_memory\":"
+        "\"A3 shared discovery\"}}]}'\n");
+    rc |= write_exec(
+        "workspace/fixtures/a3_fake_codex.sh",
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "out=\"\"\n"
+        "while [ \"$#\" -gt 0 ]; do\n"
+        "  case \"$1\" in\n"
+        "    -o) out=\"$2\"; shift 2 ;;\n"
+        "    -C) shift 2 ;;\n"
+        "    *) shift ;;\n"
+        "  esac\n"
+        "done\n"
+        "prompt=\"$(cat)\"\n"
+        "printf '%s' \"$prompt\" > \"$FCLAW_ACTION_ROOT/workspace/fixtures/a3_prompt.txt\"\n"
+        "printf '%s' \"${FCLAW_BOUND_TASK_ID:-}\" > \"$FCLAW_ACTION_ROOT/workspace/fixtures/a3_bound_task.txt\"\n"
+        "printf '%s' \"${FCLAW_COMPLETION_TOKEN:-}\" > \"$FCLAW_ACTION_ROOT/workspace/fixtures/a3_worker_token.txt\"\n"
+        "printf 'A3 actual manage_codex complete\\n' > \"$out\"\n"
+        "printf '%s\\n' '{\"type\":\"result\",\"text\":\"done\"}'\n");
+    (void)setenv("FCLAW_CODEX_BIN",
+                 "workspace/fixtures/a3_fake_codex.sh", 1);
+    (void)unsetenv("FCLAW_CODEX_START_SYNC_MS");
+
+    g = harness_gateway_init("a3codex");
+    rc |= expect(g != NULL, "actual manage_codex completion fixture loads");
+    if (g) {
+      rc |= expect(harness_gateway_publish(g, "tests",
+                                           "create A3 work") == 0,
+                   "publish actual manage_codex work");
+      rc |= expect(drive_until_file_contains(
+                       g, "workspace/memory/state/operations.json",
+                       "\"action\":\"manage_codex\"", 8000) == 0,
+                   "actual manage_codex operation is durably recorded");
+      rc |= expect(drive_until_file_contains(
+                       g, "workspace/memory/state/operations.json",
+                       "\"status\":\"finished\"", 12000) == 0,
+                   "runner-submitted completion terminalizes the operation");
+      drive_for_ms(g, 300);
+      harness_gateway_close(g);
+      g = NULL;
+    }
+    {
+      char *prompt = NULL, *bound_task = NULL, *worker_token = NULL;
+      rc |= test_read_file("workspace/fixtures/a3_prompt.txt", &prompt);
+      rc |= test_read_file("workspace/fixtures/a3_bound_task.txt", &bound_task);
+      (void)test_read_file("workspace/fixtures/a3_worker_token.txt",
+                           &worker_token);
+      rc |= expect_substr(prompt, "A3 shared discovery",
+                          "managed Codex receives current shared working_memory");
+      rc |= expect_substr(prompt, "working_memory_append",
+                          "managed Codex receives the base append instruction");
+      rc |= expect(bound_task && strncmp(bound_task, "task_run_", 9) == 0,
+                   "managed Codex action CLI inherits exact task routing");
+      rc |= expect(!worker_token || worker_token[0] == '\0',
+                   "the completion token never reaches the provider CLI env");
+      free(worker_token);
+      free(bound_task);
+      free(prompt);
+    }
+    logs = read_all_run_logs();
+    rc |= expect_substr(logs, "A3 actual manage_codex complete",
+                        "runner-verified result returns through the claim");
+    rc |= expect_no_substr(logs, "operation_poll",
+                           "actual manage_codex completes with zero polls");
+    rc |= expect_no_substr(logs, "\"op\":\"poll\"",
+                           "no poll call is ever dispatched");
+    rc |= expect(count_provider_request_artifacts() == 0,
+                 "actual manage_codex completion creates no provider request");
+    free(logs);
+    logs = NULL;
+    fx_restore_env("FCLAW_CODEX_START_SYNC_MS", saved_sync);
+    fx_restore_env("FCLAW_CODEX_BIN", saved_codex);
+  }
+  test_config_restore(saved_cfg);
+  return rc;
+}
+
+/* The deadline, gateway-down durability, orphaned-claim reconciliation,
+ * and the completion-beats-timeout race — the crash-window half of the
+ * completion contract. */
+int operation_completion_deadline_and_recovery_contract(void) {
+  HarnessGateway *g = NULL;
+  RtOperationSnapshot snapshot;
+  char *logs = NULL, *ops = NULL, *bus = NULL;
+  char op_id[RT_SMALL] = "";
+  char token[RT_OPERATION_TOKEN_HEX + 1] = "";
+  int rc = 0;
+
+  /* 1. A worker that never completes produces exactly one timeout
+   * consequence at its deadline and no periodic runs. */
+  rc |= fx_reset();
+  rc |= setup_testfx_actions();
+  rc |= write_a3_adapter_with_deadline("a3_fake_a", "a3a", 400);
+  rc |= write_a3_adapter("a3_fake_b", "a3b");
+  rc |= write_a3_floop("a3timeout", "a3_fake_a", 1);
+  g = harness_gateway_init("a3timeout");
+  rc |= expect(g != NULL, "deadline fixture loads");
   if (!g) return 1;
-  rc |= expect(publish_operation_envelope("operation_poll", "a3a_001",
-                                          "a3_fake_b", "forged") == 0,
-               "publish poll after manifest removal");
-  rc |= expect(drive_until_file_contains(g,
-                                         "workspace/memory/state/tasks.json",
-                                         "\"status\":\"blocked\"", 8000) == 0,
-               "missing registered manifest blocks work");
+  rc |= expect(harness_gateway_publish(g, "tests", "create A3 work") == 0,
+               "publish deadline work");
   rc |= expect(drive_until_file_contains(
-                   g, "workspace/runs/run_002/event_log.jsonl",
-                   "\"type\":\"run_done\"", 8000) == 0,
-               "missing-manifest poll run retires done");
+                   g, "workspace/memory/state/operations.json",
+                   "\"status\":\"finished\"", 8000) == 0,
+               "deadline expiry terminalizes the silent operation");
+  rc |= expect(drive_until_file_contains(
+                   g, "workspace/memory/state/tasks.json",
+                   "reached its completion deadline", 8000) == 0,
+               "timeout consequence projects into the owning task");
+  drive_for_ms(g, 600);
   harness_gateway_close(g);
   g = NULL;
   logs = read_all_run_logs();
-  rc |= expect_substr(logs,
-                      "references unregistered managed action a3_fake_a",
-                      "missing manifest error names the stored action");
-  rc |= expect_substr(logs,
-                      "restore a registered contract",
-                      "missing manifest error names the repair");
-  rc |= expect(count_substr(logs, "\"type\":\"work_blocked\"") == 1,
-               "missing manifest appends one terminal block");
+  rc |= test_read_file("workspace/logs/bus.jsonl", &bus);
+  rc |= expect(count_substr(logs, "\"type\":\"operation_result\"") == 1,
+               "deadline produces exactly one canonical result");
+  rc |= expect_substr(logs, "\"status\":\"timed_out\"",
+                      "timeout result carries the timed_out status");
+  rc |= expect_substr(logs, "was not retried",
+                      "timeout text preserves the ambiguity posture");
+  rc |= expect(bus &&
+               count_substr(bus, "\"type\":\"operation_completed\"") == 1,
+               "the idempotent timeout claim publishes exactly once");
+  rc |= expect(count_run_dirs() <= 3,
+               "a silent operation creates no periodic runs");
   rc |= expect_no_substr(logs, "\"type\":\"run_failed\"",
-                         "missing manifest poll retires through durable block");
-  rc |= expect_substr(logs, "\"type\":\"run_done\"",
-                      "missing manifest poll reaches terminal handling");
-  rc |= expect_substr(logs,
-                      "\"operation_ref\":{\"handle\":\"a3a_001\","
-                      "\"action\":\"a3_fake_a\"}",
-                      "block event preserves durable operation correlation");
-  rc |= expect_file_not_exists("workspace/a3_a3_fake_a/polls");
-  rc |= expect_file_not_exists("workspace/a3_a3_fake_b/polls");
-  rc |= expect_file_not_exists("workspace/logs/deliveries.jsonl");
-  rc |= expect(count_provider_request_artifacts() == 0,
-               "missing-manifest poll creates no provider request");
+                         "deadline path has no failed run");
+  free(bus);
+  bus = NULL;
   free(logs);
   logs = NULL;
+
+  /* 2. A completion written while the gateway is stopped survives in
+   * the bus; a claim orphaned by a crash between the destructive intake
+   * rename and the run claim is reconciled back into intake. */
+  rc |= fx_reset();
+  rc |= setup_testfx_actions();
+  rc |= write_a3_adapter("a3_fake_a", "a3a");
+  rc |= write_a3_adapter("a3_fake_b", "a3b");
+  rc |= write_a3_floop("a3poll", "a3_fake_a", 1);
+  g = harness_gateway_init("a3poll");
+  rc |= expect(g != NULL, "recovery fixture loads");
+  if (!g) return 1;
+  rc |= expect(harness_gateway_publish(g, "tests", "create A3 work") == 0,
+               "publish recovery work");
+  rc |= expect(drive_until_file_contains(
+                   g, "workspace/memory/state/operations.json",
+                   "\"worker_handle\":\"a3a_001\"", 8000) == 0,
+               "recovery operation is durably running");
+  harness_gateway_close(g);
+  g = NULL;
+  rc |= test_read_file("workspace/memory/state/operations.json", &ops);
+  if (ops) {
+    const char *start = strstr(ops, "\"handle\":\"");
+    if (start) {
+      const char *end;
+      start += strlen("\"handle\":\"");
+      end = strchr(start, '"');
+      if (end && (size_t)(end - start) < sizeof(op_id)) {
+        memcpy(op_id, start, (size_t)(end - start));
+        op_id[end - start] = '\0';
+      }
+    }
+    free(ops);
+    ops = NULL;
+  }
+  rc |= expect(op_id[0] &&
+               rt_operation_token_of(op_id, token, sizeof(token)) == 0 &&
+               token[0],
+               "recovery operation exposes its capability to the test");
+  /* The helper's publication path works with no gateway alive. */
+  rc |= expect(rt_operation_publish_worker_claim(
+                   op_id, token, "succeeded",
+                   "completed while the gateway slept") == 0,
+               "completion publishes while the gateway is stopped");
+  rc |= expect(count_regular_entries("workspace/bus/inbox") == 1,
+               "stopped-gateway completion is durable in the inbox");
+  /* Crash window 4: the envelope was renamed out of the inbox but no
+   * run ever claimed it. */
+  {
+    DIR *d = opendir("workspace/bus/inbox");
+    struct dirent *ent;
+    char from[PATH_MAX], to[PATH_MAX];
+    int moved = 0;
+    rc |= expect(d != NULL, "inbox opens for the orphan simulation");
+    rc |= expect(test_mkdir_p("workspace/bus/processed") == 0,
+                 "processed dir exists for the orphan simulation");
+    if (d) {
+      while ((ent = readdir(d)) != NULL) {
+        if (strncmp(ent->d_name, "bus_", 4) != 0) continue;
+        snprintf(from, sizeof(from), "workspace/bus/inbox/%s", ent->d_name);
+        snprintf(to, sizeof(to), "workspace/bus/processed/%s", ent->d_name);
+        if (rename(from, to) == 0) moved = 1;
+      }
+      closedir(d);
+    }
+    rc |= expect(moved, "claim is orphaned into processed with no run");
+  }
+  g = harness_gateway_init("a3poll");
+  rc |= expect(g != NULL, "gateway restarts over the orphaned claim");
+  if (!g) return 1;
+  rc |= expect(drive_until_file_contains(
+                   g, "workspace/memory/state/operations.json",
+                   "\"status\":\"finished\"", 8000) == 0,
+               "reconciled claim terminalizes the operation");
+  rc |= expect(drive_until_file_contains(
+                   g, "workspace/memory/state/tasks.json",
+                   "completed while the gateway slept", 8000) == 0,
+               "reconciled completion reaches the owning task");
+  drive_for_ms(g, 300);
+  harness_gateway_close(g);
+  g = NULL;
+  logs = read_all_run_logs();
+  rc |= expect(count_substr(logs, "\"type\":\"operation_result\"") == 1,
+               "orphan reconciliation yields exactly one result");
+  rc |= expect_no_substr(logs, "\"status\":\"timed_out\"",
+                         "the recovered completion is not a timeout");
+  rc |= expect_no_substr(logs, "\"type\":\"run_failed\"",
+                         "orphan recovery has no failed run");
+  {
+    char *narration = NULL;
+    rc |= test_read_file("workspace/logs/narration.jsonl", &narration);
+    rc |= expect(narration &&
+                 strstr(narration, "operation completion reconciled") != NULL,
+                 "the reconciler narrates the requeue");
+    free(narration);
+  }
+  free(logs);
+  logs = NULL;
+
+  /* 3. Completion racing an already-expired deadline has one
+   * deterministic winner: the queued completion. */
+  rc |= fx_reset();
+  rc |= setup_testfx_actions();
+  rc |= write_a3_adapter_with_deadline("a3_fake_a", "a3a", 300);
+  rc |= write_a3_adapter("a3_fake_b", "a3b");
+  rc |= write_a3_floop("a3race", "a3_fake_a", 1);
+  g = harness_gateway_init("a3race");
+  rc |= expect(g != NULL, "race fixture loads");
+  if (!g) return 1;
+  rc |= expect(harness_gateway_publish(g, "tests", "create A3 work") == 0,
+               "publish race work");
+  rc |= expect(drive_until_file_contains(
+                   g, "workspace/memory/state/operations.json",
+                   "\"worker_handle\":\"a3a_001\"", 8000) == 0,
+               "race operation is durably running");
+  harness_gateway_close(g);
+  g = NULL;
+  op_id[0] = token[0] = '\0';
+  rc |= test_read_file("workspace/memory/state/operations.json", &ops);
+  if (ops) {
+    const char *start = strstr(ops, "\"handle\":\"");
+    if (start) {
+      const char *end;
+      start += strlen("\"handle\":\"");
+      end = strchr(start, '"');
+      if (end && (size_t)(end - start) < sizeof(op_id)) {
+        memcpy(op_id, start, (size_t)(end - start));
+        op_id[end - start] = '\0';
+      }
+    }
+    free(ops);
+    ops = NULL;
+  }
+  rc |= expect(op_id[0] &&
+               rt_operation_token_of(op_id, token, sizeof(token)) == 0,
+               "race operation exposes its capability");
+  rc |= expect(rt_operation_publish_worker_claim(
+                   op_id, token, "succeeded", "the worker was faster") == 0,
+               "queue the completion while the gateway is down");
+  usleep(500000); /* the 300ms deadline is now unambiguously expired */
+  g = harness_gateway_init("a3race");
+  rc |= expect(g != NULL, "gateway restarts with claim and expired deadline");
+  if (!g) return 1;
+  rc |= expect(drive_until_file_contains(
+                   g, "workspace/memory/state/operations.json",
+                   "\"status\":\"finished\"", 8000) == 0,
+               "the race resolves to one terminal transition");
+  drive_for_ms(g, 800);
+  harness_gateway_close(g);
+  g = NULL;
+  logs = read_all_run_logs();
+  rc |= expect(count_substr(logs, "\"type\":\"operation_result\"") == 1,
+               "race yields exactly one canonical result");
+  rc |= expect_substr(logs, "the worker was faster",
+                      "the queued completion wins the race");
+  rc |= expect_no_substr(logs, "\"status\":\"timed_out\"",
+                         "the expired deadline cannot double-terminalize");
+  rc |= expect(rt_operation_snapshot(op_id, &snapshot) == 0 &&
+               strcmp(snapshot.status, "finished") == 0,
+               "race operation is durably terminal exactly once");
+  free(logs);
   return rc;
 }
 
@@ -2165,15 +2159,12 @@ int work_consequence_routes_intermediate_and_terminal_results(void) {
 }
 
 int work_controller_keeps_managed_actions_ordinary_and_stale_results_inert(void) {
-  RtContext ctx, result_ctx, poll_ctx;
+  RtContext ctx, result_ctx;
   RtStep step;
   RtAgentMeta meta;
-  RtScheduler *scheduler = NULL;
-  RtRun *run = NULL;
   char *normalized = NULL, *payload = NULL;
   char source_event_id[RT_SMALL];
   char selected[RT_SMALL] = "", trigger[RT_SMALL] = "";
-  char err[RT_LARGE] = "";
   char *logs = NULL, *steps = NULL;
   long long rev = 0;
   int rc = 0;
@@ -2290,77 +2281,6 @@ int work_controller_keeps_managed_actions_ordinary_and_stale_results_inert(void)
   free(steps);
   logs = steps = NULL;
 
-  /* Full schemas expose op=poll for the native continuation, but a semantic
-   * controller may not spend a model turn impersonating that poller. */
-  rc |= fx_reset();
-  rc |= setup_a4_actions();
-  rc |= expect(a4_direct_context(&poll_ctx, "run_a4_semantic_poll") == 0 &&
-               a4_append_direct_work(
-                   &poll_ctx, "task_a4_semantic_poll",
-                   "managed poll boundary") == 0,
-               "create semantic-poll rejection fixture");
-  rc |= expect(rt_append_event_format(
-                   &poll_ctx, "action_request", "a4_controller",
-                   payload, RT_XL, 0,
-                   "{\"request_id\":\"semantic_poll\","
-                   "\"action\":\"manage_codex\","
-                   "\"args\":{\"op\":\"poll\",\"op_id\":\"forged\"},"
-                   "\"task_id\":\"task_a4_semantic_poll\",\"work_rev\":1,"
-                   "\"context_id\":\"chat:tests\","
-                   "\"trigger_event_id\":"
-                   "\"evt_run_a4_semantic_poll_000001\"}") == 0,
-               "record semantic poll selection for rejection evidence");
-  scheduler = (RtScheduler *)calloc(1, sizeof(*scheduler));
-  run = (RtRun *)calloc(1, sizeof(*run));
-  rc |= expect(scheduler && run, "allocate semantic-poll runtime fixture");
-  if (scheduler && run) {
-    rc |= expect(rt_action_registry_load(
-                     &scheduler->actions, err, sizeof(err)) == 0,
-                 "load actions for semantic-poll rejection");
-    scheduler->agent_meta_count = 1;
-    scheduler->agent_meta[0] = meta;
-    scheduler->agent_meta[0].has_action_allowlist = 1;
-    scheduler->agent_meta[0].action_count = 1;
-    {
-      const RtActionDef *managed = rt_action_registry_find(
-          &scheduler->actions, "manage_codex");
-      rc |= expect(managed != NULL,
-                   "resolve semantic-poll action to its runtime id");
-      if (managed) {
-        scheduler->agent_meta[0].action_ids[0] = managed->runtime_id;
-        scheduler->agent_meta[0].action_allow_mask =
-            UINT64_C(1) << managed->runtime_id;
-      }
-    }
-    run->scheduler = scheduler;
-    run->ctx = poll_ctx;
-    rc |= expect(rt_action_runner_note_request(
-                     run, "a4_controller", "semantic_poll",
-                     "manage_codex",
-                     "{\"op\":\"poll\",\"op_id\":\"forged\"}",
-                     "task_a4_semantic_poll", 1) == 1,
-                 "queue trigger-bearing semantic poll");
-    rt_action_runner_note_trigger(
-        run, "semantic_poll", "evt_run_a4_semantic_poll_000001");
-    rc |= expect(rt_action_runner_launch(
-                     run, "semantic_poll", "manage_codex", "{}", NULL) == 0,
-                 "semantic poll becomes a normal loud rejection");
-  }
-  rc |= test_read_file(
-      "workspace/runs/run_a4_semantic_poll/event_log.jsonl", &logs);
-  rc |= expect_substr(logs,
-                      "\"reason\":\"native_operation_poller_required\"",
-                      "trigger-bearing op=poll names the native-poller boundary");
-  rc |= expect_no_substr(logs, "\"type\":\"operation_started\"",
-                         "semantic poll launches no managed operation");
-  rc |= expect_file_not_exists("workspace/memory/state/operations.json");
-  if (run) {
-    while (run->pending_action_count > 0)
-      rt_action_pending_remove_at(run, run->pending_action_count - 1U);
-  }
-  free(logs);
-  free(run);
-  free(scheduler);
   free(payload);
   free(normalized);
   rc |= test_reset_workspace();
@@ -2498,7 +2418,9 @@ int work_publication_recovers_once_after_source_append_crash(void) {
 
 int work_publication_pending_claim_resumes_same_run(void) {
   RtContext ctx;
-  RtRun claim;
+  /* Heap-owned: an RtRun is ~190KB; the small-stack gate forbids
+   * stacking it beside the context and payload buffers. */
+  RtRun *claim = NULL;
   RtProfile profile;
   HarnessGateway *g = NULL;
   char payload[RT_XL], wake[4096], source_event_id[RT_SMALL];
@@ -2508,38 +2430,41 @@ int work_publication_pending_claim_resumes_same_run(void) {
   char *run_two = NULL, *logs = NULL, *deliveries = NULL;
   int rc = 0;
 
+  claim = (RtRun *)calloc(1, sizeof(*claim));
+  if (!claim) return 1;
+
   /* A byte-for-byte matching first event is still a conflicting claim when
    * its event source is not the validated envelope channel. */
   rc |= fx_reset();
-  memset(&claim, 0, sizeof(claim));
-  snprintf(claim.ctx.workspace, sizeof(claim.ctx.workspace), "workspace");
-  snprintf(claim.ctx.run_id, sizeof(claim.ctx.run_id),
+  memset(claim, 0, sizeof(*claim));
+  snprintf(claim->ctx.workspace, sizeof(claim->ctx.workspace), "workspace");
+  snprintf(claim->ctx.run_id, sizeof(claim->ctx.run_id),
            "run_a4_wrong_source");
-  snprintf(claim.ctx.run_dir, sizeof(claim.ctx.run_dir),
+  snprintf(claim->ctx.run_dir, sizeof(claim->ctx.run_dir),
            "workspace/runs/run_a4_wrong_source");
-  snprintf(claim.ctx.origin_channel, sizeof(claim.ctx.origin_channel),
+  snprintf(claim->ctx.origin_channel, sizeof(claim->ctx.origin_channel),
            "tests");
-  snprintf(claim.ctx.event_payload_json,
-           sizeof(claim.ctx.event_payload_json),
+  snprintf(claim->ctx.event_payload_json,
+           sizeof(claim->ctx.event_payload_json),
            "{\"task_id\":\"task_wrong_source\",\"work_rev\":1,"
            "\"request_id\":\"wrong_source\",\"action\":\"a4_note\","
            "\"source_event_id\":\"evt_source_wrong\"}");
-  snprintf(claim.created_from_event_id,
-           sizeof(claim.created_from_event_id), "bus_wrong_source");
-  snprintf(claim.created_from_type, sizeof(claim.created_from_type),
+  snprintf(claim->created_from_event_id,
+           sizeof(claim->created_from_event_id), "bus_wrong_source");
+  snprintf(claim->created_from_type, sizeof(claim->created_from_type),
            "work_step_result");
   snprintf(wake, sizeof(wake),
            "{\"event_id\":\"evt_run_a4_wrong_source_000001\","
            "\"ts\":\"2026-07-26T00:00:00Z\","
            "\"type\":\"work_step_result\",\"source\":\"forged\","
            "\"run_id\":\"run_a4_wrong_source\",\"payload\":%s}\n",
-           claim.ctx.event_payload_json);
+           claim->ctx.event_payload_json);
   snprintf(inbox_path, sizeof(inbox_path), "%s/event_log.jsonl",
-           claim.ctx.run_dir);
-  rc |= expect(test_mkdir_p(claim.ctx.run_dir) == 0 &&
+           claim->ctx.run_dir);
+  rc |= expect(test_mkdir_p(claim->ctx.run_dir) == 0 &&
                test_write_file(inbox_path, wake) == 0,
                "write exact first inbound with wrong source");
-  rc |= expect(rt_ports_inbound_commit_state(&claim) == -1,
+  rc |= expect(rt_ports_inbound_commit_state(claim) == -1,
                "wrong-source first inbound is a durable claim conflict");
 
   /* Retention must pin the claimed result run as well as the source run.
@@ -2668,35 +2593,38 @@ int work_publication_pending_claim_resumes_same_run(void) {
   rc |= expect_file_exists(processed_path);
   rc |= expect_file_exists(newer_processed_path);
 
-  memset(&claim, 0, sizeof(claim));
+  memset(claim, 0, sizeof(*claim));
   memset(&profile, 0, sizeof(profile));
   snprintf(profile.name, sizeof(profile.name), "a4flow");
-  claim.profile = &profile;
-  snprintf(claim.ctx.workspace, sizeof(claim.ctx.workspace), "workspace");
-  snprintf(claim.ctx.run_id, sizeof(claim.ctx.run_id), "run_002");
-  snprintf(claim.ctx.run_dir, sizeof(claim.ctx.run_dir),
+  claim->profile = &profile;
+  snprintf(claim->ctx.workspace, sizeof(claim->ctx.workspace), "workspace");
+  snprintf(claim->ctx.run_id, sizeof(claim->ctx.run_id), "run_002");
+  snprintf(claim->ctx.run_dir, sizeof(claim->ctx.run_dir),
            "workspace/runs/run_002");
-  snprintf(claim.ctx.context_id, sizeof(claim.ctx.context_id), "chat:tests");
-  snprintf(claim.context_id, sizeof(claim.context_id), "chat:tests");
-  snprintf(claim.created_from_event_id,
-           sizeof(claim.created_from_event_id), "%s", wake_id);
-  snprintf(claim.created_from_type, sizeof(claim.created_from_type),
+  snprintf(claim->ctx.context_id, sizeof(claim->ctx.context_id), "chat:tests");
+  snprintf(claim->context_id, sizeof(claim->context_id), "chat:tests");
+  snprintf(claim->created_from_event_id,
+           sizeof(claim->created_from_event_id), "%s", wake_id);
+  snprintf(claim->created_from_type, sizeof(claim->created_from_type),
            "work_step_result");
-  claim.state = RT_RUN_WAITING_EVENT;
-  claim.ctx.next_event = 1;
-  rc |= expect(test_mkdir_p(claim.ctx.run_dir) == 0 &&
+  claim->state = RT_RUN_WAITING_EVENT;
+  claim->ctx.next_event = 1;
+  rc |= expect(test_mkdir_p(claim->ctx.run_dir) == 0 &&
                test_mkdir_p(
                    "workspace/runs/run_002/agent_outputs") == 0 &&
                test_mkdir_p(
                    "workspace/runs/run_002/action_calls") == 0 &&
-               rt_run_persist_state(&claim) == 0,
+               rt_run_persist_state(claim) == 0,
                "persist pending exact result-run claim");
   rc |= expect_file_not_exists(
       "workspace/runs/run_002/event_log.jsonl");
 
   g = harness_gateway_init("a4flow");
   rc |= expect(g != NULL, "gateway restores pending result-run claim");
-  if (!g) return 1;
+  if (!g) {
+    free(claim);
+    return 1;
+  }
   rc |= test_read_file("workspace/runs/run_002/event_log.jsonl", &run_two);
   rc |= expect(run_two &&
                count_lines_with_both(
@@ -2729,6 +2657,7 @@ int work_publication_pending_claim_resumes_same_run(void) {
   free(deliveries);
   free(logs);
   free(run_two);
+  free(claim);
   rc |= test_reset_workspace();
   return rc;
 }
@@ -2885,15 +2814,16 @@ static int run_generic_lifecycle(const char *floop, const char *handle_prefix,
 
   rc |= fx_reset();
   rc |= setup_testfx_actions();
-  rc |= setup_opgeneric_floop(floop, strcmp(handle_prefix, "fake1") == 0 ? "fake_one" : "fake_two", 120);
+  rc |= setup_opgeneric_floop(floop, strcmp(handle_prefix, "fake1") == 0 ? "fake_one" : "fake_two");
   if (rc == 0) rc |= pause_for_fixture_isolation_probe();
   g = harness_gateway_init(floop);
   rc |= expect(g != NULL, "generic floop loads");
   if (!g) return 1;
   rc |= expect(harness_gateway_publish(g, "tests", "alpha work please") == 0,
                "publish user message");
-  /* Full lifecycle: start -> poll(running) -> poll(finished) ->
-   * operation_result run. Wait for the store to go terminal. */
+  /* Full lifecycle: start -> running(worker_handle) -> detached worker
+   * submits its claim through the public helper -> one result run.
+   * Wait for the store to go terminal. */
   snprintf(needle, sizeof(needle), "\"status\":\"finished\"");
   rc |= expect(drive_until_file_contains(g, "workspace/memory/state/operations.json",
                                          needle, 8000) == 0,
@@ -2908,8 +2838,8 @@ static int run_generic_lifecycle(const char *floop, const char *handle_prefix,
   rc |= test_read_file("workspace/memory/state/operations.json", &ops);
   rc |= expect(ops != NULL, "operation store exists");
   if (ops) {
-    snprintf(needle, sizeof(needle), "\"handle\":\"%s_001\"", handle_prefix);
-    rc |= expect_substr(ops, needle, "handle uses the configured adapter");
+    snprintf(needle, sizeof(needle), "\"worker_handle\":\"%s_001\"", handle_prefix);
+    rc |= expect_substr(ops, needle, "worker handle uses the configured adapter");
     rc |= expect(count_substr(ops, "\"handle\":") == 1, "exactly one operation record");
   }
   logs = read_all_run_logs();
@@ -2918,9 +2848,11 @@ static int run_generic_lifecycle(const char *floop, const char *handle_prefix,
                "one operation_started event");
   {
     int result_events = count_substr(logs, "\"type\":\"operation_result\"");
-    /* driver append (1) + intake copy on the result run (1) */
-    rc |= expect(result_events == 2, "operation_result appended once and intaken once");
+    /* the admitted claim IS the result run's one canonical event */
+    rc |= expect(result_events == 1, "one canonical operation_result exists");
   }
+  rc |= expect_no_substr(logs, "operation_poll",
+                         "no polling artifact appears in any run");
   /* Opaque payload proof: the instruction text reached the handler and
    * its result text reached the event log unchanged. */
   snprintf(needle, sizeof(needle), "%s: update playlist X", wording);
@@ -2960,9 +2892,10 @@ int opgeneric_rebind_fake_two_config_only(void) {
 
 /* ===== 2. timer dedup + no restart loop =========================== */
 
-int opgeneric_stale_poll_after_terminal_is_noop(void) {
+int opgeneric_stale_claim_after_terminal_is_noop(void) {
   HarnessGateway *g;
   char *logs = NULL, *ops = NULL;
+  char op_id[RT_SMALL] = "";
   int rc = 0, before_results, before_starts;
 
   rc |= run_generic_lifecycle("opgeneric", "fake1", "fake_one finished", "fakeop_one");
@@ -2970,23 +2903,47 @@ int opgeneric_stale_poll_after_terminal_is_noop(void) {
   before_results = count_substr(logs, "\"type\":\"operation_result\"");
   before_starts = count_substr(logs, "\"type\":\"operation_started\"");
   free(logs);
+  rc |= test_read_file("workspace/memory/state/operations.json", &ops);
+  if (ops) {
+    const char *start = strstr(ops, "\"handle\":\"");
+    if (start) {
+      const char *end;
+      start += strlen("\"handle\":\"");
+      end = strchr(start, '"');
+      if (end && (size_t)(end - start) < sizeof(op_id)) {
+        memcpy(op_id, start, (size_t)(end - start));
+        op_id[end - start] = '\0';
+      }
+    }
+    free(ops);
+    ops = NULL;
+  }
+  rc |= expect(op_id[0] != '\0', "terminal operation id is readable");
 
   g = harness_gateway_init("opgeneric");
   rc |= expect(g != NULL, "gateway restarts on same workspace");
   if (!g) return 1;
-  rc |= expect(publish_operation_envelope("operation_poll", "fake1_001",
-                                          "fake_one", "") == 0,
-               "stale poll envelope published");
+  rc |= expect(publish_claim_envelope(op_id, "whatever-token",
+                                      "succeeded", "stale duplicate") == 0,
+               "stale claim envelope published");
   drive_for_ms(g, 600);
   harness_gateway_close(g);
 
   logs = read_all_run_logs();
   rc |= expect(count_substr(logs, "\"type\":\"operation_result\"") == before_results,
-               "stale poll publishes no second terminal result");
+               "stale claim publishes no second terminal result");
   rc |= expect(count_substr(logs, "\"type\":\"operation_started\"") == before_starts,
-               "stale poll starts nothing");
+               "stale claim starts nothing");
   rc |= expect_no_substr(logs, "\"type\":\"run_failed\"",
-                         "stale poll run retires cleanly");
+                         "stale claim leaves no failed run");
+  {
+    char *rejected = NULL;
+    rc |= test_read_file("workspace/logs/rejected_events.jsonl", &rejected);
+    rc |= expect(rejected &&
+                 strstr(rejected, "operation_already_terminal") != NULL,
+                 "stale claim is rejected as already terminal");
+    free(rejected);
+  }
   rc |= test_read_file("workspace/memory/state/operations.json", &ops);
   if (ops)
     rc |= expect(count_substr(ops, "\"handle\":") == 1, "store still has one record");
@@ -3253,7 +3210,6 @@ static int write_passtest_floop(const char *name, int one_pass) {
       "  \"one_pass\": %s,\n"
       "  \"serialize_contexts\": true,\n"
       "  \"retry_attempts\": 0,\n"
-      "  \"poll_interval_ms\": 200,\n"
       "  \"steps\": [\n"
       "    {\"id\": \"handler\", \"type\": \"agent\", \"agent\": \"handler\",\n"
       "     \"gate\": \"event_kind:user_message\"},\n"
@@ -3448,14 +3404,13 @@ static int write_fatest_floop(void) {
       "  \"one_pass\": true,\n"
       "  \"serialize_contexts\": true,\n"
       "  \"retry_attempts\": 2,\n"
-      "  \"poll_interval_ms\": 200,\n"
       "  \"steps\": [\n"
       "    {\"id\": \"memory.before\", \"type\": \"agent\", \"agent\": \"memory\"},\n"
       "    {\"id\": \"manage\", \"type\": \"agent\", \"agent\": \"floofclaw_manager\",\n"
       "     \"gate\": \"event_kind:user_message,affair_review,operation_result\"},\n"
       "    {\"id\": \"dispatch\", \"type\": \"builtin\", \"builtin\": \"action_runner\"},\n"
       "    {\"id\": \"workers\", \"type\": \"agent\", \"agent\": \"workers\",\n"
-      "     \"gate\": \"event_kind:user_message,affair_review,operation_poll,operation_result\"},\n"
+      "     \"gate\": \"event_kind:user_message,affair_review,operation_result\"},\n"
       "    {\"id\": \"memory.after\", \"type\": \"agent\", \"agent\": \"memory\", \"non_critical\": true}\n"
       "  ]\n"
       "}\n");
@@ -3525,6 +3480,8 @@ int floofclaw_background_blocker_end_to_end(void) {
   char *ops = NULL, *tasks = NULL, *deliveries = NULL, *logs = NULL;
   int rc = 0;
 
+  char *saved_cfg = NULL;
+  rc |= test_config_enable_all(&saved_cfg);
   rc |= fx_reset();
   rc |= write_fatest_floop();
   rc |= write_manager_mocks();
@@ -3626,8 +3583,8 @@ int floofclaw_background_blocker_end_to_end(void) {
                "stale rev-1 result text is preserved as evidence");
   rc |= expect_no_substr(logs, "\"type\":\"run_failed\"",
                          "no run reports a scheduler failure");
-  rc |= expect(count_run_dirs() >= 6,
-               "every poll and result is its own run");
+  rc |= expect(count_run_dirs() >= 4,
+               "each completion returns as its own result run");
   free(logs);
   free(deliveries);
   free(tasks);
@@ -3635,6 +3592,7 @@ int floofclaw_background_blocker_end_to_end(void) {
   fx_restore_env("FCLAW_CODEX_BIN", saved_codex);
   fx_restore_env("LLM_MOCK_RESPONSE_PATHS", saved_paths);
   fx_restore_env("FCLAW_MODEL_PROFILES", saved_profiles);
+  test_config_restore(saved_cfg);
   return rc;
 }
 
@@ -4005,6 +3963,8 @@ int openclaw_action_list_discovers_wildcard_grant(void) {
   char *logs = NULL, *deliveries = NULL;
   int rc = 0;
 
+  char *saved_cfg = NULL;
+  rc |= test_config_enable_all(&saved_cfg);
   rc |= fx_reset();
   rc |= expect(rt_task_apply_event(
                    "task_created",
@@ -4124,6 +4084,7 @@ done:
   free(first_request);
   fx_restore_env("LLM_MOCK_RESPONSE_PATHS", saved_paths);
   fx_restore_env("FCLAW_MODEL_PROFILES", saved_profiles);
+  test_config_restore(saved_cfg);
   return rc;
 }
 
@@ -4131,14 +4092,11 @@ static int write_openclaw_input_poll_fixture(void) {
   int rc = 0;
   rc |= test_write_file("floops/openclaw_input_poll/loop.json",
       "{\"version\":1,\"name\":\"openclaw_input_poll\","
-      "\"description\":\"OpenClaw input-task polling proof.\","
+      "\"description\":\"OpenClaw detached input-task completion proof.\","
       "\"one_pass\":true,\"serialize_contexts\":true,"
-      "\"poll_interval_ms\":100,\"steps\":["
+      "\"steps\":["
       "{\"id\":\"main\",\"type\":\"agent\",\"agent\":\"main_claw\","
       "\"gate\":\"event_kind:user_message,operation_result\"},"
-      "{\"id\":\"operation.poll\",\"type\":\"agent\","
-      "\"agent\":\"operation_poller\","
-      "\"gate\":\"event_kind:operation_poll\"},"
       "{\"id\":\"dispatch\",\"type\":\"builtin\","
       "\"builtin\":\"action_runner\"}]}\n");
   rc |= test_write_file(
@@ -4151,9 +4109,6 @@ static int write_openclaw_input_poll_fixture(void) {
       "floops/openclaw_input_poll/agents/main_claw/prompt.md",
       "Use the exact catalog. An action continues the input task. A final "
       "message must include task.update state completed.\n{{tools}}\n{{json}}\n");
-  rc |= test_write_file(
-      "floops/openclaw_input_poll/agents/operation_poller/agent.json",
-      "{\"id\":\"operation_poller\",\"executor\":\"native\"}\n");
   return rc;
 }
 
@@ -4211,10 +4166,10 @@ int one_pass_run_does_not_complete_input_task(void) {
 }
 
 /* A visible progress message and detached managed action share one model
- * response. The input task remains open, future operation_poll events run as
- * separate native turns (including a running re-arm), and only the later
- * explicit task.update completes the original task. */
-int openclaw_progress_and_input_task_poll_reach_final_reply(void) {
+ * response. The input task remains open, the detached worker's completion
+ * returns as its own correlated result run, and only the later explicit
+ * task.update completes the original task. */
+int openclaw_progress_and_detached_completion_reach_final_reply(void) {
   char *saved_profiles = fx_capture_env("FCLAW_MODEL_PROFILES");
   char *saved_paths = fx_capture_env("LLM_MOCK_RESPONSE_PATHS");
   char *saved_codex = fx_capture_env("FCLAW_CODEX_BIN");
@@ -4224,6 +4179,8 @@ int openclaw_progress_and_input_task_poll_reach_final_reply(void) {
   char *deliveries = NULL, *archive = NULL, *ops = NULL;
   int rc = 0;
 
+  char *saved_cfg = NULL;
+  rc |= test_config_enable_all(&saved_cfg);
   rc |= fx_reset();
   rc |= write_openclaw_input_poll_fixture();
   rc |= test_write_file("workspace/fixtures/openclaw_profiles.json",
@@ -4275,7 +4232,7 @@ int openclaw_progress_and_input_task_poll_reach_final_reply(void) {
   rc |= expect(drive_until_file_contains(
                    g, "workspace/logs/deliveries.jsonl",
                    "OPENCLAW_ASYNC_FINAL", 12000) == 0,
-               "future polls finish the operation and main_claw replies");
+               "the detached completion returns and main_claw replies");
   drive_for_ms(g, 200);
 
 done:
@@ -4296,15 +4253,12 @@ done:
                          "progress does not complete the input task");
   rc |= expect_substr(logs, "\"work_rev\":0",
                       "detached input operation records revision zero");
-  rc |= expect_substr(bus, "\"type\":\"operation_poll\"",
-                      "timer publishes a future operation_poll event");
-  rc |= expect(count_substr(bus, "\"type\":\"operation_poll\"") >= 2,
-               "a running poll re-arms another future event");
-  rc |= expect_substr(logs,
-      "\"action\":\"manage_codex\",\"args\":{\"op\":\"poll\",\"op_id\":",
-      "native poller dispatches the stored input-task operation");
-  rc |= expect_substr(bus, "OPENCLAW_ASYNC_TOOL_DONE",
-                      "finished poll returns as operation_result");
+  rc |= expect_no_substr(bus, "\"type\":\"operation_poll\"",
+                         "no poll envelope ever reaches the bus");
+  rc |= expect_substr(bus, "\"type\":\"operation_completed\"",
+                      "the detached runner submits one completion claim");
+  rc |= expect_substr(logs, "OPENCLAW_ASYNC_TOOL_DONE",
+                      "runner-submitted completion returns as operation_result");
   rc |= expect_substr(logs, "\"type\":\"task_updated\"",
                       "final turn carries explicit task completion intent");
   rc |= expect_substr(logs, "\"status\":\"completed\"",
@@ -4330,6 +4284,7 @@ done:
   fx_restore_env("FCLAW_CODEX_BIN", saved_codex);
   fx_restore_env("LLM_MOCK_RESPONSE_PATHS", saved_paths);
   fx_restore_env("FCLAW_MODEL_PROFILES", saved_profiles);
+  test_config_restore(saved_cfg);
   return rc;
 }
 
@@ -4401,6 +4356,84 @@ done:
   free(third_request);
   free(deliveries);
   free(runstate);
+  return rc;
+}
+
+/* Observed live (truly run_121): gemini-2.5-flash emitted a perfect action
+ * call but placed task_id beside args instead of inside it. The stray key
+ * passes the task contract (it is a Continue with one substantive action)
+ * and is only caught by the structural call validator, which used to kill
+ * the run with a bare agent_output_invalid. A structural rejection must
+ * spend the same repair budget as a contract rejection, with a generic
+ * reason beside the rejected response. */
+static int openclaw_malformed_call_shape_repairs_and_completes(void) {
+  HarnessGateway *g = NULL;
+  char *logs = NULL, *deliveries = NULL;
+  char *repair_request = NULL, *rejection = NULL;
+  int rc = 0;
+
+  rc |= fx_reset();
+  rc |= test_write_file("workspace/notes/shape.txt", "shape-alpha\n");
+  rc |= test_write_file("workspace/fixtures/openclaw_profiles.json",
+      "{\"version\":1,\"profiles\":["
+      "{\"id\":\"default_gemini_flash\",\"provider\":\"mock\",\"model\":\"mock-1\"},"
+      "{\"id\":\"responses\",\"provider\":\"mock\",\"model\":\"mock-1\"}]}\n");
+  rc |= test_write_file("workspace/fixtures/openclaw_shape_invalid.json",
+      "{\"calls\":[{\"name\":\"read_file\",\"args\":{"
+      "\"op\":\"start\",\"path\":\"notes/shape.txt\"},"
+      "\"task_id\":\"task_run_001_000002\"}]}\n");
+  rc |= test_write_file("workspace/fixtures/openclaw_shape_clean.json",
+      "{\"calls\":[{\"name\":\"read_file\",\"args\":{"
+      "\"op\":\"start\",\"path\":\"notes/shape.txt\"}}]}\n");
+  rc |= test_write_file("workspace/fixtures/openclaw_shape_final.json",
+      "{\"calls\":["
+      "{\"name\":\"message\",\"args\":{"
+      "\"message\":\"SHAPE_REPAIR_COMPLETE\"}},"
+      "{\"name\":\"task.update\",\"args\":{"
+      "\"task_id\":\"task_run_001_000002\",\"state\":\"completed\"}}]}\n");
+  (void)setenv("FCLAW_MODEL_PROFILES",
+               "workspace/fixtures/openclaw_profiles.json", 1);
+  (void)setenv("LLM_MOCK_RESPONSE_PATHS",
+               "workspace/fixtures/openclaw_shape_invalid.json:"
+               "workspace/fixtures/openclaw_shape_clean.json:"
+               "workspace/fixtures/openclaw_shape_final.json", 1);
+
+  g = harness_gateway_init("openclaw");
+  rc |= expect(g != NULL, "OpenClaw loads for malformed call-shape repair");
+  if (!g) goto done;
+  rc |= expect(harness_gateway_publish(g, "tests",
+                                       "read the shape file and report") == 0,
+               "publish malformed call-shape request");
+  rc |= expect(drive_until_file_contains(
+                   g, "workspace/logs/deliveries.jsonl",
+                   "SHAPE_REPAIR_COMPLETE", 12000) == 0,
+               "structurally rejected decision repairs and completes");
+  drive_for_ms(g, 200);
+done:
+  if (g) harness_gateway_close(g);
+  logs = read_all_run_logs();
+  (void)test_read_file("workspace/logs/deliveries.jsonl", &deliveries);
+  rc |= test_read_file(
+      "workspace/runs/run_001/provider_calls/002_request.json",
+      &repair_request);
+  rc |= test_read_file(
+      "workspace/runs/run_001/agent_outputs/001_main.json.rejected.json",
+      &rejection);
+  rc |= expect_substr(repair_request ? repair_request : "",
+                      "response was not the correct output format, please "
+                      "follow your prompt exactly",
+                      "repair call receives the generic format reason");
+  rc |= expect_substr(rejection ? rejection : "", "\"executed\":false",
+                      "structurally rejected decision is preserved unexecuted");
+  rc |= expect(count_substr(logs ? logs : "",
+                            "\"type\":\"run_failed\"") == 0,
+               "one structural slip no longer fails the run");
+  rc |= expect_substr(deliveries ? deliveries : "", "SHAPE_REPAIR_COMPLETE",
+                      "repaired conversation still reaches the user");
+  free(rejection);
+  free(repair_request);
+  free(deliveries);
+  free(logs);
   return rc;
 }
 
@@ -4531,6 +4564,7 @@ done:
   free(memory);
   free(logs);
   rc |= openclaw_decision_contract_exhaustion_proof();
+  rc |= openclaw_malformed_call_shape_repairs_and_completes();
   fx_restore_env("LLM_MOCK_RESPONSE_PATHS", saved_paths);
   fx_restore_env("FCLAW_MODEL_PROFILES", saved_profiles);
   return rc;
@@ -4803,6 +4837,7 @@ done:
 int review_dispatched_work_carries_origin_affair_id(void) {
   char *saved_profiles = fx_capture_env("FCLAW_MODEL_PROFILES");
   char *saved_paths = fx_capture_env("LLM_MOCK_RESPONSE_PATHS");
+  char *saved_codex = fx_capture_env("FCLAW_CODEX_BIN");
   HarnessGateway *g = NULL;
   char *affairs = NULL, *tasks = NULL;
   char alpha[64] = "", beta[64] = "";
@@ -4826,6 +4861,10 @@ int review_dispatched_work_carries_origin_affair_id(void) {
       "\"done_when\":\"summary exists\"}}]}\n");
   rc |= test_write_file("workspace/fixtures/c4_rest.json", "{\"calls\":[]}\n");
   (void)setenv("FCLAW_MODEL_PROFILES", "workspace/fixtures/model_profiles.json", 1);
+  /* The review dispatches real work; the workers phase then starts the
+   * configured manage_codex handler. NEVER let that reach the real
+   * codex binary from a test. */
+  (void)setenv("FCLAW_CODEX_BIN", "workspace/fixtures/fake_codex.sh", 1);
   (void)setenv("LLM_MOCK_RESPONSE_PATHS",
                "workspace/fixtures/c1_open_alpha.json:"
                "workspace/fixtures/c2_open_beta.json:"
@@ -4900,6 +4939,7 @@ int review_dispatched_work_carries_origin_affair_id(void) {
 done:
   if (g) harness_gateway_close(g);
   free(affairs);
+  fx_restore_env("FCLAW_CODEX_BIN", saved_codex);
   fx_restore_env("FCLAW_MODEL_PROFILES", saved_profiles);
   fx_restore_env("LLM_MOCK_RESPONSE_PATHS", saved_paths);
   return rc;

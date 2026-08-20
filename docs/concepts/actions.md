@@ -73,7 +73,7 @@ a later `operation_result` turn.
 `actions/common/manage_codex/` and `actions/common/manage_claude/` are
 runtime-intrinsic actions (`exec: ["runtime", "fc_manage_codex()"]` /
 `fc_manage_claude()`) that wrap an external agent CLI as a managed
-lifecycle. Op kinds: `start | poll | reply | abort | status`. Op state
+lifecycle. Op kinds: `start | abort | status`. Op state
 persists under `workspace/logs/codex_ops/<op_id>/` and
 `workspace/logs/claude_ops/<op_id>/`. A floop's native workers agent
 invokes the action named by its configured `handler`; the runtime dispatches
@@ -104,7 +104,7 @@ implement a second action dispatcher.
     "properties": {
       "op": {
         "type": "string",
-        "enum": ["start", "poll"]
+        "enum": ["start"]
       },
       "path": {
         "type": "string",
@@ -260,6 +260,39 @@ The catalog is deterministic text. Put `{{tools}}` once in the stable part of
 `prompt.md`, before the changing `{{json}}` input, when provider prefix caching
 matters. FloofClaw preserves the bytes and order; whether a provider serves a
 cache hit is provider behavior, not an engine guarantee.
+
+## Deployment `force_disable`
+
+The allowlist is the floop author's control: which actions this agent may
+use. `force_disable` in `config/floofclaw_config.json` is the operator's:
+which actions this deployment currently runs.
+
+```json
+"force_disable": ["web_read", "gcal"]
+```
+
+Entries are action ids (`action.json` `id`), never directory groupings. A
+masked action stays registered, so floop allowlists that name it keep
+loading and keep declaring intent — disabling an action while working on it
+never requires editing a floop. The mask is applied everywhere the model
+could meet the action: it is omitted from every rendered catalog (including
+`all_actions` expansion and `action_list` results), and a call that arrives
+anyway is rejected with `action_rejected.reason = "force_disabled"`. The
+gateway states each masked action once at startup:
+`gateway: action web_read force_disabled (config)`.
+
+The operator surfaces are exempt: `fclaw action list` shows the whole
+registry with `"force_disabled": true` stated per masked entry, and
+`fclaw action exec` runs a masked action directly — that is how setup gets
+verified before its id is removed from the list.
+
+An id the registry does not hold is inert — an absent action needs no
+disabling — so one list travels unchanged across deployment branches.
+
+The shipped config lists every bundled action that cannot work before
+operator setup (a built helper, credentials, or an installed worker CLI).
+Complete the setup described in the action's `SETUP_<NAME>.md` or README,
+then delete the id from the list to enable it.
 
 ## Request lifecycle
 
@@ -699,17 +732,34 @@ An action that runs detached external work declares it in
 { "contract": "managed_operation" }
 ```
 
-Every managed-operation action implements the two common bounded ops through
-its normal args:
-`start` returns `{"status":"running","handle":"..."}` (or
-`finished` immediately), and `poll` with the handle returns
-`running` or `{"status":"finished","handle":"...","text":"..."}`.
-Delegates may expose additional schema ops such as `reply`, `abort`, or
-`status`; those are adapter features layered on the same start/poll contract.
-`handle` is adapter-owned and opaque; `text` is opaque result prose.
-The kernel's operation driver (enabled per floop by
-`poll_interval_ms`) records, polls, and publishes results for any
-contract-declaring action without knowing its id — see
+A managed-operation manifest also declares its completion deadline policy:
+`default_timeout_ms` (required) and optionally `max_timeout_ms`. A statically
+configured floop may shorten the deadline (`operation_timeout_ms` in
+`loop.json`); nothing may extend it past the action's maximum.
+
+`start` returns `{"status":"running","handle":"..."}` (or `finished`
+immediately). `handle` is the WORKER's own identity — a PID, a provider job
+id — recorded as kill/query metadata only. Durable identity is the runtime's
+preallocated operation id, and completion travels through the bus completion
+contract: before the action executes, the runtime places
+`FCLAW_OPERATION_ID`, `FCLAW_COMPLETION_TOKEN`, `FCLAW_ACTION_ROOT`, and
+`FCLAW_BIN` into the trusted child environment (never argv, never the
+persisted stdin envelope, never model-visible text). When the detached
+worker's result is durable, it submits exactly one claim:
+
+```text
+"$FCLAW_BIN" operation complete -a --result-file <bounded-json>
+```
+
+(or `--status succeeded|failed --text "..."`). The helper writes a durable
+bus envelope and knocks the wake socket; it works even while the gateway is
+stopped, and duplicate invocations are safe. A worker that spawns its own
+waiter process should detach it with `fclaw internal detach -- <cmd...>` so
+it survives the action's timeout and gateway shutdown. Delegates may expose
+additional schema ops such as `abort` or `status`; those are adapter
+features layered on the same contract. `text` is opaque result prose. The
+kernel's operation driver records, terminalizes, and publishes results for
+any contract-declaring action without knowing its id — see
 [the floofclaw floop](floofclaw_floop.md). `manage_codex` and `manage_claude`
 implement it; the fake adapters in the acceptance tests prove the
 handler is swappable by config alone.
@@ -732,15 +782,16 @@ The two-turn flow:
 2. The action fetches / computes / whatever, returns
    `{"status":"finished","handle":"<id>","text":"<summary>"}`.
    (If the work is fast — sub-second — this happens on the start
-   call itself; if it's slow, start returns `running` and the
-   kernel polls until finished.)
+   call itself; if it's slow, start returns `running` and the detached
+   worker later submits its completion claim through the bus. The
+   action-declared deadline bounds a worker that never reports.)
 3. On the LLM's next turn, an `operation_result` envelope carries
    the `text` field. The LLM composes the real answer using it.
 
 `web_read` and the bounded file/HTTP actions are synchronous examples that
 can return `finished` from `start`. `manage_codex` is the canonical async
-example: real running
-processes with poll cycles.
+example: a real detached process whose supervising runner verifies the
+result and submits the completion claim itself.
 
 `manage_codex` starts in FloofClaw's runtime workspace unless the action call
 explicitly sets `"root":"project"`. Deployments may opt into that second
@@ -765,6 +816,22 @@ stdout, stderr, exit status, final text, and state remain under
 `workspace/logs/codex_ops/`; project files do not move into the clearable
 runtime workspace. Existing calls that omit `root` retain workspace-only
 behavior.
+
+Deployments may also pin the Codex model for this action:
+
+```json
+{
+  "actions": {
+    "manage_codex": {
+      "model": "gpt-5.6-luna"
+    }
+  }
+}
+```
+
+When `model` is omitted, FloofClaw passes no model flag and Codex uses its own
+configured default. The model is deployment config, not an action argument, so
+the calling floop or model cannot change it per request.
 
 **Prefer this over engine surgery.** If a feature is tempting you
 to add a periodic tick that stashes data into the LLM's input

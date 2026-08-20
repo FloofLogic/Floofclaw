@@ -231,8 +231,20 @@ static int pid_alive(int pid) {
 
 static int gateway_running(void) {
   int pid = read_pid();
+  int owner_fd;
   if (pid <= 0) return 0;
   if (!pid_alive(pid)) {
+    (void)unlink(GW_PID_PATH);
+    (void)unlink(GW_LOOP_PATH);
+    return 0;
+  }
+  /* A PID file alone cannot prove identity: after an unclean exit the OS may
+   * reuse that number for an unrelated live process. The gateway owns this
+   * flock for its complete lifetime, so a live PID without the lock is stale
+   * control state and must not prevent a new runtime owner from starting. */
+  owner_fd = gateway_owner_lock_try();
+  if (owner_fd >= 0) {
+    gateway_owner_unlock(owner_fd);
     (void)unlink(GW_PID_PATH);
     (void)unlink(GW_LOOP_PATH);
     return 0;
@@ -357,6 +369,12 @@ static int run_gateway_reactor(const char *loop_name, int poll_ms,
       return 1;
     }
   }
+  for (size_t di = 0; di < scheduler->actions.count; ++di) {
+    if (scheduler->actions.defs[di].force_disabled)
+      printf("gateway: action %s force_disabled (config)\n",
+             scheduler->actions.defs[di].id);
+  }
+  fflush(stdout);
   if (verbose) {
     if (human)
       printf("gateway: rtrun_size=%zu max_active=%d pool_bytes=%zu\n",

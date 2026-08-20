@@ -1,6 +1,6 @@
 {
   "id": "manage_claude",
-  "description": "Run Claude Code as a managed external operation with start, poll, reply, abort, and status operations.",
+  "description": "Run Claude Code as a managed external operation. op:start detaches the worker and completes through the runtime's bus completion contract; op:status inspects a worker's local state; op:abort kills the worker and terminalizes its operation.",
   "outside_world": true,
   "args_schema": {
     "type": "object",
@@ -13,8 +13,6 @@
         "type": "string",
         "enum": [
           "start",
-          "poll",
-          "reply",
           "abort",
           "status"
         ],
@@ -26,11 +24,7 @@
       },
       "op_id": {
         "type": "string",
-        "description": "Managed operation identifier for poll, reply, abort, or status."
-      },
-      "answer": {
-        "type": "string",
-        "description": "Follow-up answer for reply."
+        "description": "Worker identifier from a prior start (its op_id), for abort or status."
       },
       "cwd": {
         "type": "string",
@@ -56,5 +50,6 @@
   ],
   "timeout_ms": 0,
   "contract": "managed_operation",
-  "poll_handle_arg": "op_id"
+  "default_timeout_ms": 1800000,
+  "max_timeout_ms": 7200000
 }

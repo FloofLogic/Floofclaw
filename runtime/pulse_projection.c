@@ -41,8 +41,9 @@ typedef struct {
 } PulseTask;
 
 typedef struct {
-  char handle[RT_SMALL], action[RT_SMALL], task_id[RT_SMALL], status[RT_SMALL];
-  long long work_rev, next_poll_at_ms, poll_interval_ms;
+  char handle[RT_SMALL], worker_handle[RT_SMALL];
+  char action[RT_SMALL], task_id[RT_SMALL], status[RT_SMALL];
+  long long work_rev, deadline_ms;
 } PulseOperation;
 
 typedef struct {
@@ -326,14 +327,13 @@ static size_t collect_operations(const char *root, PulseOperation *out,
                          sizeof(o->task_id), "");
     (void)json_string_or(&item, "status", o->status,
                          sizeof(o->status), "");
+    (void)json_string_or(&item, "worker_handle", o->worker_handle,
+                         sizeof(o->worker_handle), "");
     (void)json_ref_object_get_long(&item, "work_rev", &o->work_rev);
-    (void)json_ref_object_get_long(&item, "next_poll_at_ms",
-                                   &o->next_poll_at_ms);
-    (void)json_ref_object_get_long(&item, "poll_interval_ms",
-                                   &o->poll_interval_ms);
-    if (strcmp(o->status, "running") == 0 && !o->next_poll_at_ms)
+    (void)json_ref_object_get_long(&item, "deadline_ms", &o->deadline_ms);
+    if (strcmp(o->status, "running") == 0 && !o->deadline_ms)
       add_warning(warnings,
-                  "operation %s is running with no poll timer armed",
+                  "operation %s is running with no completion deadline",
                   o->handle);
     count++;
   }
@@ -710,18 +710,19 @@ int rt_pulse_projection_json(const char *root, long long now_ms,
     goto too_large;
   for (size_t i = 0; i < operation_count; ++i) {
     PulseOperation *o = &operations[i];
-    char eh[RT_MED], ea[RT_MED], et[RT_MED], es[RT_MED];
+    char eh[RT_MED], ewh[RT_MED], ea[RT_MED], et[RT_MED], es[RT_MED];
     if (json_escape(o->handle, eh, sizeof(eh)) != 0 ||
+        json_escape(o->worker_handle, ewh, sizeof(ewh)) != 0 ||
         json_escape(o->action, ea, sizeof(ea)) != 0 ||
         json_escape(o->task_id, et, sizeof(et)) != 0 ||
         json_escape(o->status, es, sizeof(es)) != 0 ||
         pulse_appendf(
             &cur, &left,
-            "%s{\"handle\":\"%s\",\"action\":\"%s\",\"task_id\":\"%s\","
-            "\"status\":\"%s\",\"work_rev\":%lld,\"next_poll_at_ms\":%lld,"
-            "\"poll_interval_ms\":%lld}",
-            i ? "," : "", eh, ea, et, es, o->work_rev,
-            o->next_poll_at_ms, o->poll_interval_ms) != 0)
+            "%s{\"handle\":\"%s\",\"worker_handle\":\"%s\","
+            "\"action\":\"%s\",\"task_id\":\"%s\","
+            "\"status\":\"%s\",\"work_rev\":%lld,\"deadline_ms\":%lld}",
+            i ? "," : "", eh, ewh, ea, et, es, o->work_rev,
+            o->deadline_ms) != 0)
       goto too_large;
   }
   if (pulse_appendf(&cur, &left, "],\"messages\":[") != 0) goto too_large;

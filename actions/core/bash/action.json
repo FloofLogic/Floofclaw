@@ -27,5 +27,7 @@
     "run.sh"
   ],
   "timeout_ms": 30000,
-  "contract": "managed_operation"
+  "contract": "managed_operation",
+  "default_timeout_ms": 300000,
+  "max_timeout_ms": 600000
 }

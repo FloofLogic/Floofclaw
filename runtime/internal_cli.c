@@ -17,11 +17,13 @@
 #include "llm/media.h"
 #include "support/timing.h"
 
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static const char *opt(int *i, int argc, char **argv, const char *flag) {
@@ -119,6 +121,72 @@ static int now_ms_main(int argc, char **argv) {
   return 0;
 }
 
+/* detach — run a command as a session-detached daemon child. Double
+ * fork + setsid, stdio replaced with /dev/null (redirect inside the
+ * command if a log is wanted), environment and cwd inherited. This is
+ * the blessed detacher for subprocess managed actions that spawn a
+ * completion waiter: it survives the action's own timeout kill, the
+ * gateway's shutdown sweep, and a foreground Ctrl-C, exactly like the
+ * intrinsic codex/claude runners (macOS ships no setsid(1)). */
+static int detach_main(int argc, char **argv) {
+  int start = 0;
+  pid_t first;
+  int pipefd[2];
+  if (argc > 0 && strcmp(argv[0], "--") == 0) start = 1;
+  if (argc - start < 1) {
+    fprintf(stderr, "usage: fclaw internal detach -- <command> [args...]\n");
+    return 2;
+  }
+  if (pipe(pipefd) != 0) {
+    fprintf(stderr, "internal detach: pipe failed\n");
+    return 1;
+  }
+  first = fork();
+  if (first < 0) {
+    close(pipefd[0]); close(pipefd[1]);
+    fprintf(stderr, "internal detach: fork failed\n");
+    return 1;
+  }
+  if (first == 0) {
+    pid_t worker;
+    close(pipefd[0]);
+    if (setsid() < 0) _exit(111);
+    worker = fork();
+    if (worker < 0) _exit(112);
+    if (worker > 0) {
+      (void)write(pipefd[1], &worker, sizeof(worker));
+      close(pipefd[1]);
+      _exit(0);
+    }
+    close(pipefd[1]);
+    {
+      int devnull = open("/dev/null", O_RDWR);
+      if (devnull >= 0) {
+        (void)dup2(devnull, STDIN_FILENO);
+        (void)dup2(devnull, STDOUT_FILENO);
+        (void)dup2(devnull, STDERR_FILENO);
+        if (devnull > 2) close(devnull);
+      }
+    }
+    execvp(argv[start], &argv[start]);
+    _exit(127);
+  }
+  close(pipefd[1]);
+  {
+    pid_t worker_pid = 0;
+    ssize_t got = read(pipefd[0], &worker_pid, sizeof(worker_pid));
+    int status = 0;
+    close(pipefd[0]);
+    (void)waitpid(first, &status, 0);
+    if (got != (ssize_t)sizeof(worker_pid) || worker_pid <= 0) {
+      fprintf(stderr, "internal detach: launch failed\n");
+      return 1;
+    }
+    printf("{\"ok\":true,\"pid\":%lld}\n", (long long)worker_pid);
+  }
+  return 0;
+}
+
 static int free_port_main(int argc, char **argv) {
   (void)argc; (void)argv;
   int s = socket(AF_INET, SOCK_STREAM, 0);
@@ -177,10 +245,11 @@ static int pulse_json_main(int argc, char **argv) {
 int rt_internal_main(int argc, char **argv) {
   if (argc < 1) {
     fprintf(stderr, "usage: fclaw internal <subcommand> ...\n"
-                    "  subcommands: agent-llm, now-ms, free-port, pulse-json\n");
+                    "  subcommands: agent-llm, now-ms, free-port, pulse-json, detach\n");
     return 2;
   }
   if (strcmp(argv[0], "agent-llm") == 0) return agent_llm_main(argc - 1, argv + 1);
+  if (strcmp(argv[0], "detach")    == 0) return detach_main(argc - 1, argv + 1);
   if (strcmp(argv[0], "now-ms")    == 0) return now_ms_main(argc - 1, argv + 1);
   if (strcmp(argv[0], "free-port") == 0) return free_port_main(argc - 1, argv + 1);
   if (strcmp(argv[0], "pulse-json") == 0) return pulse_json_main(argc - 1, argv + 1);

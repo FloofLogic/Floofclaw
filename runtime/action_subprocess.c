@@ -118,15 +118,32 @@ int rt_action_subprocess_launch(RtRun *r, const char *rid, const RtActionDef *de
    * to the correlated terminal below. */
   if (rt_action_emit_started(r, rid, def->id, NULL, task_id) != 0)
     return -1;
+  /* Preallocate the operation identity + completion capability +
+   * deadline durably before the worker process can exist. */
+  if (def->managed_operation) {
+    int pidx = rt_action_runner_pending_index(r, rid);
+    if (pidx < 0 ||
+        rt_operation_allocate_for_call(r, def,
+                                       &r->pending_actions[pidx]) != 0) {
+      return rt_action_emit_terminal(
+          r, "action_failed", rid, def->id, NULL, task_id,
+          "operation_allocation_failed", "{}",
+          "{\"message\":\"managed-operation identity allocation failed\"}");
+    }
+  }
   {
     char *argv[] = { (char *)def->exec_argv0, exec_path, NULL };
     /* Declared config resolved from config/floofclaw_config.json
      * actions.<id>. Stack-owned: fork copies it into the child, and the
-     * launch call returns after the fork. */
+     * launch call returns after the fork. Managed actions additionally
+     * receive the completion capability and the callback binary through
+     * the child environment — never through argv, the persisted stdin
+     * envelope, or model-authored args. */
     char cfg_buf[RT_ACTION_CONFIG_MAX][RT_MED];
-    char *cfg_env[RT_ACTION_CONFIG_MAX + 1];
+    char op_env_buf[4][RT_MED];
+    char *cfg_env[RT_ACTION_CONFIG_MAX + 5];
     int cfg_n = rt_action_resolve_config(def, cfg_buf, sizeof(cfg_buf[0]));
-    int ci;
+    int ci, env_n = 0;
     if (cfg_n < 0) {
       char error[RT_LARGE];
       snprintf(error, sizeof(error),
@@ -137,8 +154,32 @@ int rt_action_subprocess_launch(RtRun *r, const char *rid, const RtActionDef *de
           r, "action_failed", rid, def->id, NULL, task_id,
           "config_missing", "{}", error);
     }
-    for (ci = 0; ci < cfg_n; ++ci) cfg_env[ci] = cfg_buf[ci];
-    cfg_env[cfg_n] = NULL;
+    for (ci = 0; ci < cfg_n; ++ci) cfg_env[env_n++] = cfg_buf[ci];
+    if (def->managed_operation) {
+      int pidx = rt_action_runner_pending_index(r, rid);
+      char runtime_root[PATH_MAX] = "";
+      const RtPendingAction *p = pidx >= 0 ? &r->pending_actions[pidx] : NULL;
+      (void)getcwd(runtime_root, sizeof(runtime_root));
+      if (p && p->op_id[0] &&
+          snprintf(op_env_buf[0], sizeof(op_env_buf[0]),
+                   "FCLAW_OPERATION_ID=%s", p->op_id) <
+              (int)sizeof(op_env_buf[0]) &&
+          snprintf(op_env_buf[1], sizeof(op_env_buf[1]),
+                   "FCLAW_COMPLETION_TOKEN=%s", p->op_token) <
+              (int)sizeof(op_env_buf[1]) &&
+          snprintf(op_env_buf[2], sizeof(op_env_buf[2]),
+                   "FCLAW_ACTION_ROOT=%s", runtime_root) <
+              (int)sizeof(op_env_buf[2]) &&
+          snprintf(op_env_buf[3], sizeof(op_env_buf[3]),
+                   "FCLAW_BIN=%s", rt_exe_path()) <
+              (int)sizeof(op_env_buf[3])) {
+        cfg_env[env_n++] = op_env_buf[0];
+        cfg_env[env_n++] = op_env_buf[1];
+        cfg_env[env_n++] = op_env_buf[2];
+        cfg_env[env_n++] = op_env_buf[3];
+      }
+    }
+    cfg_env[env_n] = NULL;
     RtJobSpec spec = {
       .argv = argv, .stdin_path = paths.in_path,
       .stdout_path = paths.out_path, .stderr_path = paths.err_path,

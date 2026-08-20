@@ -1,6 +1,6 @@
 {
   "_comment": "Safe fresh-clone defaults. See config/floofclaw_config.example.json before enabling a channel.",
-  "bot_name": "FloofClaw",
+  "bot_name": "Mox",
   "default_floop": "hello",
   "gateway": {
     "host": "127.0.0.1",
@@ -9,6 +9,14 @@
   "affairs": {
     "cross_context_read": true
   },
+  "force_disable": [
+    "web_read",
+    "gcal",
+    "git_github",
+    "manage_codex",
+    "manage_claude",
+    "manage_hermes"
+  ],
   "channels": {
     "ws": {
       "enabled": false,

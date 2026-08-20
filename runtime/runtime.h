@@ -43,6 +43,8 @@
  * array trivia: overflow behavior is exercised by the robustness suite. */
 #define OPERATION_MAX_ITEMS 128
 #define AFFAIR_MAX_ITEMS     32
+/* Completion-token length in hex characters (32 random bytes). */
+#define RT_OPERATION_TOKEN_HEX 64
 
 typedef struct {
   char id[RT_SMALL];
@@ -73,9 +75,10 @@ typedef struct {
    * failing the run. Committed calls are memoized by signature, so a
    * retry pass reuses recorded results instead of re-executing. */
   int retry_attempts;
-  /* Default managed-operation poll cadence for this floop, passed
-   * opaquely to the operation driver. 0 = driver default. */
-  int poll_interval_ms;
+  /* Optional floop-level shortening of managed-operation completion
+   * deadlines (ms). May only shorten an action's declared default;
+   * never extends past the action's maximum. 0 = use action defaults. */
+  int operation_timeout_ms;
 } RtProfile;
 
 typedef enum {
@@ -91,7 +94,8 @@ typedef enum {
 
 typedef enum {
   RT_ACTION_CONFIG_PLAIN = 0,
-  RT_ACTION_CONFIG_EXISTING_DIRECTORY
+  RT_ACTION_CONFIG_EXISTING_DIRECTORY,
+  RT_ACTION_CONFIG_STRING
 } RtActionConfigKind;
 
 typedef struct {
@@ -115,16 +119,25 @@ typedef struct {
   /* Opt-in private, writable credential channel. Legacy actions retain
    * read-only scoped environment injection until migrated. */
   int private_credentials;
+  /* Deployment mask from config/floofclaw_config.json top-level
+   * `force_disable`. The action stays registered — floop allowlists keep
+   * declaring intent and still validate — but it is omitted from every
+   * rendered catalog and rejected at dispatch. Listing an id the registry
+   * does not hold is inert, so one config travels across branches. */
+  int force_disabled;
   int timeout_ms;
   /* action.json "contract":"managed_operation" — the action implements
-   * the start/poll detached-operation lifecycle and the operation
-   * driver reacts to its terminals. Declared capability; the kernel
-   * never matches on the action's id. */
+   * the detached-operation lifecycle (immediate finished(result) or
+   * running(worker_handle) + bus completion) and the operation driver
+   * reacts to its terminals. Declared capability; the kernel never
+   * matches on the action's id. */
   int managed_operation;
-  /* Optional product-neutral argument name used to return a durable
-   * operation handle to a pollable managed action. Immediate-terminal
-   * managed actions may leave it empty. */
-  char poll_handle_arg[RT_SMALL];
+  /* Completion-deadline policy owned by the action definition (ms).
+   * default_timeout_ms is required with the managed-operation contract;
+   * max_timeout_ms bounds any shortening/extension and defaults to the
+   * declared default. */
+  int default_timeout_ms;
+  int max_timeout_ms;
   /* action.json "contract":"work_terminal" — this runtime intrinsic may
    * terminalize only the exact work task/revision bound by a controller
    * invocation. The action id remains opaque to the validator. */
@@ -132,18 +145,16 @@ typedef struct {
   /* action.json "config" — non-secret deployment settings the action
    * needs (an ssh host, a mail profile). The manifest DECLARES the names;
    * config/floofclaw_config.json actions.<id> SUPPLIES the values, so one
-   * shared action pack never carries one deployment's facts. Values reach
-   * the action as environment variables of the same name. Credentials do
-   * NOT belong here — those live in the action:<id>: secret namespace. */
+   * shared action pack never carries one deployment's facts. Plain values
+   * reach subprocess actions as environment variables; typed values are
+   * startup-cached for runtime actions. Credentials do NOT belong here —
+   * those live in the action:<id>: secret namespace. */
   char config_names[RT_ACTION_CONFIG_MAX][RT_SMALL];
-  /* Optional deployment-object key and typed loader. Untyped entries use
-   * the environment-facing name as their key. `existing_directory` is
-   * resolved and cached while the registry loads, before any action launch. */
-  char typed_config_key[RT_ACTION_CONFIG_KEY_MAX];
-  /* One plus the config_names index; zero means no typed config. Typed
-   * values are deliberately sparse so the fixed action registry stays
-   * within the runtime's small-stack inspection budget. */
-  unsigned char typed_config_index;
+  /* Optional deployment-object keys and typed loaders. Plain entries use
+   * the environment-facing name as their key. Typed values are resolved and
+   * cached while the registry loads, before any action launch. */
+  char config_keys[RT_ACTION_CONFIG_MAX][RT_ACTION_CONFIG_KEY_MAX];
+  unsigned char config_kinds[RT_ACTION_CONFIG_MAX];
   unsigned char config_required[RT_ACTION_CONFIG_MAX];
   int config_count;
 } RtActionDef;
@@ -163,10 +174,14 @@ typedef struct {
   size_t cached_config_count;
 } RtActionRegistry;
 
-/* Durable managed-operation record. A poll continuation trusts only the
- * inbound handle, then resolves every other field from this snapshot. */
+/* Durable managed-operation record. A completion claim trusts only the
+ * inbound operation id + token, then resolves every other field from
+ * this snapshot. `handle` is the runtime-owned operation id;
+ * `worker_handle` is implementation-specific kill/query metadata. The
+ * completion token is deliberately NOT part of the snapshot. */
 typedef struct {
   char handle[RT_SMALL];
+  char worker_handle[RT_SMALL];
   char action[RT_SMALL];
   char request_id[RT_SMALL];
   char trigger_event_id[RT_SMALL];
@@ -178,8 +193,7 @@ typedef struct {
   char ref_json[RT_MED];
   char status[RT_SMALL];
   long long work_rev;
-  long long poll_interval_ms;
-  long long next_poll_at_ms;
+  long long deadline_ms;
 } RtOperationSnapshot;
 
 /* Reducer-owned budget/correlation summary for one work revision. A
@@ -451,21 +465,48 @@ int  rt_work_state_repair_disposition(const char *task_id,
                                       const char *source_event_id,
                                       int max_repair_attempts);
 /* Managed-operation store (runtime/operation_state.c). Records are one
- * per opaque handle; every value is opaque bytes to the kernel. */
+ * per runtime-owned operation id; every value is opaque bytes to the
+ * kernel. Direct writes cover the completion capability and worker
+ * metadata; behavioral truth stays in operation_started /
+ * operation_result events. */
 int  rt_operation_is_event_type(const char *type);
 int  rt_operation_apply_event(const char *type, const char *payload_json);
-int  rt_operation_status(const char *handle, char *status_out, size_t status_len);
-int  rt_operation_snapshot(const char *handle, RtOperationSnapshot *out);
-int  rt_operation_arm_poll(const char *handle, long long next_poll_at_ms);
-int  rt_operation_clear_poll(const char *handle);
-int  rt_operation_list_due(long long now_ms, char handles[][RT_SMALL], size_t max,
-                           size_t *out_count);
-long long rt_operation_earliest_due_ms(void);
-int  rt_operation_work_rev_of(const char *handle, long long *out_rev);
-int  rt_operation_correlation_json(const char *handle, char *out, size_t out_len);
-int  rt_operation_channel_of(const char *handle, char *out, size_t out_len);
-int  rt_operation_context_id_of(const char *handle, char *out, size_t out_len);
-/* Task-domain terminal for an operation that cannot be polled safely.
+int  rt_operation_status(const char *operation_id, char *status_out, size_t status_len);
+int  rt_operation_snapshot(const char *operation_id, RtOperationSnapshot *out);
+int  rt_operation_bind_secret(const char *operation_id, const char *token);
+int  rt_operation_close_without_result(const char *operation_id);
+int  rt_operation_id_for_request(const char *request_id,
+                                 char *out, size_t out_len);
+int  rt_operation_publish_worker_claim(const char *operation_id,
+                                       const char *token,
+                                       const char *status,
+                                       const char *text);
+int  rt_operation_submit_abort_claim(const char *worker_handle,
+                                     const char *text);
+int  rt_operation_set_worker_handle(const char *operation_id,
+                                    const char *worker_handle);
+int  rt_operation_bind_claim_envelope(const char *operation_id,
+                                      const char *envelope_id);
+int  rt_operation_claim_envelope_of(const char *operation_id,
+                                    char *out, size_t out_len);
+int  rt_operation_token_matches(const char *operation_id, const char *token);
+int  rt_operation_token_of(const char *operation_id, char *out, size_t out_len);
+int  rt_operation_find_running_by_worker_handle(const char *worker_handle,
+                                                char *operation_id_out,
+                                                size_t out_len);
+long long rt_operation_earliest_deadline_ms(void);
+int  rt_operation_list_deadline_due(long long now_ms, char ids[][RT_SMALL],
+                                    size_t max, size_t *out_count);
+int  rt_operation_any_running(void);
+int  rt_operation_work_rev_of(const char *operation_id, long long *out_rev);
+int  rt_operation_channel_of(const char *operation_id, char *out, size_t out_len);
+int  rt_operation_context_id_of(const char *operation_id, char *out, size_t out_len);
+int  rt_operation_generate_token(char *out, size_t out_len);
+/* Janitor retention guard for workspace/bus/processed pruning: 1 while
+ * the envelope is a completion claim whose operation is still running.
+ * Implemented in ports.c (it owns envelope shapes). */
+int  rt_ports_completion_claim_pinned(const char *envelope_id);
+/* Task-domain terminal for an operation that cannot continue safely.
  * Returns 0 when appended, 1 when the stored work binding is already
  * stale/terminal, and -1 on malformed input/I/O. */
 int  rt_task_block_unpollable_operation(const RtContext *ctx,
@@ -603,6 +644,8 @@ int rt_agent_allows_action(const RtAgentMeta *meta, const RtActionDef *def);
 int rt_action_validate_args(const RtActionDef *def, const char *args_json,
                            char *errors_json, size_t errors_len,
                            char *message, size_t message_len);
+int rt_action_render_registry(const RtActionRegistry *reg,
+                              char *out, size_t out_len);
 int rt_action_render_available(const RtActionRegistry *reg, const RtAgentMeta *meta,
                               char *out, size_t out_len);
 int rt_action_render_allowed_ids(const RtActionRegistry *reg,
@@ -629,7 +672,9 @@ int rt_tools_main(int argc, char **argv);
 int rt_adapters_main(int argc, char **argv);
 int rt_floops_main(int argc, char **argv);
 int rt_action_main(int argc, char **argv);
+int rt_operation_cli_main(int argc, char **argv);
 int rt_setup_main(int argc, char **argv);
+int rt_config_main(int argc, char **argv);
 int rt_version_main(int argc, char **argv);
 int rt_channel_main(int argc, char **argv);
 int rt_chat_interactive(int argc, char **argv);

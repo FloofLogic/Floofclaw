@@ -117,8 +117,9 @@ int llm_text_request_shapes_remain_byte_identical_and_unallocated(void) {
     },
     {
       "openai_responses",
-      "{\"model\":\"model-x\",\"input\":\"hi\\n\\\"ride\\\"\",\"temperature\":"
-      "0,\"store\":false,\"stream\":false}"
+      "{\"model\":\"model-x\",\"input\":\"hi\\n\\\"ride\\\"\",\"reasoning\":"
+      "{\"effort\":\"medium\"},\"temperature\":0,\"store\":false,"
+      "\"stream\":false}"
     }
   };
   LlmProfile profile;
@@ -250,6 +251,94 @@ int llm_media_request_shapes_map_without_omission(void) {
                "Gemini PDF request builds");
   rc |= expect_substr(body.data, "\"mime_type\":\"application/pdf\"",
                       "Gemini preserves PDF MIME in inline_data");
+  llm_request_body_free(&body);
+  unlink(path);
+  return rc;
+}
+
+/* The profile "effort" value passes through to OpenAI Responses as
+ * reasoning.effort; an absent effort omits the reasoning object and keeps
+ * the legacy request shape. The provider is the authority on valid values —
+ * the builder does not maintain a whitelist, so "minimal" passes through. */
+int openai_responses_maps_effort_to_reasoning(void) {
+  const unsigned char bytes[] = {0x01U, 0x02U, 0x03U};
+  LlmProfile profile;
+  LlmMedia media;
+  LlmRequest request = {"hi", NULL, 0U};
+  LlmRequestBody body;
+  char scratch[LLM_PROMPT_MAX + 1024];
+  char path[256];
+  int rc = 0;
+
+  memset(&profile, 0, sizeof(profile));
+  snprintf(profile.model, sizeof(profile.model), "model-x");
+
+  snprintf(profile.effort, sizeof(profile.effort), "minimal");
+  rc |= expect(llm_request_body_build(&profile, "openai_responses", &request,
+                                      scratch, sizeof(scratch), &body,
+                                      NULL, 0U) == 0,
+               "text request builds with effort set");
+  rc |= expect(strcmp(body.data,
+                      "{\"model\":\"model-x\",\"input\":\"hi\","
+                      "\"reasoning\":{\"effort\":\"minimal\"},"
+                      "\"temperature\":0,\"store\":false,"
+                      "\"stream\":false}") == 0,
+               "effort renders as reasoning.effort without a whitelist");
+  rc |= expect(body.data == scratch && !body.owned,
+               "text request with effort reuses caller scratch");
+  rc |= expect(body.len == strlen(body.data),
+               "text request with effort exposes exact byte length");
+  llm_request_body_free(&body);
+
+  snprintf(profile.effort, sizeof(profile.effort), "hi\"gh");
+  rc |= expect(llm_request_body_build(&profile, "openai_responses", &request,
+                                      scratch, sizeof(scratch), &body,
+                                      NULL, 0U) == 0,
+               "request builds with an effort needing escapes");
+  rc |= expect_substr(body.data, "\"reasoning\":{\"effort\":\"hi\\\"gh\"}",
+                      "effort value is JSON-escaped");
+  llm_request_body_free(&body);
+
+  profile.effort[0] = '\0';
+  rc |= expect(llm_request_body_build(&profile, "openai_responses", &request,
+                                      scratch, sizeof(scratch), &body,
+                                      NULL, 0U) == 0,
+               "text request builds with effort absent");
+  rc |= expect_no_substr(body.data, "reasoning",
+                         "absent effort omits the reasoning object");
+  rc |= expect(strcmp(body.data,
+                      "{\"model\":\"model-x\",\"input\":\"hi\","
+                      "\"temperature\":0,\"store\":false,"
+                      "\"stream\":false}") == 0,
+               "absent effort keeps the legacy request shape");
+  llm_request_body_free(&body);
+
+  if (write_temp_bytes(bytes, sizeof(bytes), path, sizeof(path)) != 0)
+    return rc | expect(0, "create effort media fixture");
+  init_media(&media, "123", "salad.png", "image/png", path, sizeof(bytes));
+  request.media = &media;
+  request.media_count = 1U;
+
+  snprintf(profile.effort, sizeof(profile.effort), "minimal");
+  rc |= expect(llm_request_body_build(&profile, "openai_responses", &request,
+                                      scratch, sizeof(scratch), &body,
+                                      NULL, 0U) == 0,
+               "media request builds with effort set");
+  rc |= expect_substr(body.data, "\"reasoning\":{\"effort\":\"minimal\"}",
+                      "media request preserves reasoning.effort");
+  rc |= expect(body.owned && body.data != scratch,
+               "media request with effort owns an exact dynamic body");
+  rc |= expect(body.len == strlen(body.data),
+               "media request with effort exposes exact byte length");
+  llm_request_body_free(&body);
+
+  profile.effort[0] = '\0';
+  rc |= expect(llm_request_body_build(&profile, "openai_responses", &request,
+                                      scratch, sizeof(scratch), &body,
+                                      NULL, 0U) == 0,
+               "media request builds with effort absent");
+  rc |= expect_no_substr(body.data, "reasoning",
+                         "media request without effort omits reasoning");
   llm_request_body_free(&body);
   unlink(path);
   return rc;

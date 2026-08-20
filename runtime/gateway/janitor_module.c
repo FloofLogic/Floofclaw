@@ -466,6 +466,10 @@ static int task_bus_processed_prune(JanitorTask *t) {
     /* A pending exact claim still needs its processed envelope for same-run
      * recommit. Unreadable outbox state is conservatively pinned too. */
     if (pinned != 0) continue;
+    /* A completion claim whose operation is still running is pending
+     * evidence: its claim run may recommit from it, or the reconciler
+     * will requeue it. */
+    if (rt_ports_completion_claim_pinned(wake_id) != 0) continue;
     if (snprintf(full, sizeof(full), "%s/%s", t->path, entries[i].name)
         >= (int)sizeof(full)) continue;
     if (unlink(full) == 0) dropped++;

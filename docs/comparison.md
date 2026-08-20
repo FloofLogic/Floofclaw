@@ -48,7 +48,7 @@ chat                   (agent: chat_manager   — gate: event_kind:user_message)
 review                 (agent: review_manager — gate: event_kind:affair_review)
 result                 (agent: result_manager — gate: event_kind:operation_result)
 dispatch               (builtin: action_runner)
-workers                (agent: workers — for managed-op poll cycles)
+workers                (agent: workers — starts detached managed attempts)
 memory.after           (agent: native memory, non_critical)
 memory.compact         (agent: memory_compactor, gate: memory_compaction_due)
 ```
@@ -68,7 +68,6 @@ One main agent across durable event-kind turns:
 ```text
 memory.before          (agent: native memory)
 main                   (agent: main_claw — gate: event_kind:user_message,operation_result,affair_review)
-operation.poll         (agent: native operation_poller — gate: event_kind:operation_poll)
 dispatch               (builtin: action_runner)
 memory.after           (agent: native memory, non_critical)
 memory.compact         (agent: memory_compactor — gate: memory_compaction_due)

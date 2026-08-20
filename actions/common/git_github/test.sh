@@ -135,8 +135,11 @@ missing_text="$(jq -r '.result.text' <<<"$missing_output")"
 grep -qF 'Git is not installed' <<<"$missing_text" || fail "missing Git should be explained"
 grep -qF 'GitHub CLI is not installed' <<<"$missing_text" || fail "missing gh should be explained"
 
+set +e
 poll_output="$(run '{"request_id":"poll_1","action":"git_github","args":{"op":"poll","handle":"gitgithub_existing"}}')"
-[ "$(jq -r '.result.status' <<<"$poll_output")" = finished ] || fail "poll compatibility should finish"
-[ "$(jq -r '.result.handle' <<<"$poll_output")" = gitgithub_existing ] || fail "poll should retain handle"
+poll_rc=$?
+set -e
+[ "$poll_rc" -ne 0 ] || fail "op:poll is not part of the contract and should fail"
+[ "$(jq -r '.error.code' <<<"$poll_output")" = BAD_ARGS ] || fail "op:poll should be rejected as a bad argument"
 
-printf '%s\n' 'PASS git_github: setup diagnostics, git/gh argv execution, auth guidance, artifact output, secret denial, path safety, and shell-literal handling'
+printf '%s\n' 'PASS git_github: setup diagnostics, git/gh argv execution, auth guidance, artifact output, secret denial, path safety, shell-literal handling, and op:poll rejection'

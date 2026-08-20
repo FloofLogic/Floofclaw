@@ -47,7 +47,18 @@ Start the always-on local runtime and talk to it from another terminal:
 
 Stop it later with `./bin/fclaw gateway stop -h`.
 
-Ready for a real model? Store a key without placing it in shell history—for
+Ready for a real model? The guided path is the onboarding wizard:
+
+```bash
+./scripts/onboard.sh
+```
+
+It walks identity, provider key, floop, channels, the bundled-action
+enablement checklist (each action verified live before it is switched on),
+and a gateway health probe — needing only bash and `bin/fclaw`. Re-running
+it is safe: it keeps existing answers and repairs.
+
+Prefer doing it by hand? Store a key without placing it in shell history—for
 example, `./bin/fclaw auth set-stdin -h gemini_key`—then follow the
 [provider guide](docs/getting-started/providers.md) to select a provider-backed
 floop and profile.

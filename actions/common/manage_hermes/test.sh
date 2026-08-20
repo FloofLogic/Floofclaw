@@ -37,6 +37,16 @@ export FAKE_HERMES_REQUEST="$tmp/start-request.json"
 export FAKE_HERMES_REPLY="running"
 mkdir -p "$FCLAW_WORKSPACE_ROOT"
 
+# The runtime injects the completion capability for managed actions. This
+# focused test fakes it, with a no-op fclaw so `internal detach` succeeds
+# without spawning a real waiter; the waiter's completion and timeout
+# behavior is covered by tests/test_manage_hermes_completion.sh.
+export FCLAW_OPERATION_ID="op_actionreq_contract_001"
+export FCLAW_COMPLETION_TOKEN="$(printf 'f%.0s' $(seq 64))"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$tmp/fake_fclaw.sh"
+chmod +x "$tmp/fake_fclaw.sh"
+export FCLAW_BIN="$tmp/fake_fclaw.sh"
+
 start_out="$(printf '%s\n' \
   '{"request_id":"actionreq_contract_001","action":"manage_hermes","args":{"op":"start","task":"Return exactly: fixture complete"},"run_id":"run_contract"}' |
   "$here/run.sh")"
@@ -50,24 +60,15 @@ record="$FCLAW_WORKSPACE_ROOT/logs/hermes_ops/$handle.json"
   fail "Hermes run_id was not persisted in the handle record"
 [[ "$start_out" != *"$API_SERVER_KEY"* ]] || fail "caller credential leaked into output"
 
-poll() {
-  printf '{"request_id":"actionreq_contract_poll","action":"manage_hermes","args":{"op":"poll","op_id":"%s"},"run_id":"run_contract"}\n' "$handle" |
-    "$here/run.sh"
-}
+# The polling op is gone from the contract: completion arrives through the
+# detached waiter's `fclaw operation complete` claim. op:poll must be
+# rejected loudly, not silently emulated.
+set +e
+reject_out="$(printf '{"request_id":"actionreq_contract_poll","action":"manage_hermes","args":{"op":"poll","op_id":"%s"},"run_id":"run_contract"}\n' "$handle" |
+  "$here/run.sh")"
+reject_rc=$?
+set -e
+[ "$reject_rc" -ne 0 ] || fail "op:poll should exit nonzero"
+assert_jq "$reject_out" '.error.code == "BAD_ARGS"' "op:poll rejection should be BAD_ARGS"
 
-running_out="$(poll)"
-assert_jq "$running_out" '.result.status == "running" and .result.hermes_status == "running"' "running poll mapping failed"
-
-FAKE_HERMES_REPLY="completed"; export FAKE_HERMES_REPLY
-completed_out="$(poll)"
-assert_jq "$completed_out" '.result.status == "finished" and .result.state == "succeeded" and .result.text == "fixture complete" and .result.usage.total_tokens == 6' "completed poll mapping failed"
-
-FAKE_HERMES_REPLY="failed"; export FAKE_HERMES_REPLY
-failed_out="$(poll)"
-assert_jq "$failed_out" '.result.status == "finished" and .result.state == "failed" and .result.reason == "hermes_run_failed" and (.result.text | contains("fixture boom"))' "failed poll mapping failed"
-
-FAKE_HERMES_REPLY="lost"; export FAKE_HERMES_REPLY
-lost_out="$(poll)"
-assert_jq "$lost_out" '.result.status == "finished" and .result.state == "failed" and .result.reason == "hermes_run_lost"' "restart/404 mapping failed"
-
-printf 'PASS manage_hermes contract: start, running, completed, failed, restart/404\n'
+printf 'PASS manage_hermes contract: start detaches the waiter; op:poll rejected\n'

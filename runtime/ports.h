@@ -53,10 +53,17 @@ void rt_ports_emit_message(RtRun *r,
  * channel origin. */
 void rt_ports_emit_run_failure(RtRun *r);
 
-/* Managed-operation poll pump: publish one correlated operation_poll
- * bus envelope for each due running operation whose context is idle,
- * then clear its single outstanding timer. Self-throttled; called from
- * every scheduler pass (gateway reactor and synchronous CLI alike). */
+/* Managed-operation deadline pump: publish the runtime's idempotent
+ * timeout claim for each running operation whose completion deadline is
+ * due, and periodically reconcile orphaned completion claims (consumed
+ * from the inbox but never bound to a run) back into intake.
+ * Self-throttled; called from every scheduler pass (gateway reactor and
+ * synchronous CLI alike). */
 void rt_operation_pump(RtScheduler *s, uint64_t now_ms);
+
+/* One reconciliation sweep (also run at scheduler init). Requeues any
+ * processed completion claim that would still be admitted and that no
+ * durable run claims. */
+void rt_ports_reconcile_orphaned_claims(void);
 
 #endif

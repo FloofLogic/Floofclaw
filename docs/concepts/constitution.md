@@ -93,8 +93,8 @@ call resolves to is declared data, never core behavior.
 
 **Mechanism.** Action registry allowlists; model profiles referenced
 by id; provider transports translate declared data (e.g. `effort` →
-Gemini `thinkingLevel`) without whitelisting it — the provider is the
-authority and rejects loudly.
+Gemini `thinkingLevel`, OpenAI Responses `reasoning.effort`) without
+whitelisting it — the provider is the authority and rejects loudly.
 
 **Check.** `kernel_modules_contain_no_product_identifiers` scans the
 kernel sources in every suite run; contract tests own the ID and

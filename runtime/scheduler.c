@@ -51,6 +51,10 @@ int rt_scheduler_init(RtScheduler *s, const char *loop_name, char *err, size_t e
                       "publication outbox reconciliation failed");
     return -1;
   }
+  /* A completion claim consumed from the inbox before a crash, with no
+   * run bound to it, must survive the restart: requeue it for ordinary
+   * intake before the reactor starts. */
+  rt_ports_reconcile_orphaned_claims();
   return 0;
 }
 

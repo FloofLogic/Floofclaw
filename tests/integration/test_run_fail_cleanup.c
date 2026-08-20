@@ -565,9 +565,11 @@ int action_config_is_declared_by_manifest_and_supplied_by_deployment(void) {
 int now_prompt_variable_renders_local_wall_clock(void) {
   RtContext ctx;
   RtAgentMeta meta;
-  RtActionRegistry registry;
+  /* Heap-owned: the registry is ~850KB and the invocation ~70KB; the
+   * 1MB small-stack robustness gate forbids stacking them. */
+  RtActionRegistry *registry = NULL;
   RtStep step;
-  RtAgentInvocation inv;
+  RtAgentInvocation *inv = NULL;
   char registry_err[RT_LARGE] = "";
   char expected[RT_SMALL];
   time_t t = time(NULL);
@@ -576,6 +578,13 @@ int now_prompt_variable_renders_local_wall_clock(void) {
   int hour12;
   int rc = 0;
 
+  registry = (RtActionRegistry *)calloc(1, sizeof(*registry));
+  inv = (RtAgentInvocation *)calloc(1, sizeof(*inv));
+  if (!registry || !inv) {
+    free(inv);
+    free(registry);
+    return 1;
+  }
   rc |= test_reset_workspace();
   rc |= test_write_file("floops/nowfx/loop.json",
       "{\"version\":1,\"name\":\"nowfx\",\"description\":\"now fixture\","
@@ -600,13 +609,13 @@ int now_prompt_variable_renders_local_wall_clock(void) {
   snprintf(step.id, sizeof(step.id), "speak");
   snprintf(step.target, sizeof(step.target), "speaker");
   snprintf(step.type, sizeof(step.type), "agent");
-  rc |= expect(rt_action_registry_load(&registry, registry_err,
+  rc |= expect(rt_action_registry_load(registry, registry_err,
                                        sizeof(registry_err)) == 0,
                "action registry loads for the now fixture");
 
   rc |= expect(rt_agent_prepare_invocation(&ctx, "nowfx", &step, "llm",
-                                           &registry, &meta, NULL, 0,
-                                           &inv) == 0,
+                                           registry, &meta, NULL, 0,
+                                           inv) == 0,
                "speaker invocation renders with @{now}");
 
   /* Recompute independently, the same way a reader would read it. */
@@ -618,23 +627,112 @@ int now_prompt_variable_renders_local_wall_clock(void) {
            hour12, tmv.tm_min, tmv.tm_hour < 12 ? "AM" : "PM",
            zone[0] ? " " : "", zone,
            tmv.tm_mon + 1, tmv.tm_mday, (tmv.tm_year + 1900) % 100);
-  rc |= expect_substr(inv.input, expected,
+  rc |= expect_substr(inv->input, expected,
                       "@{now} renders the local wall clock for the model");
   /* Placement matters for prompt caching: the volatile value must sit at
    * the end, after the stable prefix and the rendered input. */
-  rc |= expect(strstr(inv.input, expected) >
-                   strstr(inv.input, "=== available tools ===") ||
-               strstr(inv.input, "\"kind\"") == NULL ||
-               strstr(inv.input, expected) != NULL,
+  rc |= expect(strstr(inv->input, expected) >
+                   strstr(inv->input, "=== available tools ===") ||
+               strstr(inv->input, "\"kind\"") == NULL ||
+               strstr(inv->input, expected) != NULL,
                "@{now} renders after the stable prompt prefix");
 
   /* An unknown variable is still refused, so typos fail loudly. */
   rc |= test_write_file("floops/nowfx/agents/speaker/prompt.md",
       "You are a speaker.\n\n@{nowish}\n");
   rc |= expect(rt_agent_prepare_invocation(&ctx, "nowfx", &step, "llm",
-                                           &registry, &meta, NULL, 0,
-                                           &inv) != 0,
+                                           registry, &meta, NULL, 0,
+                                           inv) != 0,
                "an unknown @{} variable is rejected, not passed through");
+  free(inv);
+  free(registry);
+  return rc;
+}
+
+
+/* Standing facts about the user are operator-curated deployment config,
+ * not conversation memory: the rolling summary erodes durable facts, and
+ * the workspace-scoped file actions must never be able to edit the bot's
+ * own system prompt. @{user} renders config/user.md into the stable
+ * prompt prefix; an absent file renders empty so shipped floops can
+ * reference the variable unconditionally. */
+int user_prompt_variable_renders_config_user_md(void) {
+  RtContext ctx;
+  RtAgentMeta meta;
+  /* Heap-owned: the registry is ~850KB and the invocation ~70KB; the
+   * 1MB small-stack robustness gate forbids stacking them. */
+  RtActionRegistry *registry = NULL;
+  RtStep step;
+  RtAgentInvocation *inv = NULL;
+  char registry_err[RT_LARGE] = "";
+  int rc = 0;
+
+  registry = (RtActionRegistry *)calloc(1, sizeof(*registry));
+  inv = (RtAgentInvocation *)calloc(1, sizeof(*inv));
+  if (!registry || !inv) {
+    free(inv);
+    free(registry);
+    return 1;
+  }
+  rc |= test_reset_workspace();
+  rc |= test_remove_path("config/user.md");
+  rc |= test_write_file("floops/userfx/loop.json",
+      "{\"version\":1,\"name\":\"userfx\",\"description\":\"user fixture\","
+      "\"one_pass\":true,\"steps\":[{\"id\":\"speak\",\"type\":\"agent\","
+      "\"agent\":\"speaker\"}]}\n");
+  rc |= test_write_file("floops/userfx/agents/speaker/agent.json",
+      "{\"id\":\"speaker\",\"executor\":\"llm\",\"model\":{\"ref\":\"responses\"},"
+      "\"actions\":[\"message\"],\"listen\":[\"event\"]}\n");
+  rc |= test_write_file("floops/userfx/agents/speaker/prompt.md",
+      "You are a speaker.\n\n## Your user\n\n@{user}\n\n"
+      "{{tools}}\n\n{{json}}\n");
+
+  memset(&ctx, 0, sizeof(ctx));
+  snprintf(ctx.run_id, sizeof(ctx.run_id), "run_001");
+  snprintf(ctx.context_id, sizeof(ctx.context_id), "chat:tests");
+  snprintf(ctx.run_dir, sizeof(ctx.run_dir), "workspace/runs/run_001");
+  snprintf(ctx.event_kind, sizeof(ctx.event_kind), "user_message");
+  memset(&meta, 0, sizeof(meta));
+  snprintf(meta.id, sizeof(meta.id), "speaker");
+  meta.listen_event = 1;
+  memset(&step, 0, sizeof(step));
+  snprintf(step.id, sizeof(step.id), "speak");
+  snprintf(step.target, sizeof(step.target), "speaker");
+  snprintf(step.type, sizeof(step.type), "agent");
+  rc |= expect(rt_action_registry_load(registry, registry_err,
+                                       sizeof(registry_err)) == 0,
+               "action registry loads for the user fixture");
+
+  rc |= expect(rt_agent_prepare_invocation(&ctx, "userfx", &step, "llm",
+                                           registry, &meta, NULL, 0,
+                                           inv) == 0,
+               "@{user} renders with no config/user.md present");
+  rc |= expect(strstr(inv->input, "@{user}") == NULL,
+               "an absent user.md renders empty, not as the literal token");
+
+  rc |= test_write_file("config/user.md",
+      "The user prefers 24-hour times and lives in Chicago.\n");
+  rc |= expect(rt_agent_prepare_invocation(&ctx, "userfx", &step, "llm",
+                                           registry, &meta, NULL, 0,
+                                           inv) == 0,
+               "@{user} renders with config/user.md present");
+  rc |= expect_substr(inv->input,
+                      "The user prefers 24-hour times and lives in Chicago.",
+               "@{user} renders the operator's standing facts verbatim");
+  /* Reread per invocation, like prompt.md itself: an edit lands on the
+   * next run with no restart. */
+  rc |= test_write_file("config/user.md",
+      "The user has moved to Denver.\n");
+  rc |= expect(rt_agent_prepare_invocation(&ctx, "userfx", &step, "llm",
+                                           registry, &meta, NULL, 0,
+                                           inv) == 0,
+               "@{user} renders again after an edit");
+  rc |= expect_substr(inv->input, "The user has moved to Denver.",
+               "an edited user.md lands on the next run without a restart");
+
+  rc |= test_remove_path("config/user.md");
+  free(inv);
+  free(registry);
   return rc;
 }
 
@@ -1758,6 +1856,8 @@ int concrete_request_queues_managed_work(void) {
   char *logs = NULL;
   int rc = 0;
 
+  char *saved_cfg = NULL;
+  rc |= test_config_enable_all(&saved_cfg);
   rc |= test_reset_workspace();
   (void)setenv("FCLAW_MODEL_PROFILES",
                "tests/fixtures/smoke/model_profiles_mock.json", 1);
@@ -1783,6 +1883,7 @@ int concrete_request_queues_managed_work(void) {
   restore_env_value("FCLAW_CODEX_BIN", saved_codex);
   restore_env_value("LLM_MOCK_RESPONSE_PATHS", saved_paths);
   restore_env_value("FCLAW_MODEL_PROFILES", saved_profiles);
+  test_config_restore(saved_cfg);
   return rc;
 }
 
@@ -1795,6 +1896,8 @@ int codex_missing_deliverable_reports_honest_result(void) {
   HarnessGateway *g = NULL;
   int rc = 0;
 
+  char *saved_cfg = NULL;
+  rc |= test_config_enable_all(&saved_cfg);
   rc |= test_reset_workspace();
   (void)setenv("FCLAW_MODEL_PROFILES",
                "tests/fixtures/smoke/model_profiles_mock.json", 1);
@@ -1829,6 +1932,7 @@ int codex_missing_deliverable_reports_honest_result(void) {
   restore_env_value("FCLAW_CODEX_BIN", saved_codex);
   restore_env_value("LLM_MOCK_RESPONSE_PATHS", saved_paths);
   restore_env_value("FCLAW_MODEL_PROFILES", saved_profiles);
+  test_config_restore(saved_cfg);
   return rc;
 }
 
@@ -1860,7 +1964,7 @@ int manage_codex_project_root_is_explicit_cached_and_contained(void) {
   char response[8192], run_id[RT_SMALL];
   char project_abs[PATH_MAX], selected_abs[PATH_MAX];
   RtActionRegistry *cache_registry = NULL;
-  char *state = NULL, *log = NULL, *received = NULL;
+  char *state = NULL, *log = NULL, *received = NULL, *codex_argv = NULL;
   char registry_error[RT_LARGE] = "";
   int rc = 0;
 
@@ -1878,42 +1982,53 @@ int manage_codex_project_root_is_explicit_cached_and_contained(void) {
       "config/floofclaw_config.json",
       "{\"bot_name\":\"FloofClaw\",\"default_floop\":\"hello\","
       "\"actions\":{\"manage_codex\":{\"allowed_project_root\":"
-      "\"project_area\"}},\"channels\":{\"ws\":{\"enabled\":false},"
+      "\"project_area\",\"model\":\"gpt-5.6-luna\"}},"
+      "\"channels\":{\"ws\":{\"enabled\":false},"
       "\"irc\":{\"enabled\":false},\"discord\":{\"enabled\":false}}}\n");
   cache_registry = (RtActionRegistry *)calloc(1, sizeof(*cache_registry));
   rc |= expect(cache_registry != NULL,
                "allocate typed action-config cache fixture");
   if (cache_registry) {
     const char *cached;
+    const char *cached_model;
     rc |= expect(rt_action_registry_load(
                      cache_registry, registry_error,
                      sizeof(registry_error)) == 0,
                  "valid configured project root loads at registry init");
     cached = rt_action_cached_config(
         cache_registry, "manage_codex", "allowed_project_root");
+    cached_model = rt_action_cached_config(
+        cache_registry, "manage_codex", "model");
     rc |= expect(cached && strcmp(cached, project_abs) == 0,
                  "configured project root is canonicalized in the cache");
+    rc |= expect(cached_model && strcmp(cached_model, "gpt-5.6-luna") == 0,
+                 "configured Codex model is cached in its action namespace");
     rc |= test_write_file(
         "config/floofclaw_config.json",
         "{\"bot_name\":\"FloofClaw\",\"default_floop\":\"hello\","
         "\"actions\":{\"manage_codex\":{\"allowed_project_root\":"
-        "\"outside_area\"}},\"channels\":{\"ws\":{\"enabled\":false},"
+        "\"outside_area\",\"model\":\"changed-model\"}},"
+        "\"channels\":{\"ws\":{\"enabled\":false},"
         "\"irc\":{\"enabled\":false},\"discord\":{\"enabled\":false}}}\n");
     rc |= expect(cached && strcmp(cached, project_abs) == 0,
                  "deployment config drift cannot change a live registry cache");
+    rc |= expect(cached_model && strcmp(cached_model, "gpt-5.6-luna") == 0,
+                 "deployment model drift cannot change a live registry cache");
     free(cache_registry);
     cache_registry = NULL;
     rc |= test_write_file(
         "config/floofclaw_config.json",
         "{\"bot_name\":\"FloofClaw\",\"default_floop\":\"hello\","
         "\"actions\":{\"manage_codex\":{\"allowed_project_root\":"
-        "\"project_area\"}},\"channels\":{\"ws\":{\"enabled\":false},"
+        "\"project_area\",\"model\":\"gpt-5.6-luna\"}},"
+        "\"channels\":{\"ws\":{\"enabled\":false},"
         "\"irc\":{\"enabled\":false},\"discord\":{\"enabled\":false}}}\n");
   }
   rc |= test_write_file(
       "workspace/fixtures/project_fake_codex.sh",
       "#!/usr/bin/env bash\n"
       "set -euo pipefail\n"
+      "printf '%s\\n' \"$@\" > \"$FCLAW_ACTION_ROOT/workspace/fixtures/project_codex_argv.txt\"\n"
       "out=''\n"
       "selected=''\n"
       "while [ \"$#\" -gt 0 ]; do\n"
@@ -1933,13 +2048,22 @@ int manage_codex_project_root_is_explicit_cached_and_contained(void) {
       "{\"calls\":[{\"name\":\"manage_codex\",\"args\":{"
       "\"op\":\"start\",\"root\":\"project\",\"cwd\":\"project_123\","
       "\"task\":\"Create marker.txt.\"}}]}\n");
+  rc |= test_write_file(
+      "workspace/fixtures/project_workspace_start.json",
+      "{\"calls\":[{\"name\":\"manage_codex\",\"args\":{"
+      "\"op\":\"start\",\"task\":\"Do background work.\"}}]}\n");
+  /* The correlated operation_result run walks the same ungated chat
+   * step; it consumes one quiet fixture. */
+  rc |= test_write_file("workspace/fixtures/project_rest.json",
+                        "{\"calls\":[]}\n");
   (void)setenv("FCLAW_MODEL_PROFILES",
                "tests/fixtures/smoke/model_profiles_mock.json", 1);
   (void)setenv("FCLAW_CODEX_BIN",
                "workspace/fixtures/project_fake_codex.sh", 1);
   (void)setenv("FCLAW_CODEX_START_SYNC_MS", "500", 1);
   (void)setenv("LLM_MOCK_RESPONSE_PATHS",
-               "workspace/fixtures/project_start.json", 1);
+               "workspace/fixtures/project_start.json:"
+               "workspace/fixtures/project_rest.json", 1);
 
   rc |= expect(harness_run("tests", "test_project_root", "build it",
                            response, sizeof(response), run_id,
@@ -1952,6 +2076,12 @@ int manage_codex_project_root_is_explicit_cached_and_contained(void) {
                "Codex receives the canonical selected directory through -C");
   free(received);
   received = NULL;
+  rc |= test_read_file(
+      "workspace/fixtures/project_codex_argv.txt", &codex_argv);
+  rc |= expect_substr(codex_argv, "--model\ngpt-5.6-luna\n",
+                      "configured action model reaches codex exec exactly");
+  free(codex_argv);
+  codex_argv = NULL;
   {
     char state_path[PATH_MAX];
     snprintf(state_path, sizeof(state_path),
@@ -2005,7 +2135,12 @@ int manage_codex_project_root_is_explicit_cached_and_contained(void) {
                "\"task\":\"must not launch\"}}]}\n",
                invalid_cases[i].cwd_json);
       rc |= test_write_file(fixture_path, fixture_json);
-      (void)setenv("LLM_MOCK_RESPONSE_PATHS", fixture_path, 1);
+      {
+        char paths[PATH_MAX * 2];
+        snprintf(paths, sizeof(paths),
+                 "%s:workspace/fixtures/project_rest.json", fixture_path);
+        (void)setenv("LLM_MOCK_RESPONSE_PATHS", paths, 1);
+      }
       rc |= expect(harness_run("tests", "test_project_root",
                                invalid_cases[i].name,
                                response, sizeof(response), run_id,
@@ -2028,7 +2163,8 @@ int manage_codex_project_root_is_explicit_cached_and_contained(void) {
       "\"op\":\"start\",\"root\":\"project\","
       "\"cwd\":\"project_123/escape\",\"task\":\"Create escaped.txt.\"}}]}\n");
   (void)setenv("LLM_MOCK_RESPONSE_PATHS",
-               "workspace/fixtures/project_escape.json", 1);
+               "workspace/fixtures/project_escape.json:"
+               "workspace/fixtures/project_rest.json", 1);
   rc |= expect(harness_run("tests", "test_project_root", "escape",
                            response, sizeof(response), run_id,
                            sizeof(run_id)) == 0,
@@ -2045,8 +2181,24 @@ int manage_codex_project_root_is_explicit_cached_and_contained(void) {
       "{\"bot_name\":\"FloofClaw\",\"default_floop\":\"hello\","
       "\"channels\":{\"ws\":{\"enabled\":false},\"irc\":{\"enabled\":false},"
       "\"discord\":{\"enabled\":false}}}\n");
+  rc |= test_write_file(
+      "workspace/fixtures/project_codex_argv.txt", "not launched\n");
   (void)setenv("LLM_MOCK_RESPONSE_PATHS",
-               "workspace/fixtures/project_start.json", 1);
+               "workspace/fixtures/project_workspace_start.json:"
+               "workspace/fixtures/project_rest.json", 1);
+  rc |= expect(harness_run("tests", "test_project_root", "default model",
+                           response, sizeof(response), run_id,
+                           sizeof(run_id)) == 0,
+               "managed Codex starts when no model is configured");
+  rc |= test_read_file(
+      "workspace/fixtures/project_codex_argv.txt", &codex_argv);
+  rc |= expect_no_substr(codex_argv, "--model",
+                         "unset action model adds no codex model flag");
+  free(codex_argv);
+  codex_argv = NULL;
+  (void)setenv("LLM_MOCK_RESPONSE_PATHS",
+               "workspace/fixtures/project_start.json:"
+               "workspace/fixtures/project_rest.json", 1);
   rc |= expect(harness_run("tests", "test_project_root", "unconfigured",
                            response, sizeof(response), run_id,
                            sizeof(run_id)) == 0,
@@ -2075,6 +2227,24 @@ int manage_codex_project_root_is_explicit_cached_and_contained(void) {
       registry_error,
       "actions.manage_codex.allowed_project_root must name an existing directory",
       "invalid configured root names the exact deployment fix");
+  free(cache_registry);
+  cache_registry = NULL;
+
+  rc |= test_write_file(
+      "config/floofclaw_config.json",
+      "{\"bot_name\":\"FloofClaw\",\"default_floop\":\"hello\","
+      "\"actions\":{\"manage_codex\":{\"model\":56}},"
+      "\"channels\":{\"ws\":{\"enabled\":false},\"irc\":{\"enabled\":false},"
+      "\"discord\":{\"enabled\":false}}}\n");
+  cache_registry = (RtActionRegistry *)calloc(1, sizeof(*cache_registry));
+  registry_error[0] = '\0';
+  rc |= expect(cache_registry &&
+               rt_action_registry_load(cache_registry, registry_error,
+                                       sizeof(registry_error)) != 0,
+               "non-string configured model fails registry initialization");
+  rc |= expect_substr(registry_error,
+                      "actions.manage_codex.model must be a non-empty string",
+                      "invalid model names the exact deployment fix");
   free(cache_registry);
   cache_registry = NULL;
 
@@ -2128,6 +2298,8 @@ int claude_handler_delivers_modern_operation_result(void) {
   HarnessGateway *g = NULL;
   int rc = 0;
 
+  char *saved_cfg = NULL;
+  rc |= test_config_enable_all(&saved_cfg);
   rc |= test_reset_workspace();
   rc |= setup_modern_claude_floop();
   (void)setenv("FCLAW_MODEL_PROFILES",
@@ -2161,6 +2333,7 @@ int claude_handler_delivers_modern_operation_result(void) {
   restore_env_value("FCLAW_CLAUDE_BIN", saved_claude);
   restore_env_value("LLM_MOCK_RESPONSE_PATHS", saved_paths);
   restore_env_value("FCLAW_MODEL_PROFILES", saved_profiles);
+  test_config_restore(saved_cfg);
   return rc;
 }
 
@@ -2337,7 +2510,8 @@ int memory_before_projects_summaries_and_last_20_raw_messages(void) {
 int memory_after_records_tool_activity_in_existing_log(void) {
   RtContext ctx;
   RtAgentMeta meta;
-  RtActionRegistry actions;
+  /* Heap-owned: ~850KB is too large for the small-stack gate. */
+  RtActionRegistry *actions = NULL;
   RtStep step;
   RtAgentFn memory_agent;
   char raw[RT_NATIVE_STDOUT_MAX];
@@ -2347,10 +2521,11 @@ int memory_after_records_tool_activity_in_existing_log(void) {
   char *log = NULL;
   int rc = 0;
 
+  actions = (RtActionRegistry *)calloc(1, sizeof(*actions));
+  if (!actions) return 1;
   rc |= test_reset_workspace();
   rc |= init_memory_test_ctx(&ctx);
   memory_test_meta(&meta);
-  memset(&actions, 0, sizeof(actions));
   memset(&step, 0, sizeof(step));
   snprintf(step.id, sizeof(step.id), "memory.after");
   snprintf(step.target, sizeof(step.target), "memory");
@@ -2360,8 +2535,11 @@ int memory_after_records_tool_activity_in_existing_log(void) {
 
   memory_agent = rt_agent_lookup("memory");
   rc |= expect(memory_agent != NULL, "native memory agent is registered");
-  if (!memory_agent) return rc;
-  rc |= expect(memory_agent(&ctx, &step, &meta, &actions, "{}", raw,
+  if (!memory_agent) {
+    free(actions);
+    return rc;
+  }
+  rc |= expect(memory_agent(&ctx, &step, &meta, actions, "{}", raw,
                             sizeof(raw), NULL, 0) == 0,
                "memory.after renders committed tool activity");
   rc |= expect_substr(raw, "Tool read_file returned: alpha beta gamma",
@@ -2382,6 +2560,7 @@ int memory_after_records_tool_activity_in_existing_log(void) {
                       "Tool read_file returned: alpha beta gamma",
                       "tool activity reaches recalled conversation memory");
   free(log);
+  free(actions);
   return rc;
 }
 

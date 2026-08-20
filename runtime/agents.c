@@ -40,13 +40,6 @@ int rt_agent_workers_run(const RtContext *ctx, const RtStep *step,
                          const char *input_json,
                          char *stdout_buf, size_t stdout_cap,
                          char *stderr_buf, size_t stderr_cap);
-int rt_agent_operation_poller_run(const RtContext *ctx, const RtStep *step,
-                                  const RtAgentMeta *meta,
-                                  const RtActionRegistry *actions,
-                                  const char *input_json,
-                                  char *stdout_buf, size_t stdout_cap,
-                                  char *stderr_buf, size_t stderr_cap);
-
 static const struct {
   const char *id;
   RtAgentFn fn;
@@ -54,7 +47,6 @@ static const struct {
   { "noop_agent", rt_agent_noop_run    },
   { "memory",     rt_agent_memory_run  },
   { "workers",    rt_agent_workers_run },
-  { "operation_poller", rt_agent_operation_poller_run },
   { NULL, NULL },
 };
 

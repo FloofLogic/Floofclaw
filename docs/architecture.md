@@ -227,8 +227,8 @@ selects the responsible manager declaratively:
   closes resolved affairs, or defers the next check.
 - `result_manager` handles `operation_result` and routes fresh worker or
   tool evidence to the user or an affair.
-- `workers` is native and starts or polls the managed-operation handler named
-  in its agent configuration.
+- `workers` is native and starts the managed-operation handler named in its
+  agent configuration; completion returns later through the bus.
 - `memory.before`, `memory.after`, and `memory.compact` keep conversation
   memory explicit and inspectable.
 
@@ -274,7 +274,7 @@ is manual-only.
 basic memory:
 
 ```text
-memory.before -> main_claw -> operation.poll -> dispatch -> memory.after -> memory.compact
+memory.before -> main_claw -> dispatch -> memory.after -> memory.compact
 ```
 
 `main_claw` is gated to `user_message`, `operation_result`, and
@@ -282,10 +282,10 @@ memory.before -> main_claw -> operation.poll -> dispatch -> memory.after -> memo
 substantive action. `dispatch` runs accepted calls, and the operation driver publishes a
 terminal consequence as a later `operation_result` bus event. A later run
 routes that event back to the same `main_claw`, which may choose another tool,
-retry, explain a block, or emit the final user-visible `message`. The native
-`operation.poll` step handles only durable poll events. There is no same-run
-action-result pickup phase and no scheduler judgment about whether the task is
-done.
+retry, explain a block, or emit the final user-visible `message`. Detached
+operations complete through the bus completion contract — no polling step
+exists. There is no same-run action-result pickup phase and no scheduler
+judgment about whether the task is done.
 
 The original input task remains open across those event runs. That same task's
 input and `working_memory` are projected into each result turn. A continuing
@@ -325,20 +325,34 @@ the returned cutoff before atomically updating
 ## Managed Operations
 
 Actions may declare `"contract": "managed_operation"` in their
-`action.json`: `start(args) -> running(handle)|finished(result)`,
-`poll(handle) -> running|finished(result)`. A generic kernel driver
-reacts to their terminal events — dispatching on the declared contract,
-never on action ids — and owns exactly three payload-opaque behaviors:
-record (`operation_started` with correlation, projected into the
-task's `state.external` with the starting `work_rev`), schedule (at
-most one poll timer per handle in the durable operation store;
-`operation_poll` bus envelopes; stale timers no-op), and publish
-(exactly-once `operation_result` per handle, re-entering the floop
-through normal intake). The detached external process is never a
-waiting job owned by any run. The native poller accepts either the exact
-revision-bound work task or the exact open input-message task recorded with
-`work_rev:0`; a running response re-arms another future event, while a
-finished response publishes the result event.
+`action.json`: `start(args) -> running(worker_handle)|finished(result)`,
+plus a declared completion-deadline policy (`default_timeout_ms`,
+optional `max_timeout_ms`). Before the action executes, the runtime
+allocates the operation's identity durably: a runtime-owned operation id
+(`op_<request_id>`), a secret completion token, and an absolute
+deadline, committed as an `operation_started` record with full
+correlation and projected into the task's `state.external` with the
+starting `work_rev`. `worker_handle` from a running result is recorded
+as kill/query metadata only — never identity.
+
+There is no polling. A detached worker reports completion through the
+ordinary bus: it publishes a narrow `operation_completed` claim
+(operation id + token + bounded result) — via `fclaw operation
+complete`, whose capability arrives through the trusted child
+environment — and the wake socket knocks a live gateway immediately,
+while the durable inbox preserves the claim across a stopped gateway.
+Intake validates the claim against the durable operation store BEFORE
+any run exists (unknown ids, wrong tokens, duplicates, and stale claims
+are rejected inspectably), then admits it as the one result run whose
+first behavioral event is the runtime-stamped, self-sourced
+`operation_result`. The deadline enters the reactor's poll timeout; on
+expiry the runtime submits its own idempotent timeout claim through the
+same admission path, producing one `operation_result` with
+`status:"timed_out"`. Completion, timeout, and the immediate
+finished(result) path all compete through the single reducer-owned
+terminal gate in the operation store: at-least-once delivery,
+idempotent admission, exactly one authoritative terminal transition.
+The detached external process is never a waiting job owned by any run.
 
 ## Event Model
 
@@ -386,7 +400,6 @@ Current behavioral event families include:
 - `affair_task_linked`
 - `affair_reviewed`
 - `operation_started`
-- `operation_poll`
 - `operation_result`
 - `work_step_result`
 - `work_outcome`
@@ -1019,9 +1032,13 @@ with `calls`:
 { "calls": [] }
 ```
 
-Prompt-backed LLM agents may use the tiny runtime-owned prompt variable form
-`@{bot_name}`. The runtime reads `floops/<floop>/agents/<id>/prompt.md`, renders only that
-allowlisted variable from `config/floofclaw_config.json`, then appends the
+Prompt-backed LLM agents may use the tiny runtime-owned prompt variable forms
+`@{bot_name}`, `@{now}`, and `@{user}`. The runtime reads
+`floops/<floop>/agents/<id>/prompt.md`, renders only those allowlisted
+variables — `@{bot_name}` from `config/floofclaw_config.json`, `@{now}` as the
+local wall clock, `@{user}` as the operator-curated standing user facts in
+`config/user.md` (absent file renders empty; both files are reread per run, so
+edits land on the next run without a restart) — then appends the
 listen-projected processor input JSON. Unknown variables, malformed `@{...}`
 references, or
 oversized rendered prompts fail the agent before any provider call. This is a
@@ -1127,6 +1144,11 @@ CLI command -> create run directory -> run loop directly
 
 The gateway is a **single-process, single-thread reactor**. Long-running channel adapters (IRC, Discord, WebSocket) and internal subsystems (jobrunner, bus_intake, runtime) are all in-process, cooperative, nonblocking state machines registered with the reactor's generic `FcReactorModule` interface. There are **no pthreads** and **no long-running adapter subprocesses**. The reactor `poll(2)`s every module's fds plus its own timers each tick and dispatches `on_fd` / `tick` callbacks.
 
+The PID and floop files under `.fclaw/run/` are advisory control records.
+Gateway identity also requires the runtime-owner file lock held for the
+process's complete lifetime, so an unclean exit followed by OS PID reuse cannot
+make an unrelated process block gateway recovery.
+
 See [Gateway Reactor](concepts/gateway-reactor.md) for the module list, tick order, and the full state-machine details.
 
 ### Clock domains
@@ -1136,8 +1158,8 @@ channel reconnect/heartbeat timers, job timeouts, SIGTERM-to-SIGKILL grace,
 run-duration markers, operation scan cadence, and janitor cadence use that
 domain. Wall-clock corrections cannot delay or stampede them.
 
-The two durable schedules, `next_review_at_ms` and `next_poll_at_ms`, remain
-Unix-epoch values because they must survive a restart. On first use the
+The two durable schedules, `next_review_at_ms` and the managed-operation
+`deadline_ms`, remain Unix-epoch values because they must survive a restart. On first use the
 runtime captures one process-wide `{wall, monotonic}` anchor. While that process lives,
 durable deadlines are scheduled and compared against wall-shaped time derived
 only from monotonic elapsed time. A restart intentionally takes a fresh anchor

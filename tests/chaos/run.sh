@@ -29,6 +29,17 @@ sleep_ms() {
   sleep "$seconds"
 }
 
+# `bus publish` speaks the public -a contract: one compact JSON object.
+# Extract the envelope id; matching deliveries on the raw JSON can never
+# succeed.
+publish_chaos_text() {
+  local text="$1" out id
+  out="$("$FCLAW_BIN" bus publish --channel chaos --text "$text")" || return 1
+  id="$(sed -n 's/.*"event_id":"\([^"]*\)".*/\1/p' <<<"$out")"
+  [[ -n "$id" ]] || return 1
+  printf '%s\n' "$id"
+}
+
 cleanup() {
   local exit_code=$?
   if [[ "$GATEWAY_PID" -gt 1 ]]; then
@@ -202,8 +213,7 @@ run_random_campaign() {
   RANDOM="$CHAOS_SEED"
   start_gateway
   for ((iteration = 1; iteration <= CHAOS_ITERATIONS; iteration++)); do
-    bus_id="$("$FCLAW_BIN" bus publish --channel chaos \
-      --text "chaos seed=$CHAOS_SEED iteration=$iteration")" ||
+    bus_id="$(publish_chaos_text "chaos seed=$CHAOS_SEED iteration=$iteration")" ||
       die "publish failed iteration=$iteration scratch=$CURRENT_SCRATCH"
     delay=$((RANDOM % 8 + 1))
     sleep_ms "$delay"
@@ -247,8 +257,7 @@ run_targeted() {
     append_match="/event_log.jsonl"
   fi
   start_gateway "$marker" "$atomic_match" "$append_match"
-  bus_id="$("$FCLAW_BIN" bus publish --channel chaos \
-    --text "chaos seed=$CHAOS_SEED targeted=$mode")" ||
+  bus_id="$(publish_chaos_text "chaos seed=$CHAOS_SEED targeted=$mode")" ||
     die "targeted publish failed mode=$mode scratch=$CURRENT_SCRATCH"
   wait_marker "$marker" "$mode"
   kill_gateway_hard
@@ -342,8 +351,7 @@ run_filesystem_drill() {
   new_ramdisk_scratch "$mode"
   marker="$CURRENT_SCRATCH/.chaos_pause"
   start_gateway "$marker" "" "" "/state.json"
-  origin="$("$FCLAW_BIN" bus publish --channel chaos \
-    --text "chaos seed=$CHAOS_SEED filesystem=$mode original")" ||
+  origin="$(publish_chaos_text "chaos seed=$CHAOS_SEED filesystem=$mode original")" ||
     die "filesystem publish failed mode=$mode"
   wait_marker "$marker" "$mode"
   if [[ "$mode" == "disk-full" ]]; then
@@ -363,8 +371,7 @@ run_filesystem_drill() {
   wait_file_contains "workspace/logs/narration.jsonl" "RUN FAILED" "$mode narration"
   kill -0 "$GATEWAY_PID" 2>/dev/null ||
     die "gateway crashed after storage restore mode=$mode"
-  probe="$("$FCLAW_BIN" bus publish --channel chaos \
-    --text "chaos seed=$CHAOS_SEED filesystem=$mode recovery-probe")" ||
+  probe="$(publish_chaos_text "chaos seed=$CHAOS_SEED filesystem=$mode recovery-probe")" ||
     die "recovery probe publish failed mode=$mode"
   wait_delivery_once "$probe" "$mode recovery probe"
   kill -0 "$GATEWAY_PID" 2>/dev/null ||

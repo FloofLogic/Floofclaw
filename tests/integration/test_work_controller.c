@@ -430,6 +430,8 @@ int rejected_and_start_failed_actions_wake_with_origin_request(void) {
   char *bus_log = NULL;
   int rc = 0;
 
+  char *saved_cfg = NULL;
+  rc |= test_config_enable_all(&saved_cfg);
   rc |= test_reset_workspace();
   rc |= expect(a2_init_context(&ctx, "run_505", "chat:a5") == 0 &&
                a2_create_work(&ctx, "task_a5_rejected", "chat:a5",
@@ -549,6 +551,7 @@ int rejected_and_start_failed_actions_wake_with_origin_request(void) {
   a2_run_free(run);
   free(scheduler);
   rc |= test_reset_workspace();
+  test_config_restore(saved_cfg);
   return rc;
 }
 

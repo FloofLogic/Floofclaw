@@ -47,9 +47,9 @@ static uint64_t rm_next_deadline(FcReactorModule *m, uint64_t now_ms) {
   for (j = s->runner.jobs; j; j = j->next) {
     if (j->state == JOB_FINISHED || j->state == JOB_FAILED) return now_ms;
   }
-  /* Armed managed-operation poll timer -> wake when it is due. */
+  /* Earliest managed-operation completion deadline -> wake when due. */
   {
-    long long due = rt_operation_earliest_due_ms();
+    long long due = rt_operation_earliest_deadline_ms();
     if (due > 0) {
       uint64_t stable_wall_ms = timing_stable_wall_from_monotonic(now_ms);
       uint64_t delay;

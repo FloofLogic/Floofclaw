@@ -88,8 +88,9 @@ Beyond `steps`, a `loop.json` may declare generic execution options:
   other contexts advance concurrently.
 - `retry_attempts` — bounded per-event retry after a failed phase job;
   committed calls are memoized by effect signature.
-- `poll_interval_ms` — managed-operation poll cadence; enables the
-  operation driver for this floop.
+- `operation_timeout_ms` — optional floop-level shortening of
+  managed-operation completion deadlines; the action's declared
+  `default_timeout_ms`/`max_timeout_ms` policy still bounds it.
 
 Per step: `gate` (including the declarative
 `"event_kind:kind1,kind2"` form) and `non_critical` (step failure never

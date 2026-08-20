@@ -130,7 +130,7 @@ later run.
 
 Affairs are durable concerns with status, notes, context route, and
 `next_review_at_ms`. Operations record opaque handles, task/context
-correlation, work revision, poll deadline, and terminal result. These stores
+correlation, work revision, completion deadline, and terminal result. These stores
 are reducer-owned and written atomically under `workspace/memory/state/`.
 
 ## Durable truth

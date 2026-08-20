@@ -91,7 +91,30 @@ _Static_assert(LLM_MEDIA_DOWNLOAD_BUDGET_MS +
                "media download and provider retry budgets must fit inside "
                "the owning agent job");
 
+/* Worst case for a given attempt timeout, mirroring
+ * LLM_HTTP_WORST_CASE_MS but usable with the env-overridden timeout. */
+static int llm_http_worst_case_ms(int retries, int attempt_timeout_s) {
+  return (retries + 1) * attempt_timeout_s * 1000 + LLM_HTTP_BACKOFF_TOTAL_MS;
+}
+
+/* The measured 25s cap fits hosted providers; a local model (LM Studio,
+ * vLLM, ollama) legitimately needs longer per attempt on modest
+ * hardware. FCLAW_LLM_ATTEMPT_TIMEOUT_S raises it; the clamps below
+ * shed retries first and then the timeout itself so no override can
+ * reintroduce the killed-mid-retry defect the constants exist to
+ * prevent. */
+static int llm_http_requested_attempt_timeout_s(void) {
+  int t = LLM_HTTP_ATTEMPT_TIMEOUT_S;
+  const char *e = getenv("FCLAW_LLM_ATTEMPT_TIMEOUT_S");
+  if (e && *e) {
+    int requested = atoi(e);
+    if (requested >= 5 && requested <= 600) t = requested;
+  }
+  return t;
+}
+
 int llm_http_effective_max_retries(void) {
+  int t = llm_http_requested_attempt_timeout_s();
   int v = LLM_HTTP_MAX_RETRIES_DEFAULT;
   const char *e = getenv("FCLAW_LLM_MAX_RETRIES");
   if (e && *e) {
@@ -101,10 +124,19 @@ int llm_http_effective_max_retries(void) {
   /* An override must not be able to reintroduce the defect. Clamp until
    * the worst case fits the agent budget again. */
   while (v > 0 &&
-         LLM_HTTP_WORST_CASE_MS(v) + LLM_HTTP_AGENT_RESERVE_MS >
+         llm_http_worst_case_ms(v, t) + LLM_HTTP_AGENT_RESERVE_MS >
              LLM_AGENT_JOB_BUDGET_MS)
     v--;
   return v;
+}
+
+int llm_http_effective_attempt_timeout_s(void) {
+  int t = llm_http_requested_attempt_timeout_s();
+  if (llm_http_worst_case_ms(0, t) + LLM_HTTP_AGENT_RESERVE_MS >
+      LLM_AGENT_JOB_BUDGET_MS)
+    t = (LLM_AGENT_JOB_BUDGET_MS - LLM_HTTP_AGENT_RESERVE_MS -
+         LLM_HTTP_BACKOFF_TOTAL_MS) / 1000;
+  return t;
 }
 
 static int append_http_header(struct curl_slist **headers,
@@ -410,7 +442,7 @@ int llm_http_call(const LlmProfile *profile, const LlmProvider *provider,
   curl_easy_setopt(curl, CURLOPT_WRITEDATA,
                    streaming ? (void *)gemini_stream : (void *)&resp);
   curl_easy_setopt(curl, CURLOPT_TIMEOUT,
-                   (long)LLM_HTTP_ATTEMPT_TIMEOUT_S);
+                   (long)llm_http_effective_attempt_timeout_s());
 
   {
     int max_retries = llm_http_effective_max_retries();

@@ -50,11 +50,6 @@ request_id="$(jq -r '.request_id // "request"' <<<"$input" | tr -cd '[:alnum:]_-
 [ -n "$request_id" ] || request_id=request
 handle="gcal_${request_id:0:80}"
 op="$(jq -r '.op // ""' <<<"$args")"
-if [ "$op" = poll ]; then
-  finish "$(jq -r '.handle // "gcal_poll"' <<<"$args")" poll "" \
-    "gcal is synchronous; no poll was needed."
-  exit 0
-fi
 [ "$op" = start ] || emit_failure BAD_ARGS "op must be start."
 kind="$(jq -r '.kind // ""' <<<"$args")"
 case "$kind" in diagnose|accounts|calendars|list|get|search|create|update|delete|freebusy) ;; *)

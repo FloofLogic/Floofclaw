@@ -85,8 +85,8 @@ int rt_profile_load(const char *name_or_path, RtProfile *out, char *error, size_
     if (json_ref_object_get_long(&root, "retry_attempts", &v) == 0 && v > 0)
       out->retry_attempts = v > 8 ? 8 : (int)v;
     v = 0;
-    if (json_ref_object_get_long(&root, "poll_interval_ms", &v) == 0 && v > 0)
-      out->poll_interval_ms = (int)v;
+    if (json_ref_object_get_long(&root, "operation_timeout_ms", &v) == 0 && v > 0)
+      out->operation_timeout_ms = (int)v;
   }
   step_count = json_ref_array_size(&steps);
   if (step_count == 0) {

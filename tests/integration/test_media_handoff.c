@@ -25,10 +25,13 @@ int media_ref_survives_intake_and_routes_only_to_event_llm(void) {
   RtStep step;
   RtAgentMeta event_meta;
   RtAgentMeta no_event_meta;
-  RtActionRegistry empty_actions;
-  RtAgentInvocation event_invocation;
-  RtAgentInvocation no_event_invocation;
-  RtContext text_only;
+  /* Heap-owned: RtActionRegistry alone is ~850KB and RtContext ~170KB;
+   * stacking them overflows the 1MB small-stack robustness gate before
+   * the test body even runs. */
+  RtActionRegistry *empty_actions = NULL;
+  RtAgentInvocation *event_invocation = NULL;
+  RtAgentInvocation *no_event_invocation = NULL;
+  RtContext *text_only = NULL;
   FcHeapStats before_text;
   FcHeapStats after_text;
   FcHeapStats before_destroy;
@@ -44,6 +47,21 @@ int media_ref_survives_intake_and_routes_only_to_event_llm(void) {
   char *event_log = NULL;
   int initialized = 0;
   int rc = 0;
+
+  empty_actions = (RtActionRegistry *)calloc(1, sizeof(*empty_actions));
+  event_invocation =
+      (RtAgentInvocation *)calloc(1, sizeof(*event_invocation));
+  no_event_invocation =
+      (RtAgentInvocation *)calloc(1, sizeof(*no_event_invocation));
+  text_only = (RtContext *)calloc(1, sizeof(*text_only));
+  if (!empty_actions || !event_invocation || !no_event_invocation ||
+      !text_only) {
+    free(text_only);
+    free(no_event_invocation);
+    free(event_invocation);
+    free(empty_actions);
+    return 1;
+  }
 
   rc |= test_reset_workspace();
   rc |= test_write_file("floops/media_handoff/loop.json",
@@ -138,11 +156,11 @@ int media_ref_survives_intake_and_routes_only_to_event_llm(void) {
     memset(&event_meta, 0, sizeof(event_meta));
     snprintf(event_meta.id, sizeof(event_meta.id), "speaker");
     event_meta.listen_event = 1;
-    memset(&empty_actions, 0, sizeof(empty_actions));
+    memset(empty_actions, 0, sizeof(*empty_actions));
     rc |= expect(
         rt_agent_prepare_invocation(
-            &run->ctx, "media_handoff", &step, "llm", &empty_actions,
-            &event_meta, NULL, 0, &event_invocation) == 0,
+            &run->ctx, "media_handoff", &step, "llm", empty_actions,
+            &event_meta, NULL, 0, event_invocation) == 0,
         "event-listening LLM invocation prepares");
     rc |= expect(snprintf(expected_manifest_path,
                           sizeof(expected_manifest_path), "workspace/%s",
@@ -150,7 +168,7 @@ int media_ref_survives_intake_and_routes_only_to_event_llm(void) {
                      (int)sizeof(expected_manifest_path),
                  "resolve expected ingress manifest path");
     rc |= expect(
-        strcmp(event_invocation.media_manifest_path,
+        strcmp(event_invocation->media_manifest_path,
                expected_manifest_path) == 0,
         "event-listening LLM receives the explicit ingress manifest");
 
@@ -159,10 +177,10 @@ int media_ref_survives_intake_and_routes_only_to_event_llm(void) {
     snprintf(step.id, sizeof(step.id), "speaker_without_event");
     rc |= expect(
         rt_agent_prepare_invocation(
-            &run->ctx, "media_handoff", &step, "llm", &empty_actions,
-            &no_event_meta, NULL, 0, &no_event_invocation) == 0,
+            &run->ctx, "media_handoff", &step, "llm", empty_actions,
+            &no_event_meta, NULL, 0, no_event_invocation) == 0,
         "non-event LLM invocation prepares");
-    rc |= expect(no_event_invocation.media_manifest_path[0] == '\0',
+    rc |= expect(no_event_invocation->media_manifest_path[0] == '\0',
                  "non-event invocation receives no media manifest");
   }
 
@@ -198,19 +216,23 @@ int media_ref_survives_intake_and_routes_only_to_event_llm(void) {
   }
   free(event_log);
 
-  memset(&text_only, 0, sizeof(text_only));
+  memset(text_only, 0, sizeof(*text_only));
   fc_heap_snapshot(&before_text);
-  rt_apply_event_to_context(&text_only, "user_message",
+  rt_apply_event_to_context(text_only, "user_message",
                             "{\"text\":\"plain text\"}");
   fc_heap_snapshot(&after_text);
-  rc |= expect(text_only.media_ref_json == NULL,
+  rc |= expect(text_only->media_ref_json == NULL,
                "text-only projection owns no media state");
   rc |= expect(after_text.mallocs == before_text.mallocs &&
                    after_text.callocs == before_text.callocs &&
                    after_text.reallocs == before_text.reallocs &&
                    after_text.strdups == before_text.strdups,
                "text-only projection allocates nothing");
-  rt_context_clear_media_ref(&text_only);
+  rt_context_clear_media_ref(text_only);
+  free(text_only);
+  free(no_event_invocation);
+  free(event_invocation);
+  free(empty_actions);
   rc |= test_remove_path("floops/media_handoff");
   return rc;
 }

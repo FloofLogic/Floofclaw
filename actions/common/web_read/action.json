@@ -4,25 +4,30 @@
   "outside_world": true,
   "args_schema": {
     "type": "object",
-    "required": ["op"],
+    "required": [
+      "op"
+    ],
     "additionalProperties": false,
     "properties": {
       "op": {
         "type": "string",
-        "enum": ["start", "poll"],
-        "description": "Operation to perform. 'start' fetches and finishes immediately. 'poll' is never needed in practice (start always finishes) but exists to satisfy the managed-operation contract."
+        "enum": [
+          "start"
+        ],
+        "description": "Operation to perform. 'start' fetches and finishes immediately."
       },
       "url": {
         "type": "string",
         "description": "Absolute HTTP or HTTPS URL to read. Required with op:start."
-      },
-      "handle": {
-        "type": "string",
-        "description": "Only used with op:poll. Ignored otherwise."
       }
     }
   },
-  "exec": ["bash", "run.sh"],
+  "exec": [
+    "bash",
+    "run.sh"
+  ],
   "timeout_ms": 45000,
-  "contract": "managed_operation"
+  "contract": "managed_operation",
+  "default_timeout_ms": 300000,
+  "max_timeout_ms": 600000
 }

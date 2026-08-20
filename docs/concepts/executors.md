@@ -67,11 +67,14 @@ correlated intermediate result and distinguishes it from terminal
 ## Model effort
 
 Model profiles live in `config/model_profiles.json`. A profile may set
-`"effort"` (for example `"low"`, `"medium"`, `"high"`). The current Gemini
-transport renders it as `generationConfig.thinkingConfig.thinkingLevel`;
-the other current transports load the field but do not put it on the wire.
-The engine does not whitelist Gemini values: the provider is the authority,
-and an invalid value or unsupported model fails loudly at the API with
-request artifacts on disk. A Gemini profile without `effort` uses
-`thinkingBudget: 0`. Only set `effort` when the selected provider/model
-transport actually supports it.
+`"effort"` (for example `"low"`, `"medium"`, `"high"`). The Gemini
+transport renders it as `generationConfig.thinkingConfig.thinkingLevel`,
+and the OpenAI Responses transport renders it as
+`"reasoning": {"effort": ...}`; the other current transports load the
+field but do not put it on the wire. The engine does not whitelist
+values: the provider is the authority, and an invalid value or
+unsupported model fails loudly at the API with request artifacts on
+disk. A Gemini profile without `effort` uses `thinkingBudget: 0`; an
+OpenAI Responses profile without `effort` omits `reasoning` entirely.
+Only set `effort` when the selected provider/model transport actually
+supports it.

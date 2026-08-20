@@ -11,6 +11,8 @@ int expect_file_exists(const char *path);
 int expect_file_not_exists(const char *path);
 
 int test_reset_workspace(void);
+int test_config_enable_all(char **saved);
+void test_config_restore(char *saved);
 int test_mkdir_p(const char *path);
 int test_write_file(const char *path, const char *text);
 int test_read_file(const char *path, char **out);

@@ -18,7 +18,8 @@ bot:  Tickets are on sale — you should grab one now.
 ```text
 you:  put this YouTube playlist on my Spotify.
 bot:  I'll work on that.
-[you disconnect; a detached worker runs; polls happen in the background]
+[you disconnect; a detached worker runs; the runtime waits silently
+ for its completion claim — no polling, no runs, no token spend]
 bot:  I can't continue: SPOTIFY_API_KEY is unavailable. Put it in the
       FloofClaw environment and tell me when it's ready.
 ```
@@ -42,7 +43,10 @@ bot:  I can't continue: SPOTIFY_API_KEY is unavailable. Put it in the
 ## The Loop
 
 ```text
-memory.before -> chat_manager -> review_manager -> result_manager -> dispatch -> workers -> memory.after -> memory.compact
+memory.before -> chat -> review -> admission.dispatch
+             -> work.select -> work.dispatch
+             -> result -> result.dispatch
+             -> memory.after -> memory.compact
 ```
 
 - `chat_manager` (LLM, gated `event_kind:user_message`) handles ordinary chat,
@@ -51,26 +55,41 @@ memory.before -> chat_manager -> review_manager -> result_manager -> dispatch ->
   whether to fetch a recorded source, add a note, defer, message, or close.
   Data-returning fetches complete through a later `operation_result` run;
   silence is the correct response to "nothing changed".
-- `result_manager` (LLM, gated `event_kind:operation_result`) routes fresh
-  worker or tool evidence to the user, task, or affair note that owns it. It
-  does not close affairs: closure stays on a later `affair_review`, whose
-  review manager has the active lifecycle context.
-- `dispatch` is the ordinary `action_runner` builtin.
-- `workers` (native, gated in for user/review/poll/result events)
-  applies the attempt rule through its configured `handler` binding
-  (an action implementing the managed-operation contract):
+- `work_manager` (LLM, gated `work_consequence`, bound via
+  `bind_task: "open_work"`) advances the open work task one exact
+  revision at a time. The runtime, not the model, chooses the task and
+  revision; the manager selects one action from its ordered catalog
+  (including `manage_codex` / `manage_claude` / `manage_hermes`) and
+  ends a revision only with an explicit `work_complete` or
+  `work_blocked`. A managed operation it starts detaches immediately —
+  the loop sleeps until the worker's completion claim (or the
+  deadline's timeout claim) re-enters as its own `operation_result`
+  run.
+- `result_manager` (LLM, gated `terminal_work_outcome`) routes terminal
+  work outcomes — completed or blocked, with the worker evidence behind
+  them — to the user, task, or affair note that owns them. It does not
+  close affairs: closure stays on a later `affair_review`, whose review
+  manager has the active lifecycle context.
+- The dispatch steps are the ordinary `action_runner` builtin; every
+  manager's calls flow through one.
+
+A custom floop may instead bind the native `workers` agent, which
+applies the mechanical attempt rule against the durable operation
+store:
 
 ```text
 no attempt recorded                        -> start at current work_rev
-attempt running                            -> poll (on poll events only)
+attempt running                            -> wait (completion arrives
+                                              as its own bus-driven
+                                              result run)
 attempt terminal, rev == current work_rev  -> stop; do nothing
 attempt terminal, rev <  current work_rev  -> start one attempt at the
                                               current rev, fed the prior
                                               attempt's result
 ```
 
-A task left open after a terminal attempt never restarts by itself —
-only a newer revision makes it eligible again. That is the
+Either way, a task left open after a terminal attempt never restarts by
+itself — only a newer revision makes it eligible again. That is the
 no-blocker-retry-loop invariant, enforced with integer comparison, not
 prose interpretation.
 
@@ -83,34 +102,46 @@ Declared in `loop.json`, all generic:
 | `one_pass` | one event → one run → one complete profile pass; never rewinds to phase zero or changes task state |
 | `serialize_contexts` | same-context runs advance in intake order; other contexts advance concurrently |
 | `retry_attempts` | bounded per-event retry after a failed phase job; committed calls are memoized by effect signature so retries never re-deliver or re-execute |
-| `poll_interval_ms` | managed-operation poll cadence; also the switch that enables the operation driver for the floop |
+| `operation_timeout_ms` | optional floop-level shortening of managed-operation completion deadlines; never extends past an action's declared maximum |
 | per-step `non_critical` | maintenance failure (memory phases) never fails the processed event |
 | per-step `gate: "event_kind:a,b"` | step runs only for the listed triggering-event kinds (opaque tokens) |
 
 ## The Managed-Operation Contract
 
-An action declares `"contract": "managed_operation"` in its
+An action declares `"contract": "managed_operation"` plus its deadline
+policy (`default_timeout_ms`, optional `max_timeout_ms`) in its
 `action.json`:
 
 ```text
-start(args)  -> running(handle) | finished(result)
-poll(handle) -> running         | finished(result)
+runtime allocates operation_id + completion token + deadline  (before exec)
+start(args) -> running(worker_handle) | finished(result)
+worker      -> operation_completed claim through the bus
+deadline    -> the runtime's own idempotent timeout claim
+either      -> one operation_result -> one result run
 ```
 
-The **operation driver** (kernel service, enabled by
-`poll_interval_ms`) reacts to terminals of contract-declaring actions,
+The **operation driver** (kernel service, enabled by the contract
+declaration itself) reacts to terminals of contract-declaring actions,
 dispatching on the declared contract — never on action names, and
 never reading meaning out of result text:
 
-- **record**: first `running(handle)` appends `operation_started` with
-  full correlation (task, context, delivery route) and projects the
-  attempt into `state.external` with the `work_rev` it started from.
-- **schedule**: at most one poll timer per handle; a timer that fires
-  after terminal is a no-op; a failed adapter call re-arms the timer so
-  a transient fault cannot strand a running operation.
-- **publish**: `finished(result)` appends exactly one
-  `operation_result` per handle and publishes it as a correlated bus
-  envelope; it re-enters the floop through normal intake as a new run.
+- **record**: identity is allocated durably BEFORE the action executes
+  (`operation_started` with full correlation and the deadline); a
+  `running(worker_handle)` result binds the worker's own identity as
+  kill/query metadata and projects the attempt into `state.external`
+  with the `work_rev` it started from.
+- **admit**: a worker's `operation_completed` claim (operation id +
+  secret token + bounded result) is validated against the durable store
+  BEFORE any run exists; the accepted claim becomes the one result
+  run's first canonical `operation_result`. Duplicates, forgeries, and
+  late claims are rejected inspectably.
+- **bound**: the deadline enters the reactor's poll timeout; expiry
+  submits the runtime's idempotent timeout claim through the same
+  admission path (`status:"timed_out"`); completion and timeout compete
+  through one reducer-owned terminal gate.
+- **publish**: an immediate `finished(result)` appends exactly one
+  `operation_result` and publishes it as a correlated bus envelope; it
+  re-enters the floop through normal intake as a new run.
 
 `manage_codex` and `manage_claude` implement the contract (their
 legacy `op_id`/`state` fields ride alongside `handle`/`status`).
@@ -155,8 +186,8 @@ The three managers each declare `listen: ["event", "memory", "affairs",
   concerns opened/closed, and `RUN FAILED` reasons as one-liners
   (`workspace/logs/narration.jsonl`, mirrored by the IRC adapter).
 - `app/pulse` — live board: concerns with review countdowns, work and
-  attempts with poll timers, recent runs with failures highlighted,
-  and the message log with proactive messages starred.
+  attempts with completion deadlines, recent runs with failures
+  highlighted, and the message log with proactive messages starred.
 
 ## Prompt lessons that are now load-bearing
 

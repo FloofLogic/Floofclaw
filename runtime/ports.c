@@ -21,6 +21,7 @@
 #include "support/heap_guard.h"
 #include "support/timing.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -47,11 +48,19 @@ typedef struct {
   char action_args_json[RT_LARGE];
   char payload_json[RT_EVENT_PAYLOAD_MAX];
   char media_ref_json[FC_MEDIA_REF_JSON_SIZE];
+  /* Completion claims (type operation_completed): the narrow transport
+   * fields admission validates against the durable operation store. The
+   * claim's result body stays inside payload_json and is re-read at
+   * populate time. */
+  char operation_id[RT_SMALL];
+  char completion_token[RT_OPERATION_TOKEN_HEX + 1];
+  char claim_cause[RT_SMALL];
   int  has_ref;
   int  has_media;
   int  is_affair_review;
   int  is_action_exec;
   int  is_correlated;
+  int  is_completion;
 } ParsedEnvelope;
 
 static void log_rejected_envelope(const char *path, const char *reason) {
@@ -143,14 +152,19 @@ static int parse_inbound_envelope(const char *path, ParsedEnvelope *out,
     out->is_affair_review = 1;
   } else if (strcmp(out->type, "action_exec") == 0) {
     out->is_action_exec = 1;
-  } else if (strcmp(out->type, "operation_poll") == 0 ||
-             strcmp(out->type, "operation_result") == 0 ||
+  } else if (strcmp(out->type, "operation_result") == 0 ||
              strcmp(out->type, "work_step_result") == 0 ||
              strcmp(out->type, "work_outcome") == 0) {
     /* Kernel-owned correlated lifecycle kinds. Their payloads are
      * opaque correlation/result data published from durable source
      * events; the run projects them verbatim. */
     out->is_correlated = 1;
+  } else if (strcmp(out->type, "operation_completed") == 0) {
+    /* Untrusted managed-operation completion claim. Not a behavioral
+     * event kind: admission either rejects it before run allocation or
+     * accepts it as the trigger for exactly one result run whose first
+     * behavioral event is the runtime-stamped operation_result. */
+    out->is_completion = 1;
   } else {
     if (err) snprintf(err, err_len, "unsupported_envelope_type: %s", out->type);
     fc_xfree(text); return -1;
@@ -178,6 +192,59 @@ static int parse_inbound_envelope(const char *path, ParsedEnvelope *out,
       out->user_text[0] = '\0';
     (void)json_ref_object_get_string(&payload, "origin_event_id",
                                      out->origin_event_id, sizeof(out->origin_event_id));
+  } else if (out->is_completion) {
+    JsonRef claim_result, status_ref;
+    char claim_status[RT_SMALL] = "";
+    {
+      /* The claim is a narrow transport shape. A submission carrying any
+       * runtime-owned correlation is rejected outright rather than
+       * silently stripped — workers must never even appear to author
+       * identity, routing, or revision correlation. */
+      size_t cursor = 0;
+      char key[RT_SMALL];
+      JsonRef value;
+      while (json_ref_object_iter(&payload, &cursor, key, sizeof(key),
+                                  &value) == 1) {
+        if (strcmp(key, "operation_id") != 0 &&
+            strcmp(key, "completion_token") != 0 &&
+            strcmp(key, "cause") != 0 &&
+            strcmp(key, "result") != 0)
+          PARSE_FAIL("claim_carries_runtime_owned_field");
+      }
+    }
+    if (json_ref_object_get_string(&payload, "operation_id",
+                                   out->operation_id,
+                                   sizeof(out->operation_id)) != 0 ||
+        !out->operation_id[0])
+      PARSE_FAIL("missing_required_field: payload.operation_id");
+    if (json_ref_object_get_string(&payload, "completion_token",
+                                   out->completion_token,
+                                   sizeof(out->completion_token)) != 0 ||
+        !out->completion_token[0])
+      PARSE_FAIL("missing_required_field: payload.completion_token");
+    if (json_ref_object_get_string(&payload, "cause", out->claim_cause,
+                                   sizeof(out->claim_cause)) != 0 ||
+        !out->claim_cause[0])
+      snprintf(out->claim_cause, sizeof(out->claim_cause), "worker");
+    if (strcmp(out->claim_cause, "worker") != 0 &&
+        strcmp(out->claim_cause, "timeout") != 0)
+      PARSE_FAIL("invalid_field: payload.cause");
+    if (json_ref_object_get_object(&payload, "result", &claim_result) != 0)
+      PARSE_FAIL("missing_required_field: payload.result");
+    if (strcmp(out->claim_cause, "worker") == 0) {
+      if (json_ref_object_get_string(&claim_result, "status", claim_status,
+                                     sizeof(claim_status)) != 0 ||
+          (strcmp(claim_status, "succeeded") != 0 &&
+           strcmp(claim_status, "failed") != 0))
+        PARSE_FAIL("invalid_field: payload.result.status");
+    }
+    /* Result payload overflow fails loudly at the boundary; it must
+     * never truncate silently into a smaller canonical result. */
+    if (json_ref_object_get(&claim_result, "text", &status_ref) == 0 &&
+        status_ref.type == JSON_REF_STRING &&
+        (size_t)(status_ref.end - status_ref.start) >
+            RT_OPERATION_RESULT_TEXT_MAX)
+      PARSE_FAIL("result_payload_too_large");
   } else if (out->is_affair_review) {
     if (json_ref_object_get_string(&payload, "affair_id", out->affair_id, sizeof(out->affair_id)) != 0 ||
         !out->affair_id[0])
@@ -232,6 +299,119 @@ static int parse_inbound_envelope(const char *path, ParsedEnvelope *out,
 
 #undef PARSE_FAIL
 
+/* Transform an admitted completion claim into the canonical result-run
+ * context: route and correlation come exclusively from the durable
+ * operation record; status and bounded text come from the claim; the
+ * canonical operation_result is SELF-SOURCED as this run's first
+ * behavioral event. Deterministic in (envelope, immutable record
+ * correlation), so live intake, claim-retry recommit, and cold-start
+ * recovery all rebuild the exact same first event. */
+static int populate_completion_context(RtRun *r, const ParsedEnvelope *env,
+                                       char *event_type_out,
+                                       size_t event_type_len,
+                                       char *payload, size_t payload_len) {
+  RtOperationSnapshot op;
+  JsonRef claim, claim_result;
+  char claim_status[RT_SMALL] = "";
+  const char *status;
+  char source_event_id[RT_SMALL];
+  char eh[RT_MED], ewh[RT_MED], ea[RT_MED], erid[RT_MED], etrigger[RT_MED];
+  char esource[RT_MED], estatus[RT_MED], corr[RT_LARGE];
+  char *text = NULL, *etext = NULL;
+  int n, rc = -1;
+  if (!r || !env || !event_type_out || !payload) return -1;
+  if (rt_operation_snapshot(env->operation_id, &op) != 0) return -1;
+  text = (char *)fc_xmalloc(RT_OPERATION_RESULT_TEXT_MAX + 1U +
+                            RT_EVENT_PAYLOAD_MAX);
+  if (!text) return -1;
+  etext = text + RT_OPERATION_RESULT_TEXT_MAX + 1U;
+  text[0] = '\0';
+  if (json_ref_top_object(env->payload_json, &claim) == 0 &&
+      json_ref_object_get_object(&claim, "result", &claim_result) == 0) {
+    (void)json_ref_object_get_string(&claim_result, "status", claim_status,
+                                     sizeof(claim_status));
+    (void)json_ref_object_get_string(&claim_result, "text", text,
+                                     RT_OPERATION_RESULT_TEXT_MAX + 1U);
+  }
+  if (strcmp(env->claim_cause, "timeout") == 0) {
+    status = "timed_out";
+    if (!text[0])
+      snprintf(text, RT_OPERATION_RESULT_TEXT_MAX + 1U,
+               "Managed operation %s reached its completion deadline; "
+               "FloofClaw stopped waiting. Its external work may still be "
+               "running and was not retried.",
+               op.action[0] ? op.action : "(unknown)");
+  } else {
+    status = strcmp(claim_status, "failed") == 0 ? "failed" : "succeeded";
+  }
+  /* Route + context restore exclusively from the durable record. */
+  snprintf(r->ctx.origin_event_id, sizeof(r->ctx.origin_event_id), "%s",
+           op.origin_event_id);
+  snprintf(r->ctx.origin_channel, sizeof(r->ctx.origin_channel), "%s",
+           op.channel);
+  snprintf(r->ctx.origin_adapter_id, sizeof(r->ctx.origin_adapter_id), "%s",
+           op.adapter_id);
+  if (op.ref_json[0])
+    snprintf(r->ctx.origin_ref_json, sizeof(r->ctx.origin_ref_json), "%s",
+             op.ref_json);
+  snprintf(r->context_id, sizeof(r->context_id), "%s", op.context_id);
+  snprintf(r->ctx.context_id, sizeof(r->ctx.context_id), "%s",
+           op.context_id);
+  /* The canonical event stamps its own exact id (the run's first event),
+   * the same self-sourcing rule every wake-bearing source event obeys. */
+  if (snprintf(source_event_id, sizeof(source_event_id), "evt_%s_%06d",
+               r->ctx.run_id, 1) >= (int)sizeof(source_event_id))
+    goto done;
+  if (json_escape(op.handle, eh, sizeof(eh)) != 0 ||
+      json_escape(op.worker_handle, ewh, sizeof(ewh)) != 0 ||
+      json_escape(op.action, ea, sizeof(ea)) != 0 ||
+      json_escape(op.request_id, erid, sizeof(erid)) != 0 ||
+      json_escape(op.trigger_event_id, etrigger, sizeof(etrigger)) != 0 ||
+      json_escape(source_event_id, esource, sizeof(esource)) != 0 ||
+      json_escape(status, estatus, sizeof(estatus)) != 0 ||
+      json_escape(text, etext, RT_EVENT_PAYLOAD_MAX) != 0)
+    goto done;
+  {
+    char ectx[RT_MED], ech[RT_MED], ead[RT_MED], etask[RT_MED];
+    char eorigin[RT_MED];
+    if (json_escape(op.context_id, ectx, sizeof(ectx)) != 0 ||
+        json_escape(op.channel, ech, sizeof(ech)) != 0 ||
+        json_escape(op.adapter_id, ead, sizeof(ead)) != 0 ||
+        json_escape(op.task_id, etask, sizeof(etask)) != 0 ||
+        json_escape(op.origin_event_id, eorigin, sizeof(eorigin)) != 0 ||
+        snprintf(corr, sizeof(corr),
+                 "\"task_id\":\"%s\",\"context_id\":\"%s\","
+                 "\"channel\":\"%s\",\"adapter_id\":\"%s\","
+                 "\"origin_event_id\":\"%s\",\"ref\":%s",
+                 etask, ectx, ech, ead, eorigin,
+                 op.ref_json[0] ? op.ref_json : "null") >=
+            (int)sizeof(corr))
+      goto done;
+  }
+  n = snprintf(payload, payload_len,
+               "{\"handle\":\"%s\",\"worker_handle\":\"%s\","
+               "\"action\":\"%s\",\"request_id\":\"%s\","
+               "\"trigger_event_id\":\"%s\",\"work_rev\":%lld,"
+               "\"source_event_id\":\"%s\",%s,\"status\":\"%s\","
+               "\"text\":\"%s\"}",
+               eh, ewh, ea, erid, etrigger, op.work_rev, esource, corr,
+               estatus, etext);
+  if (n < 0 || (size_t)n >= payload_len) goto done;
+  snprintf(r->ctx.event_kind, sizeof(r->ctx.event_kind), "operation_result");
+  snprintf(r->ctx.event_payload_json, sizeof(r->ctx.event_payload_json),
+           "%s", payload);
+  snprintf(r->created_from_event_id, sizeof(r->created_from_event_id), "%s",
+           env->envelope_id);
+  snprintf(r->created_from_type, sizeof(r->created_from_type),
+           "operation_result");
+  r->action_cli_only = 0;
+  snprintf(event_type_out, event_type_len, "operation_result");
+  rc = 0;
+done:
+  fc_xfree(text);
+  return rc;
+}
+
 static int populate_inbound_context(RtRun *r, const ParsedEnvelope *env,
                                     char *event_type_out, size_t event_type_len,
                                     char *payload, size_t payload_len) {
@@ -243,6 +423,9 @@ static int populate_inbound_context(RtRun *r, const ParsedEnvelope *env,
                          : env->is_action_exec ? "action_exec"
                          : "user_message";
   if (!r || !env || !event_type_out || !payload) return -1;
+  if (env->is_completion)
+    return populate_completion_context(r, env, event_type_out,
+                                       event_type_len, payload, payload_len);
   snprintf(r->ctx.origin_event_id,  sizeof(r->ctx.origin_event_id),  "%s", origin_event_id);
   snprintf(r->ctx.origin_channel,   sizeof(r->ctx.origin_channel),   "%s", env->channel);
   snprintf(r->ctx.origin_adapter_id,sizeof(r->ctx.origin_adapter_id),"%s", env->adapter_id);
@@ -346,7 +529,19 @@ static int commit_inbound_event(RtRun *r, const ParsedEnvelope *env) {
   char payload[RT_EVENT_PAYLOAD_MAX];
   if (populate_inbound_context(r, env, event_type, sizeof(event_type),
                                payload, sizeof(payload)) != 0) return -1;
-  if (rt_append_event(&r->ctx, event_type, env->channel, payload) != 0) return -1;
+  /* A completion claim's first event carries the record's route as its
+   * source (deterministic across recovery); every other kind keeps the
+   * envelope channel. */
+  if (rt_append_event(&r->ctx, event_type,
+                      env->is_completion ? r->ctx.origin_channel
+                                         : env->channel,
+                      payload) != 0) return -1;
+  if (env->is_completion) {
+    char status[RT_SMALL] = "", excerpt[RT_MED] = "";
+    (void)rt_json_get_string(payload, "status", status, sizeof(status));
+    (void)rt_json_get_string(payload, "text", excerpt, sizeof(excerpt));
+    rt_operation_on_claim_committed(r, env->operation_id, status, excerpt);
+  }
   if (env->is_action_exec) {
     char eaction[RT_MED], etask[RT_MED] = "";
     char output[RT_XL], committed[RT_XL];
@@ -376,7 +571,7 @@ static int commit_inbound_event(RtRun *r, const ParsedEnvelope *env) {
    * branches on ctx->inbound_affair_id to render the full review
    * payload from the affair store. Operation lifecycle events are not
    * user input and bind no input task. */
-  if (!env->is_correlated && !env->is_action_exec &&
+  if (!env->is_correlated && !env->is_action_exec && !env->is_completion &&
       rt_task_create_input_for_user_message(&r->ctx, env->user_text) != 0) return -1;
   r->phase_index =
       env->is_action_exec && r->profile
@@ -519,12 +714,42 @@ static void retry_waiting_inbound_claims(RtScheduler *s) {
   }
 }
 
+/* Idempotent admission decision for one completion claim. NULL means
+ * the claim would open the one result run; a reason string rejects it
+ * before any run artifact exists. Deterministic in durable state, so
+ * the orphaned-claim reconciler can safely re-evaluate it. */
+static const char *completion_claim_disposition(const ParsedEnvelope *env) {
+  char status[RT_SMALL] = "";
+  char stored_token[RT_OPERATION_TOKEN_HEX + 1] = "";
+  int lookup = rt_operation_status(env->operation_id, status,
+                                   sizeof(status));
+  if (lookup < 0) return "operation_store_unreadable";
+  if (lookup == 1) return "unknown_operation";
+  if (strcmp(status, "running") != 0) return "operation_already_terminal";
+  if (strcmp(env->claim_cause, "timeout") == 0) {
+    /* Runtime-authored deadline claims: the token must match whenever
+     * the record holds one; a legacy pre-token record may still be
+     * timed out so upgrades converge instead of waiting forever. */
+    if (rt_operation_token_of(env->operation_id, stored_token,
+                              sizeof(stored_token)) == 0 &&
+        stored_token[0] &&
+        !rt_operation_token_matches(env->operation_id,
+                                    env->completion_token))
+      return "completion_token_mismatch";
+    return NULL;
+  }
+  return rt_operation_token_matches(env->operation_id,
+                                    env->completion_token)
+             ? NULL : "completion_token_mismatch";
+}
+
 static int create_run_from_envelope(RtScheduler *s, RtRun *r, const char *envelope_path) {
   ParsedEnvelope env;
   char err[RT_LARGE] = "";
   char expected_name[BUS_ID_MAX + 6];
   const char *basename;
   int validated_outbox = 0;
+  int deferred_claim;
   if (parse_inbound_envelope(envelope_path, &env, err, sizeof(err)) != 0) {
     log_rejected_envelope(envelope_path, err);
     return -1;
@@ -537,6 +762,16 @@ static int create_run_from_envelope(RtScheduler *s, RtRun *r, const char *envelo
     log_rejected_envelope(envelope_path,
                           "envelope_path_identity_mismatch");
     return -1;
+  }
+  if (env.is_completion) {
+    /* Validate the claim against durable operation state BEFORE any run
+     * allocation. Duplicate, stale, mismatched, and forged claims are
+     * rejected here, inspectably, without becoming behavioral truth. */
+    const char *reason = completion_claim_disposition(&env);
+    if (reason) {
+      log_rejected_envelope(envelope_path, reason);
+      return -1;
+    }
   }
   {
     int require_outbox =
@@ -609,7 +844,8 @@ static int create_run_from_envelope(RtScheduler *s, RtRun *r, const char *envelo
       return -1;
     }
     r->phase_index = 0;
-    r->state = validated_outbox ? RT_RUN_WAITING_EVENT : RT_RUN_READY;
+    deferred_claim = validated_outbox || env.is_completion;
+    r->state = deferred_claim ? RT_RUN_WAITING_EVENT : RT_RUN_READY;
     /* The control claim precedes the behavioral append. If SIGKILL tears
      * the first event, startup can still map this run back to its durable
      * processed envelope and recommit it under the same run id. */
@@ -619,7 +855,7 @@ static int create_run_from_envelope(RtScheduler *s, RtRun *r, const char *envelo
     }
   }
   if (commit_inbound_event(r, &env) != 0) {
-    if (validated_outbox) {
+    if (deferred_claim) {
       int state = rt_ports_inbound_commit_state(r);
       if (state == INBOUND_COMMIT_EXACT) {
         rt_run_set_state(r, RT_RUN_READY);
@@ -737,45 +973,176 @@ int rt_ports_delivery_exists(const char *run_id, const char *request_id) {
   return 0;
 }
 
-/* ----- managed-operation poll pump ----- */
+/* ----- managed-operation deadline pump + orphan reconciler ----- */
 
-static int ports_context_has_active_run(RtScheduler *s, const char *context_id) {
-  size_t i;
-  if (!s || !context_id || !*context_id) return 0;
-  for (i = 0; i < s->run_count; ++i) {
-    const RtRun *r = s->runs[i];
-    if (!r) continue;
-    if (r->state == RT_RUN_DONE || r->state == RT_RUN_FAILED) continue;
-    if (strcmp(r->ctx.context_id, context_id) == 0) return 1;
+#define OP_PUMP_MIN_SCAN_INTERVAL_MS 250
+#define OP_RECONCILE_MIN_INTERVAL_MS 2000
+#define OP_CLAIM_CHANNEL "operations"
+
+/* Publish the runtime's timeout claim for one due operation through the
+ * same admission path a worker completion uses. The claim's bus
+ * identity is reserved once and persisted on the record BEFORE
+ * publication, so a crash between fire and commit refires the identical
+ * envelope and bus_publish_stable absorbs the duplicate. */
+static void publish_timeout_claim(const char *op_id) {
+  RtOperationSnapshot op;
+  char envelope_id[RT_SMALL] = "";
+  char token[RT_OPERATION_TOKEN_HEX + 1] = "";
+  char eop[RT_MED], etoken[RT_OPERATION_TOKEN_HEX * 2 + 2], etext[RT_LARGE];
+  char text[RT_MED];
+  char payload[BUS_PAYLOAD_MAX];
+  int n;
+  if (rt_operation_snapshot(op_id, &op) != 0 ||
+      strcmp(op.status, "running") != 0)
+    return;
+  if (rt_operation_claim_envelope_of(op_id, envelope_id,
+                                     sizeof(envelope_id)) != 0)
+    return;
+  if (!envelope_id[0]) {
+    char reserved[BUS_ID_MAX];
+    if (bus_reserve_envelope_id(reserved, sizeof(reserved)) != 0) return;
+    if (rt_operation_bind_claim_envelope(op_id, reserved) != 0) return;
+    snprintf(envelope_id, sizeof(envelope_id), "%s", reserved);
   }
-  return 0;
+  (void)rt_operation_token_of(op_id, token, sizeof(token));
+  snprintf(text, sizeof(text),
+           "Managed operation %s reached its completion deadline; "
+           "FloofClaw stopped waiting. Its external work may still be "
+           "running and was not retried.",
+           op.action[0] ? op.action : "(unknown)");
+  if (json_escape(op_id, eop, sizeof(eop)) != 0 ||
+      json_escape(token, etoken, sizeof(etoken)) != 0 ||
+      json_escape(text, etext, sizeof(etext)) != 0)
+    return;
+  n = snprintf(payload, sizeof(payload),
+               "{\"operation_id\":\"%s\",\"completion_token\":\"%s\","
+               "\"cause\":\"timeout\",\"result\":{\"status\":\"timed_out\","
+               "\"text\":\"%s\"}}",
+               eop, etoken[0] ? etoken : "expired", etext);
+  if (n < 0 || n >= (int)sizeof(payload)) return;
+  if (bus_publish_stable(envelope_id, OP_CLAIM_CHANNEL,
+                         "operation_completed", payload) == 0)
+    (void)rt_narrate("operation deadline: %s -> timeout claim %s",
+                     op_id, envelope_id);
 }
 
-#define OP_PUMP_MIN_SCAN_INTERVAL_MS 100
+/* True when some durable run already claims this envelope id as its
+ * triggering event. Scans runstate control files only; used solely for
+ * rare orphaned-claim reconciliation. */
+static int envelope_claimed_by_some_run(const char *envelope_id) {
+  DIR *dir = opendir("workspace/runs");
+  struct dirent *entry;
+  int claimed = 0;
+  if (!dir) return 0;
+  while (!claimed && (entry = fs_readdir_checked(dir)) != NULL) {
+    char path[PATH_MAX];
+    char *text = NULL;
+    JsonRef state, created;
+    char event_id[RT_SMALL] = "";
+    if (strncmp(entry->d_name, "run_", 4) != 0) continue;
+    if (snprintf(path, sizeof(path), "workspace/runs/%s/runstate.json",
+                 entry->d_name) >= (int)sizeof(path))
+      continue;
+    if (fs_read_text(path, &text, FS_READ_TEXT_DEFAULT_CAP) != 0 || !text)
+      continue;
+    if (json_ref_top_object(text, &state) == 0 &&
+        json_ref_object_get_object(&state, "created_from", &created) == 0 &&
+        json_ref_object_get_string(&created, "event_id", event_id,
+                                   sizeof(event_id)) == 0 &&
+        strcmp(event_id, envelope_id) == 0)
+      claimed = 1;
+    fc_xfree(text);
+  }
+  (void)closedir(dir);
+  return claimed;
+}
+
+/* Crash-window recovery for completion claims: a claim consumed out of
+ * the inbox but never bound to a run (the gateway died between the
+ * destructive rename and the run-claim persist, or the intake attempt
+ * failed transiently) would otherwise be silently lost and the deadline
+ * would report timed_out on work that finished. Requeue any processed
+ * claim that would still be admitted and that no run claims. Rejections
+ * re-evaluate deterministically, so a refused claim never loops. */
+void rt_ports_reconcile_orphaned_claims(void) {
+  DIR *dir;
+  struct dirent *entry;
+  /* Heap-owned scratch: this runs on the reactor stack, and a
+   * ParsedEnvelope is far too large to keep in a reactor-path frame
+   * (the small-stack robustness gate is the enforcement). */
+  ParsedEnvelope *env;
+  if (!rt_operation_any_running()) return;
+  dir = opendir("workspace/bus/processed");
+  if (!dir) return;
+  env = (ParsedEnvelope *)fc_xmalloc(sizeof(*env));
+  if (!env) {
+    (void)closedir(dir);
+    return;
+  }
+  while ((entry = fs_readdir_checked(dir)) != NULL) {
+    char path[PATH_MAX];
+    char err[RT_LARGE] = "";
+    if (strncmp(entry->d_name, "bus_", 4) != 0) continue;
+    if (snprintf(path, sizeof(path), "workspace/bus/processed/%s",
+                 entry->d_name) >= (int)sizeof(path))
+      continue;
+    if (parse_inbound_envelope(path, env, err, sizeof(err)) != 0 ||
+        !env->is_completion)
+      continue;
+    if (completion_claim_disposition(env) != NULL) continue;
+    if (envelope_claimed_by_some_run(env->envelope_id)) continue;
+    if (bus_requeue_processed(env->envelope_id) == 0)
+      (void)rt_narrate("operation completion reconciled: requeued orphaned "
+                       "claim %s for %s",
+                       env->envelope_id, env->operation_id);
+  }
+  fc_xfree(env);
+  (void)closedir(dir);
+}
+
+/* Janitor retention guard: a processed completion claim whose operation
+ * is still running is pending evidence — either an active claim run
+ * needs it for recommit, or the reconciler will requeue it. */
+int rt_ports_completion_claim_pinned(const char *envelope_id) {
+  char path[PATH_MAX];
+  /* Heap-owned: called from the janitor's reactor-path tick. */
+  ParsedEnvelope *env;
+  char err[RT_LARGE] = "";
+  char status[RT_SMALL] = "";
+  int pinned = 0;
+  if (!envelope_id || !*envelope_id) return 0;
+  if (snprintf(path, sizeof(path), "workspace/bus/processed/%s.json",
+               envelope_id) >= (int)sizeof(path))
+    return 0;
+  env = (ParsedEnvelope *)fc_xmalloc(sizeof(*env));
+  if (!env) return 1; /* cannot inspect: conservatively keep */
+  if (parse_inbound_envelope(path, env, err, sizeof(err)) == 0 &&
+      env->is_completion) {
+    if (rt_operation_status(env->operation_id, status, sizeof(status)) != 0)
+      pinned = 1; /* unreadable store: conservatively keep */
+    else
+      pinned = strcmp(status, "running") == 0;
+  }
+  fc_xfree(env);
+  return pinned;
+}
 
 void rt_operation_pump(RtScheduler *s, uint64_t now_ms) {
   static uint64_t next_scan_ms = 0;
-  char handles[8][RT_SMALL];
+  static uint64_t next_reconcile_ms = 0;
+  char ids[8][RT_SMALL];
   size_t n = 0;
   if (!s) return;
   if (now_ms < next_scan_ms) return;
   next_scan_ms = now_ms + OP_PUMP_MIN_SCAN_INTERVAL_MS;
-  if (rt_operation_list_due((long long)timing_stable_wall_from_monotonic(now_ms), handles,
-                            sizeof(handles) / sizeof(handles[0]), &n) != 0)
-    return;
-  for (size_t i = 0; i < n; ++i) {
-    char context_id[RT_MED] = "", channel[RT_SMALL] = "", corr[RT_LARGE] = "";
-    if (rt_operation_context_id_of(handles[i], context_id, sizeof(context_id)) != 0)
-      continue;
-    /* Busy context: keep the timer armed; it fires on a later pump.
-     * This also guarantees at most one outstanding poll event per
-     * handle — the timer is only cleared when the envelope exists. */
-    if (ports_context_has_active_run(s, context_id)) continue;
-    if (rt_operation_correlation_json(handles[i], corr, sizeof(corr)) != 0) continue;
-    if (rt_operation_channel_of(handles[i], channel, sizeof(channel)) != 0 || !channel[0])
-      continue;
-    if (bus_publish(channel, "operation_poll", corr, NULL, 0) != 0) continue;
-    (void)rt_operation_clear_poll(handles[i]);
+  if (rt_operation_list_deadline_due(
+          (long long)timing_stable_wall_from_monotonic(now_ms), ids,
+          sizeof(ids) / sizeof(ids[0]), &n) == 0) {
+    for (size_t i = 0; i < n; ++i) publish_timeout_claim(ids[i]);
+  }
+  if (now_ms >= next_reconcile_ms) {
+    next_reconcile_ms = now_ms + OP_RECONCILE_MIN_INTERVAL_MS;
+    rt_ports_reconcile_orphaned_claims();
   }
 }
 

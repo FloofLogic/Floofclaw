@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
@@ -152,6 +153,58 @@ int view_debug_correlates_failed_action_stderr(void) {
   return rc;
 }
 
+static pid_t start_gateway_lock_holder(int *release_fd) {
+  int ready[2] = {-1, -1};
+  int release[2] = {-1, -1};
+  pid_t pid;
+  char state = '0';
+  if (!release_fd || pipe(ready) != 0 || pipe(release) != 0) {
+    if (ready[0] >= 0) close(ready[0]);
+    if (ready[1] >= 0) close(ready[1]);
+    if (release[0] >= 0) close(release[0]);
+    if (release[1] >= 0) close(release[1]);
+    return -1;
+  }
+  pid = fork();
+  if (pid == 0) {
+    int lock_fd;
+    char done;
+    close(ready[0]);
+    close(release[1]);
+    lock_fd = open(GW_RUNTIME_OWNER_LOCK_PATH, O_CREAT | O_RDWR, 0644);
+    if (lock_fd >= 0 && flock(lock_fd, LOCK_EX | LOCK_NB) == 0)
+      state = '1';
+    (void)write(ready[1], &state, 1);
+    close(ready[1]);
+    if (state == '1') (void)read(release[0], &done, 1);
+    close(release[0]);
+    if (lock_fd >= 0) {
+      (void)flock(lock_fd, LOCK_UN);
+      close(lock_fd);
+    }
+    _exit(state == '1' ? 0 : 1);
+  }
+  close(ready[1]);
+  close(release[0]);
+  if (pid < 0 || read(ready[0], &state, 1) != 1 || state != '1') {
+    close(ready[0]);
+    close(release[1]);
+    if (pid > 0) (void)waitpid(pid, NULL, 0);
+    return -1;
+  }
+  close(ready[0]);
+  *release_fd = release[1];
+  return pid;
+}
+
+static void stop_gateway_lock_holder(pid_t pid, int release_fd) {
+  if (release_fd >= 0) {
+    (void)write(release_fd, "x", 1);
+    close(release_fd);
+  }
+  if (pid > 0) (void)waitpid(pid, NULL, 0);
+}
+
 int conflicting_client_floop_rejected_before_publish(void) {
   static const char expected[] =
       "cli: --floop 'openclaw' conflicts with live gateway floop 'hello'; "
@@ -160,25 +213,49 @@ int conflicting_client_floop_rejected_before_publish(void) {
   char actual[RT_SMALL] = "";
   char *out = NULL;
   char *argv[] = { "cli", "--floop", "openclaw" };
+  int release_fd = -1;
   int exit_code = 0;
+  int rc = 0;
+  pid_t owner_pid;
+  rc |= test_reset_workspace();
+  rc |= test_mkdir_p(".fclaw/run");
+  owner_pid = start_gateway_lock_holder(&release_fd);
+  rc |= expect(owner_pid > 1, "fixture runtime owner holds the gateway lock");
+  if (owner_pid > 1) {
+    snprintf(pid_text, sizeof(pid_text), "%d\n", (int)owner_pid);
+    rc |= test_write_file(GW_PID_PATH, pid_text);
+    rc |= test_write_file(GW_LOOP_PATH, "hello\n");
+    rc |= expect(gateway_running_floop(actual, sizeof(actual)) == 0 &&
+                     strcmp(actual, "hello") == 0,
+                 "gateway boundary reports the live owner's floop");
+    rc |= expect(harness_cli_channel(3, argv, &out, &exit_code) == 0,
+                 "capture conflicting channel client floop");
+    rc |= expect(exit_code != 0, "conflicting client floop exits nonzero");
+    rc |= expect(out && strcmp(out, expected) == 0,
+                 "conflict names both floops and the gateway reload fix once");
+    rc |= expect(access("workspace/logs/bus.jsonl", F_OK) != 0 &&
+                     access("workspace/bus/inbox", F_OK) != 0,
+                 "conflicting client floop is rejected before bus publication");
+  }
+  free(out);
+  stop_gateway_lock_holder(owner_pid, release_fd);
+  rc |= test_reset_workspace();
+  return rc;
+}
+
+int stale_live_gateway_pid_without_owner_lock_is_rejected(void) {
+  char pid_text[32];
   int rc = 0;
   rc |= test_reset_workspace();
   rc |= test_mkdir_p(".fclaw/run");
   snprintf(pid_text, sizeof(pid_text), "%d\n", getpid());
   rc |= test_write_file(GW_PID_PATH, pid_text);
   rc |= test_write_file(GW_LOOP_PATH, "hello\n");
-  rc |= expect(gateway_running_floop(actual, sizeof(actual)) == 0 &&
-                   strcmp(actual, "hello") == 0,
-               "gateway boundary reports the live owner's floop");
-  rc |= expect(harness_cli_channel(3, argv, &out, &exit_code) == 0,
-               "capture conflicting channel client floop");
-  rc |= expect(exit_code != 0, "conflicting client floop exits nonzero");
-  rc |= expect(out && strcmp(out, expected) == 0,
-               "conflict names both floops and the gateway reload fix once");
-  rc |= expect(access("workspace/logs/bus.jsonl", F_OK) != 0 &&
-                   access("workspace/bus/inbox", F_OK) != 0,
-               "conflicting client floop is rejected before bus publication");
-  free(out);
+  rc |= expect(gateway_running_pid() == 0,
+               "live unrelated PID without the owner lock is not a gateway");
+  rc |= expect(access(GW_PID_PATH, F_OK) != 0 &&
+                   access(GW_LOOP_PATH, F_OK) != 0,
+               "stale PID and floop control files are removed");
   rc |= test_reset_workspace();
   return rc;
 }

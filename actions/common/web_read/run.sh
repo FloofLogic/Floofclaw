@@ -2,8 +2,8 @@
 set -euo pipefail
 # web_read as a managed-operation. Contract:
 #   op:start(url) -> {status:"finished", handle, text:<bounded>, url, title, ...}
-#   op:poll(handle) -> {status:"finished", handle, text:""} (never reached in
-#     practice — start finishes synchronously)
+#   (start finishes synchronously; the runtime publishes the result as a
+#    correlated operation_result)
 #
 # The underlying extractor is built from the public `pluck` submodule owned by
 # this action. Public FloofClaw releases flatten that pinned source. This script
@@ -26,18 +26,9 @@ def emit(result=None, error=None, code=0):
 def make_handle():
     return "webrd_" + secrets.token_hex(6)
 
-if op == "poll":
-    # Kept for contract completeness. start always finishes.
-    handle = (args.get("handle") or "").strip() or make_handle()
-    emit(result={
-        "status": "finished",
-        "handle": handle,
-        "text": "web_read has no long-running state; call op:start."
-    })
-
 if op != "start":
     emit(error={"code": "BAD_ARGS",
-                "message": "op must be 'start' or 'poll'"}, code=1)
+                "message": "op must be 'start'"}, code=1)
 
 url = args.get("url", "")
 if not url:

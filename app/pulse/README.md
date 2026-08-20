@@ -13,7 +13,7 @@ It reads the selected workspace's truth only:
 - `workspace/memory/state/tasks.json` (+ archive count) — work tasks,
   revisions, attempt state
 - `workspace/memory/state/operations.json` — detached worker
-  operations and their poll timers
+  operations and their completion deadlines
 - `workspace/logs/bus.jsonl` + `workspace/logs/deliveries.jsonl` — the
   interleaved message log, with proactive messages (reviews and worker
   results speaking up on their own) highlighted

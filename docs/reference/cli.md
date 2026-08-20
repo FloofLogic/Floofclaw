@@ -7,6 +7,7 @@ fclaw run [-a|-h] [--floop <name>] [--text] TEXT
 fclaw action list [-a|-h]
 fclaw action exec [-a|-h] --name <action> --args '<json-object>'
 fclaw action auth [-a|-h] --name <action> -- <action-owned arguments>
+fclaw operation complete [-a|-h] [--operation-id <id>] [--token <token>] (--result-file <json> | --status <s> [--text <t>])
 fclaw replay [-a|-h] <event_log.jsonl>
 fclaw view [-a|-h] [-f] [-d] <run_id|run_dir>
 fclaw usage [-a|-h] [--agent <id>] [--profile <id>]
@@ -147,6 +148,37 @@ own stable operator syntax. In default/`-a` mode the command captures the
 operator process and emits one compact object containing `ok`, `exit_code`,
 `stdout`, `stderr`, and a truncation marker. Use `-h` for an interactive OAuth
 or other operator session.
+
+## `fclaw operation complete`
+
+The action-facing managed-operation completion helper. A detached worker (or
+its supervising runner) submits its terminal result through the ordinary bus:
+
+```bash
+fclaw operation complete -a --result-file result.json
+fclaw operation complete -a --status succeeded --text "done"
+```
+
+`--operation-id` and `--token` default to `FCLAW_OPERATION_ID` and
+`FCLAW_COMPLETION_TOKEN`, which the runtime places in the trusted child
+environment when it launches a managed action. A `--result-file` must be a
+JSON object with `status` (`succeeded` | `failed`) and an optional bounded
+`text`; result text over the bounded cap fails loudly rather than
+truncating. The helper accepts no routing, correlation, event ids, run ids,
+request ids, task revisions, or timestamps — the runtime stamps all of those
+from its durable operation record at intake.
+
+Publication is a durable inbox envelope plus a best-effort wake knock, so it
+works while the gateway is stopped; the claim is admitted after restart.
+Duplicate invocations are safe: idempotent admission and the operation
+store's terminal gate absorb them. A wrong token, unknown operation id, or
+already-terminal operation is rejected into
+`workspace/logs/rejected_events.jsonl` without creating any run.
+
+Subprocess actions that need a long-lived local waiter should detach it with
+`fclaw internal detach -- <command...>` (double fork + `setsid`, stdio to
+`/dev/null`), so the waiter survives the action's own timeout, gateway
+shutdown, and Ctrl-C.
 
 ## `fclaw replay <event_log.jsonl>`
 
@@ -347,6 +379,10 @@ Configure with:
 
 - `FCLAW_GATEWAY_POLL_MS` — poll(2) timeout ceiling (default 5000 ms;
   the reactor clamps below this when modules report immediate work).
+- `FCLAW_LLM_ATTEMPT_TIMEOUT_S` — per-attempt LLM transport timeout
+  (default 25 s, sized for hosted providers). Raise it for slow local
+  models, typically with `FCLAW_LLM_MAX_RETRIES=0`; both overrides are
+  clamped so the retry ladder always fits the agent job budget.
 
 ## `fclaw -i`
 

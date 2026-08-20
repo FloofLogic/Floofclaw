@@ -256,7 +256,8 @@ int rt_setup_main(int argc, char **argv) {
     }
   }
   if (!mode.human) {
-    puts("{\"command\":\"setup\",\"steps\":["
+    puts("{\"command\":\"setup\",\"wizard\":\"./scripts/onboard.sh\","
+         "\"steps\":["
          "\"make test\","
          "\"./bin/fclaw run -h --text hello\","
          "\"fclaw auth set-stdin -h <provider-endpoint>\","
@@ -270,6 +271,8 @@ int rt_setup_main(int argc, char **argv) {
   }
   printf(
       COLOR_CYAN "fclaw setup" COLOR_RESET "\n\n"
+      "Guided first run (identity, key, floop, channels, action enablement):\n"
+      "  ./scripts/onboard.sh\n\n"
       "Quick first-run checklist:\n\n"
       "  1. Verify the runtime with the hermetic offline suite:\n"
       "       make test\n\n"

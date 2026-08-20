@@ -589,6 +589,68 @@ int rt_agent_runner_start_step(RtRun *r, const RtStep *step, RtJobRunner *runner
   return -1;
 }
 
+/* Reject a decision and, while the shared repair budget lasts, rewind the
+ * phase so the agent reruns with the reason beside its rejected response.
+ * Returns 0 when a repair pass is scheduled, -1 when the run is over. */
+static int reject_or_repair_decision(RtRun *r, const RtStep *step,
+                                     const RtJob *job,
+                                     const RtAgentMeta *meta,
+                                     const char *reason) {
+  char marker_reason[RT_LARGE] = "";
+  int repair_attempt = 0;
+  int can_repair;
+  if (agent_output_repair_attempt(job->out_path, &repair_attempt,
+                                  marker_reason,
+                                  sizeof(marker_reason)) != 0) {
+    rt_run_set_error_code(
+        r, FC_ERROR_RUNTIME, "agent_decision_repair_state_invalid",
+        "Agent decision repair state was missing or malformed.",
+        job->job_id);
+    return -1;
+  }
+  can_repair = repair_attempt < meta->output_repair_attempts;
+  if (write_agent_decision_rejection(step, job, reason,
+                                     repair_attempt,
+                                     can_repair) != 0) {
+    rt_run_set_error_code(
+        r, FC_ERROR_RUNTIME, "agent_decision_repair_state_failed",
+        "Agent decision rejection could not be preserved.",
+        job->job_id);
+    return -1;
+  }
+  rt_log_rejected_agent_event(step->target,
+                              "agent_decision_contract_rejected",
+                              reason);
+  if (can_repair) {
+    char detail[RT_LARGE];
+    if (r->phase_index == 0) {
+      rt_run_set_error_code(
+          r, FC_ERROR_RUNTIME, "agent_decision_repair_cursor_invalid",
+          "Agent decision repair could not rewind its phase.",
+          job->job_id);
+      return -1;
+    }
+    snprintf(detail, sizeof(detail),
+             "output contract rejected decision; repair %d of %d: %s",
+             repair_attempt + 1, meta->output_repair_attempts, reason);
+    (void)rt_write_trace(&r->ctx, step->id, detail);
+    r->phase_index--;
+    if (rt_run_persist_state(r) != 0) {
+      rt_run_set_error_code(
+          r, FC_ERROR_RUNTIME, "agent_decision_repair_state_failed",
+          "Agent decision repair cursor could not be persisted.",
+          job->job_id);
+      return -1;
+    }
+    return 0;
+  }
+  rt_run_set_error_code(
+      r, FC_ERROR_MALFORMED, "agent_decision_contract_exhausted",
+      reason[0] ? reason : "Agent decision contract repair was exhausted.",
+      job->job_id);
+  return -1;
+}
+
 int rt_agent_runner_complete_job(RtRun *r, RtJob *job) {
   const RtStep *step = rt_run_find_step_by_id(r->profile, job->step_id);
   const char *agent_name = step ? step->target : (job->step_id[0] ? job->step_id : "agent");
@@ -629,8 +691,6 @@ int rt_agent_runner_complete_job(RtRun *r, RtJob *job) {
   if (step && meta && meta->output_contract[0]) {
     char *output = NULL;
     char reason[RT_LARGE] = "";
-    char marker_reason[RT_LARGE] = "";
-    int repair_attempt = 0;
     int contract_rc;
     if (fs_read_text(job->out_path, &output,
                      FS_READ_TEXT_DEFAULT_CAP) != 0 || !output) {
@@ -643,65 +703,22 @@ int rt_agent_runner_complete_job(RtRun *r, RtJob *job) {
     contract_rc = rt_agent_validate_output_contract(
         &r->ctx, meta, output, reason, sizeof(reason));
     fc_xfree(output);
-    if (contract_rc < 0) {
-      int can_repair;
-      if (agent_output_repair_attempt(job->out_path, &repair_attempt,
-                                      marker_reason,
-                                      sizeof(marker_reason)) != 0) {
-        rt_run_set_error_code(
-            r, FC_ERROR_RUNTIME, "agent_decision_repair_state_invalid",
-            "Agent decision repair state was missing or malformed.",
-            job->job_id);
-        return -1;
-      }
-      can_repair = repair_attempt < meta->output_repair_attempts;
-      if (write_agent_decision_rejection(step, job, reason,
-                                         repair_attempt,
-                                         can_repair) != 0) {
-        rt_run_set_error_code(
-            r, FC_ERROR_RUNTIME, "agent_decision_repair_state_failed",
-            "Agent decision rejection could not be preserved.",
-            job->job_id);
-        return -1;
-      }
-      rt_log_rejected_agent_event(step->target,
-                                  "agent_decision_contract_rejected",
-                                  reason);
-      if (can_repair) {
-        char detail[RT_LARGE];
-        if (r->phase_index == 0) {
-          rt_run_set_error_code(
-              r, FC_ERROR_RUNTIME, "agent_decision_repair_cursor_invalid",
-              "Agent decision repair could not rewind its phase.",
-              job->job_id);
-          return -1;
-        }
-        snprintf(detail, sizeof(detail),
-                 "output contract rejected decision; repair %d of %d: %s",
-                 repair_attempt + 1, meta->output_repair_attempts, reason);
-        (void)rt_write_trace(&r->ctx, step->id, detail);
-        r->phase_index--;
-        if (rt_run_persist_state(r) != 0) {
-          rt_run_set_error_code(
-              r, FC_ERROR_RUNTIME, "agent_decision_repair_state_failed",
-              "Agent decision repair cursor could not be persisted.",
-              job->job_id);
-          return -1;
-        }
-        return 0;
-      }
-      rt_run_set_error_code(
-          r, FC_ERROR_MALFORMED, "agent_decision_contract_exhausted",
-          reason[0] ? reason : "Agent decision contract repair was exhausted.",
-          job->job_id);
-      return -1;
-    }
+    if (contract_rc < 0)
+      return reject_or_repair_decision(r, step, job, meta, reason);
   }
   if (!step ||
       rt_agent_append_output_file(&r->ctx, step, meta ? meta->executor : "script",
                                   meta, job->bound_task_id,
                                   job->bound_work_rev,
                                   job->out_path, normalized, sizeof(normalized)) != 0) {
+    /* A structurally malformed decision (stray call key, missing name)
+     * gets the same bounded repair as a contract violation; the model
+     * sees its rejected response, so a generic reason suffices. */
+    if (step && meta && meta->output_contract[0])
+      return reject_or_repair_decision(
+          r, step, job, meta,
+          "response was not the correct output format, please follow "
+          "your prompt exactly");
     rt_run_set_error_code(r, FC_ERROR_MALFORMED, "agent_output_invalid",
                           "Agent output was missing or malformed.", job->job_id);
     return -1;

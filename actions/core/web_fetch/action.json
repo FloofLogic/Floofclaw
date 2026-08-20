@@ -4,12 +4,16 @@
   "outside_world": true,
   "args_schema": {
     "type": "object",
-    "required": ["op"],
+    "required": [
+      "op"
+    ],
     "additionalProperties": false,
     "properties": {
       "op": {
         "type": "string",
-        "enum": ["start"],
+        "enum": [
+          "start"
+        ],
         "description": "'start' fetches and finishes immediately."
       },
       "url": {
@@ -18,7 +22,12 @@
       }
     }
   },
-  "exec": ["bash", "run.sh"],
+  "exec": [
+    "bash",
+    "run.sh"
+  ],
   "timeout_ms": 45000,
-  "contract": "managed_operation"
+  "contract": "managed_operation",
+  "default_timeout_ms": 300000,
+  "max_timeout_ms": 600000
 }

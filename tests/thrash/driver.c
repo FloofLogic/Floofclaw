@@ -423,11 +423,22 @@ static int gateway_stats(const char *path, long *completed, long *max_runs) {
   int found = 0;
   if (!file) return -1;
   while (getline(&line, &cap, file) >= 0) {
+    /* Human shape: `gateway: stats ... runs_completed=N max_runs=N`. */
     char *runs = strstr(line, "runs_completed=");
     char *peak = strstr(line, "max_runs=");
     if (strstr(line, "gateway: stats") && runs && peak) {
       *completed = strtol(runs + strlen("runs_completed="), NULL, 10);
       *max_runs = strtol(peak + strlen("max_runs="), NULL, 10);
+      found = 1;
+      continue;
+    }
+    /* Agent shape (the -a default since the output-contract overhaul):
+     * `{"type":"gateway.stats",...,"runs_completed":N,"max_runs":N,...}`. */
+    runs = strstr(line, "\"runs_completed\":");
+    peak = strstr(line, "\"max_runs\":");
+    if (strstr(line, "\"type\":\"gateway.stats\"") && runs && peak) {
+      *completed = strtol(runs + strlen("\"runs_completed\":"), NULL, 10);
+      *max_runs = strtol(peak + strlen("\"max_runs\":"), NULL, 10);
       found = 1;
     }
   }

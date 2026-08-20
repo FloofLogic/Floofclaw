@@ -93,6 +93,9 @@ config/llm_profiles.json
 config/llm_profiles.jsonl
 config/llm_registry.jsonl
 
+# Deployment-owned standing user facts rendered by @{user}; never shared.
+config/user.md
+
 # macOS Finder metadata
 .DS_Store
 **/.DS_Store

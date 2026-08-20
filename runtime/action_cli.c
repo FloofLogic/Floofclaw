@@ -43,7 +43,6 @@ static int enter_runtime_root(void) {
 
 static int action_list_main(int argc, char **argv) {
   RtActionRegistry *registry;
-  RtAgentMeta meta;
   char *catalog;
   char *compact = NULL;
   char err[RT_LARGE] = "";
@@ -71,11 +70,9 @@ static int action_list_main(int argc, char **argv) {
             err[0] ? err : "registry load failed");
     goto done;
   }
-  memset(&meta, 0, sizeof(meta));
-  snprintf(meta.id, sizeof(meta.id), "%s", ACTION_CLI_SOURCE);
-  snprintf(meta.executor, sizeof(meta.executor), "native");
-  meta.has_action_allowlist = 0;
-  if (rt_action_render_available(registry, &meta, catalog, RT_XL) != 0) {
+  /* Operator listing: the whole registry, config force_disable stated as a
+   * per-entry fact. Model-facing catalogs omit masked actions instead. */
+  if (rt_action_render_registry(registry, catalog, RT_XL) != 0) {
     fprintf(stderr, "fclaw action list: rendered catalog is too large\n");
     goto done;
   }

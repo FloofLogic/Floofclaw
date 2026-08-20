@@ -29,14 +29,7 @@ safe_id="$(printf '%s' "$request_id" | tr -cd '[:alnum:]_-')"
 [ -n "$safe_id" ] || safe_id="request"
 handle="gitgithub_${safe_id:0:72}"
 
-if [ "$op" = "poll" ]; then
-  supplied="$(jq -r '.args.handle // ""' <<<"$input")"
-  [ -z "$supplied" ] || handle="$supplied"
-  jq -cn --arg handle "$handle" \
-    '{events:[],result:{status:"finished",handle:$handle,ok:true,text:"git_github commands finish synchronously; call op:start for new work."},error:null}'
-  exit 0
-fi
-[ "$op" = "start" ] || emit_error "BAD_ARGS" "args.op must be start or poll"
+[ "$op" = "start" ] || emit_error "BAD_ARGS" "args.op must be start"
 
 kind="$(jq -r '.args.kind // ""' <<<"$input")"
 case "$kind" in

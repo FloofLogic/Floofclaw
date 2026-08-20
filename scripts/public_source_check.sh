@@ -53,7 +53,14 @@ scan_for() {
 }
 
 scan_for "absolute user-home path found" '/(Users|home)/[[:alnum:]_.-]+/'
-scan_for "private Git transport or nonstandard private port found" '(git@|ssh://|https?://[^[:space:])]+:8443)'
+scan_for "private Git transport or nonstandard private port found" '(ssh://|https?://[^[:space:])]+:8443)'
+# git@github.com is the standard public GitHub SSH form (pluck's docs use
+# it); any other git@ remote reads as private infrastructure.
+git_at_hits="$(text_files | xargs -0 grep -In -- 'git@' 2>/dev/null | grep -Ev 'git@github\.com' || true)"
+if [ -n "$git_at_hits" ]; then
+  printf '%s\n' "$git_at_hits" >&2
+  complain "private Git transport or nonstandard private port found"
+fi
 
 if [ -d "$root/tests/fuzz/corpus" ]; then
   fuzz_hits="$(find "$root/tests/fuzz/corpus" -type f -print0 | \

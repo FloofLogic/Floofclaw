@@ -79,6 +79,12 @@ assert_agent "version -a" ./bin/fclaw --version -a >/dev/null
 assert_agent "empty affair list default" ./bin/fclaw affair list >/dev/null
 assert_agent_failure "stopped gateway status default" ./bin/fclaw gateway status
 assert_agent_failure "stopped gateway status -a" ./bin/fclaw gateway status -a
+assert_agent_failure "operation complete missing capability default" \
+  ./bin/fclaw operation complete --status succeeded
+assert_agent_failure "operation complete missing capability -a" \
+  ./bin/fclaw operation complete -a --status succeeded
+assert_agent_failure "operation complete unknown flag -a" \
+  ./bin/fclaw operation complete -a --nonsense
 
 run_json="$(assert_agent "run default" ./bin/fclaw run --text hello)"
 run_id="$(printf '%s\n' "$run_json" |

@@ -67,13 +67,20 @@ harness binaries under `bin/`.
 Expected output (current branch):
 
 ```text
-fclaw 0.25.0
+fclaw 0.26.2
 ```
 
 Then run the routine suite:
 
 ```bash
 make test
+```
+
+For first-run configuration — identity, provider key, floop, channels, and
+enabling the bundled actions — run the guided wizard from the checkout root:
+
+```bash
+./scripts/onboard.sh
 ```
 
 It currently runs 32 unit cases, 139 integration cases, auxiliary contract

@@ -61,7 +61,7 @@ LLM turn #1 (agent configured for user_message):
   ↓ (runtime dispatches)
 Intrinsic executes → returns { path, text, status:"finished", handle:"<request_id>" }
   ↓ (operation_driver publishes)
-Event: operation_result carrying payload.text = file content
+Event: operation_result carrying payload.text = file content (status:"succeeded")
   ↓ (dispatched to result_manager / main_claw / etc.)
 LLM turn #2 (agent configured for operation_result; it may be the same agent):
   Composes reply: "Here's foo.py: <content>"
@@ -129,9 +129,10 @@ an auto-wrap step:
   (like `web_read` and `manage_codex` do), the wrap is
   a no-op.
 
-The auto-wrap does not mint another identity. Reusing `request_id` keeps the
-finished handle stable across gateway restarts and replay, and prevents a
-fresh process from colliding with an operation persisted by an earlier one.
+The auto-wrap does not mint another identity: durable operation identity is
+the runtime's preallocated operation id (`op_<request_id>`), allocated with a
+completion token and deadline before the action ever executes. The wrapped
+`handle` is only the contract-shaped echo of the request id.
 
 So an action author writing a new managed-op has two choices:
 
@@ -149,16 +150,21 @@ already spoke the contract.
 
 ## Op arg convention
 
-Every managed-op action supports the common `start` and `poll` operations.
-Callers pass `op:"start"` on the first call. `poll` exists for contract
-completeness (long-running ops need it), while most actions finish
-synchronously and never need polling. Delegate schemas may additionally
-offer `reply`, `abort`, or `status`.
+Every managed-op action supports the common `start` operation. Callers pass
+`op:"start"`; delegate schemas may additionally offer `abort` or `status`.
 
 Fast actions like `read_file` finish on `start` — they publish
-`operation_result` immediately. Slow actions like `manage_codex`
-return `"running"` on start and then `"finished"` from `poll` calls
-the operation driver arms.
+`operation_result` immediately. Slow actions like `manage_codex` return
+`"running"` on start and complete through the bus completion contract: the
+detached worker (or its supervising runner) submits one `operation_completed`
+claim — via `fclaw operation complete`, using the operation id and secret
+token the runtime placed in its trusted environment — and the runtime admits
+it as the one correlated `operation_result` run. The action-declared
+`default_timeout_ms`/`max_timeout_ms` deadline bounds silence: a worker that
+never reports produces one `operation_result` with `status:"timed_out"`.
+There is no polling anywhere in the control plane; how a worker learns its
+own work finished (blocking wait, leaf-side HTTP polling, `waitpid`) is
+worker-internal and invisible to the runtime.
 
 ## Floops that use this pattern
 

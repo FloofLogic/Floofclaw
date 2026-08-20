@@ -52,16 +52,17 @@ int rt_action_emit_started(RtRun *r, const char *rid, const char *action,
   return 0;
 }
 
-/* 1 valid managed continuation, 0 not a managed terminal, -1 handle
- * collision with different durable work identity. */
+/* 1 valid managed continuation, 0 not a managed terminal. Operation
+ * identity is runtime-owned and preallocated at launch, so the result's
+ * contract fields are only a shape check here: `handle` in a result is
+ * the worker's own metadata, never durable identity. */
 static int managed_contract_disposition(const RtActionDef *def,
                                         const RtPendingAction *pending,
                                         const char *type,
                                         const char *result_json) {
   JsonRef result;
-  RtOperationSnapshot stored;
-  char status[RT_SMALL] = "", handle[RT_SMALL] = "";
-  int have_stored;
+  char status[RT_SMALL] = "";
+  (void)pending;
   if (!def || !def->managed_operation ||
       strcmp(type ? type : "", "action_succeeded") != 0 ||
       !result_json || json_ref_top_object(result_json, &result) != 0 ||
@@ -69,53 +70,7 @@ static int managed_contract_disposition(const RtActionDef *def,
                                  sizeof(status)) != 0 ||
       (strcmp(status, "running") != 0 && strcmp(status, "finished") != 0))
     return 0;
-  if (json_ref_object_get_string(&result, "handle", handle,
-                                 sizeof(handle)) != 0)
-    (void)json_ref_object_get_string(&result, "op_id", handle,
-                                     sizeof(handle));
-  if (!handle[0]) return 0;
-  if (!pending) return 1;
-  have_stored = rt_operation_snapshot(handle, &stored) == 0;
-  if (!pending->trigger_event_id[0]) {
-    char op[RT_SMALL] = "";
-    char expected_handle[RT_SMALL] = "";
-    /* Only the native poller may continue an existing handle without the
-     * original semantic request identity. It still must target the exact
-     * stored action/task/revision; publish_result then restores the stored
-     * request and trigger instead of adopting the poll call's identity. */
-    if (rt_json_get_string(pending->args_json ? pending->args_json : "{}",
-                           "op", op, sizeof(op)) == 0 &&
-        strcmp(op, "poll") == 0) {
-      if (!def->poll_handle_arg[0] ||
-          rt_json_get_string(pending->args_json ? pending->args_json : "{}",
-                             def->poll_handle_arg, expected_handle,
-                             sizeof(expected_handle)) != 0 ||
-          strcmp(expected_handle, handle) != 0 ||
-          !have_stored)
-        return -1;
-      return strcmp(stored.action, pending->action) == 0 &&
-             strcmp(stored.task_id, pending->task_id) == 0 ? 1 : -1;
-    }
-    if (!have_stored) return 1;
-    {
-      long long resolved_rev = pending->work_rev;
-      if (resolved_rev <= 0 &&
-          (!pending->task_id[0] ||
-           rt_task_work_rev_of(pending->task_id, &resolved_rev) != 0))
-        return -1;
-      return strcmp(stored.action, pending->action) == 0 &&
-             strcmp(stored.request_id, pending->request_id) == 0 &&
-             strcmp(stored.task_id, pending->task_id) == 0 &&
-             stored.work_rev == resolved_rev ? 1 : -1;
-    }
-  }
-  if (!have_stored) return 1;
-  return strcmp(stored.action, pending->action) == 0 &&
-         strcmp(stored.request_id, pending->request_id) == 0 &&
-         strcmp(stored.trigger_event_id,
-                pending->trigger_event_id) == 0 &&
-         strcmp(stored.task_id, pending->task_id) == 0 &&
-         stored.work_rev == pending->work_rev ? 1 : -1;
+  return 1;
 }
 
 static int prepare_step_wake(RtRun *r, const RtPendingAction *pending,
@@ -187,21 +142,6 @@ int rt_action_emit_terminal(RtRun *r, const char *type, const char *rid,
       r && r->scheduler ? rt_action_registry_find(&r->scheduler->actions,
                                                    action ? action : "")
                         : NULL;
-  {
-    int managed = managed_contract_disposition(def, pending, type,
-                                                result_json);
-    if (managed < 0) {
-      emit_type = "action_failed";
-      emit_reason = "managed_handle_correlation_conflict";
-      emit_result = "{}";
-      emit_error =
-          "{\"message\":\"managed operation handle belongs to different work\"}";
-      ok = 0;
-      (void)rt_narrate(
-          "managed operation handle correlation conflict for request %s",
-          rid ? rid : "");
-    }
-  }
   json_escape(rid ? rid : "", erid, sizeof(erid)); json_escape(action ? action : "", eaction, sizeof(eaction));
   json_escape(job_id ? job_id : "", ejob, sizeof(ejob));
   json_escape(emit_reason ? emit_reason : "", ereason, sizeof(ereason));

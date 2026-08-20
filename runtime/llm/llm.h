@@ -46,8 +46,9 @@ typedef struct {
   char id[LLM_ID_MAX];
   char provider[LLM_ID_MAX];
   char model[LLM_NAME_MAX];
-  char effort[LLM_ID_MAX];   /* optional; currently mapped by Gemini to
-                              * thinkingConfig.thinkingLevel. Other current
+  char effort[LLM_ID_MAX];   /* optional; Gemini maps it to
+                              * thinkingConfig.thinkingLevel and OpenAI
+                              * Responses to reasoning.effort. Other current
                               * transports load but do not send it. */
 } LlmProfile;
 
@@ -169,5 +170,10 @@ int llm_call_request(const char *run_dir, const char *floop,
  * budget. An override that would not fit is reduced, never honored:
  * a retry the caller will SIGTERM mid-flight is worse than no retry. */
 int llm_http_effective_max_retries(void);
+/* Per-attempt transport timeout in seconds. FCLAW_LLM_ATTEMPT_TIMEOUT_S
+ * raises the measured hosted-provider default for slow local models;
+ * clamped (with retries shed first) so the retry ladder always fits the
+ * agent job budget. */
+int llm_http_effective_attempt_timeout_s(void);
 
 #endif

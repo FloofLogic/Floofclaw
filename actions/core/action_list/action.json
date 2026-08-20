@@ -4,12 +4,16 @@
   "outside_world": false,
   "args_schema": {
     "type": "object",
-    "required": ["op"],
+    "required": [
+      "op"
+    ],
     "additionalProperties": false,
     "properties": {
       "op": {
         "type": "string",
-        "enum": ["start"],
+        "enum": [
+          "start"
+        ],
         "description": "Always start; discovery finishes immediately and returns on a later operation_result turn."
       },
       "name": {
@@ -18,7 +22,12 @@
       }
     }
   },
-  "exec": ["runtime", "fc_action_list()"],
+  "exec": [
+    "runtime",
+    "fc_action_list()"
+  ],
   "timeout_ms": 0,
-  "contract": "managed_operation"
+  "contract": "managed_operation",
+  "default_timeout_ms": 300000,
+  "max_timeout_ms": 600000
 }

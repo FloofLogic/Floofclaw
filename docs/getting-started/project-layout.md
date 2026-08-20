@@ -71,12 +71,13 @@ runtime/
 ├── task_projection.c            — task projection for processor input
 ├── affair_state.c               — affair reducer + watcher helpers (load/write/list_due)
 ├── affair_cli.c                 — `fclaw affair create|list|pause|resume|close|review|schedule`
-├── operation_state.c            — durable managed-operation state
-├── operation_driver.c           — managed-operation polling and result publication
-├── ports.c                      — bus envelope intake, deliveries.jsonl writes
+├── operation_state.c            — durable managed-operation state (ids, completion tokens, deadlines)
+├── operation_driver.c           — completion-contract driver: preallocation, claim terminalization, result publication
+├── operation_cli.c              — `fclaw operation complete` worker-side claim submission
+├── ports.c                      — bus envelope intake, completion-claim admission, deliveries.jsonl writes
 ├── ports.h                      — ports public API
 ├── run_state.c                  — runstate envelope persistence
-├── internal_cli.c               — `fclaw internal agent-llm` child entrypoint
+├── internal_cli.c               — `fclaw internal agent-llm` child entrypoint, `fclaw internal detach`
 │
 ├── profile.c                    — loop profile loader
 ├── floop.c                      — floop bundle resolver

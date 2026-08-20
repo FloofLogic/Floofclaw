@@ -103,7 +103,7 @@ static void usage(int human) {
           "\"commands\":[\"run\",\"replay\",\"view\",\"usage\","
           "\"cacheview\",\"auth\",\"bus\",\"affair\",\"gateway\","
           "\"channel\",\"clear\",\"actions\",\"adapters\",\"floops\","
-          "\"action\",\"setup\",\"--version\"]}\n", stdout);
+          "\"action\",\"operation\",\"setup\",\"--version\"]}\n", stdout);
     return;
   }
   fprintf(stderr,
@@ -125,7 +125,10 @@ static void usage(int human) {
           "  fclaw action list [-a|-h]\n"
           "  fclaw action exec [-a|-h] --name <action> --args '<json-object>'\n"
           "  fclaw action auth [-a|-h] --name <action> -- <action-owned arguments>\n"
+          "  fclaw operation complete [-a|-h] [--operation-id <id>] [--token <token>] "
+          "(--result-file <json> | --status <s> [--text <t>])\n"
           "  fclaw setup [-a|-h]\n"
+          "  fclaw config get|set|enable|disable [-a|-h] <key> [<value>]\n"
           "  fclaw --version|-v [-a|-h]\n"
           "\n"
           "Output defaults to -a (compact JSON/JSONL). Use -h for colored human output.\n");
@@ -253,8 +256,14 @@ int main(int argc, char **argv) {
   if (strcmp(argv[1], "action") == 0) {
     return rt_action_main(argc - 2, argv + 2);
   }
+  if (strcmp(argv[1], "operation") == 0) {
+    return rt_operation_cli_main(argc - 2, argv + 2);
+  }
   if (strcmp(argv[1], "setup") == 0) {
     return rt_setup_main(argc - 2, argv + 2);
+  }
+  if (strcmp(argv[1], "config") == 0) {
+    return rt_config_main(argc - 2, argv + 2);
   }
   if (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-v") == 0) {
     return rt_version_main(argc - 2, argv + 2);
