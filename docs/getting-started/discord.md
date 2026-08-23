@@ -109,6 +109,31 @@ human/operator verification: send it in the allowed channel and mention the
 bot when `require_mention_in_guild` is true. Automated checks must not send to
 Discord.
 
+## Conversations and memory
+
+Each Discord conversation is its own context, so each has its own
+conversational memory and its own serialization lane:
+
+| where the message came from | context |
+|---|---|
+| a guild channel | `chat:discord:<channel_id>` |
+| a thread | `chat:discord:<thread_channel_id>` |
+| a direct message | `chat:discord:dm:<user_id>` |
+
+A thread gets its own context automatically, because Discord gives it its
+own channel id. Nothing recalls another conversation's history: what someone
+says in a DM is not visible from a public channel.
+
+**Upgrading a deployment that ran before 0.28.0:** every conversation shared
+one context, `chat:discord:discord-main`, and the records already in
+`workspace/memory/memory.jsonl` carry that tag. After the upgrade nothing
+reads them, so each conversation starts with empty memory. Decide before
+restarting: accept the reset (nothing to do — the old records stay on disk,
+inert), or retag the lines you want to keep to the specific
+`chat:discord:<channel_id>` they belong to. There is no automatic migration,
+deliberately: only the operator knows which of those mixed records belonged
+to which conversation.
+
 ## Attachments and model media
 
 Discord image-only and text-plus-attachment messages use the same

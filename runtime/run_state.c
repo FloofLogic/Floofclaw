@@ -38,6 +38,15 @@ int rt_run_status_is_terminal(const char *status) {
          (state == RT_RUN_DONE || state == RT_RUN_FAILED);
 }
 
+int rt_run_state_status_from_json(const char *runstate_json,
+                                  char *out, size_t out_len) {
+  if (!out || out_len == 0) return -1;
+  out[0] = '\0';
+  if (!runstate_json) return -1;
+  return rt_json_get_string(runstate_json, RT_RUNSTATE_STATUS_KEY,
+                            out, out_len) == 0 && out[0] ? 0 : -1;
+}
+
 static int waiting_jobs_json(RtRun *r, char *out, size_t out_len) {
   size_t pos = 0;
   if (!r || !out || out_len == 0) return -1;
@@ -89,7 +98,7 @@ int rt_run_persist_state(RtRun *r) {
   if (last_error_json(r, last_error, sizeof(last_error)) != 0) return -1;
   if (snprintf(r->ctx.run_state_json, sizeof(r->ctx.run_state_json),
                "{\"run_id\":\"%s\",\"context_id\":\"%s\",\"profile\":\"%s\","
-               "\"status\":\"%s\",\"advance\":%u,"
+               "\"" RT_RUNSTATE_STATUS_KEY "\":\"%s\",\"advance\":%u,"
                "\"created_from\":{\"event_id\":\"%s\",\"type\":\"%s\"},"
                "\"waiting\":{\"jobs\":%s,\"events\":[],\"deadline\":null},"
                "\"cursors\":{\"phase_index\":%zu,\"last_advanced_event_seq\":null},"

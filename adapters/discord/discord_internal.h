@@ -166,6 +166,9 @@ int  dc_parse_message_create(const char *json, DcInboundMessage *out);
 void dc_inbound_message_dispose(DcInboundMessage *msg);
 int  dc_source_url_is_trusted(const char *url);
 int  dc_publish_message(DcAdapter *a, const DcInboundMessage *msg);
+/* Conversation key for one inbound message: the channel id for a guild
+ * channel or thread, "dm:<user_id>" for a direct message. */
+void dc_context_id(const DcInboundMessage *msg, char *out, size_t out_len);
 
 /* ===== rest (defined in discord_rest.c) ========================== */
 void dc_close_rest(DcAdapter *a);

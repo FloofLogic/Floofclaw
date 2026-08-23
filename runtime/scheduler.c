@@ -20,8 +20,15 @@
 
 int rt_next_run_number_for_workspace(const char *workspace);
 
+/* `s` must arrive zeroed — allocate it with fc_xcalloc, or embed it in
+ * calloc'd storage. This function deliberately does NOT memset it: the
+ * struct is ~4.8 MB, almost all of it the fixed run pool, and memsetting
+ * heap that another translation unit allocated faults every page at
+ * startup (measured +4,768 KiB RSS versus +32 KiB for calloc, about 41%
+ * of idle gateway RSS). calloc hands back lazily-faulted zero pages, and
+ * rt_scheduler_alloc_run() already clears each slot as it is taken, so
+ * only slots actually in use ever become resident. */
 int rt_scheduler_init(RtScheduler *s, const char *loop_name, char *err, size_t err_len) {
-  memset(s, 0, sizeof(*s));
   rt_jobrunner_init(&s->runner);
   snprintf(s->loop_name, sizeof(s->loop_name), "%s",
            loop_name ? loop_name : rt_default_loop());

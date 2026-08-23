@@ -2468,9 +2468,9 @@ int work_publication_pending_claim_resumes_same_run(void) {
                "wrong-source first inbound is a durable claim conflict");
 
   /* Retention must pin the claimed result run as well as the source run.
-   * Synthetic `state` mirrors the janitor's known legacy key so this
-   * regression isolates the pin contract without taking the unrelated
-   * state/status fix into A4. */
+   * The runstates below carry only the real serializer key, so the pin —
+   * not a stale field the janitor could not read — is what keeps the
+   * claimed run alive under retention pressure. */
   rc |= fx_reset();
   rc |= expect(a4_direct_context(&ctx, "source_a4_prune") == 0,
                "initialize terminal result-run prune fixture");
@@ -2508,7 +2508,7 @@ int work_publication_pending_claim_resumes_same_run(void) {
                "commit exact first event in terminal result run");
   snprintf(payload, sizeof(payload),
            "{\"run_id\":\"run_001\",\"context_id\":\"chat:tests\","
-           "\"profile\":\"a4flow\",\"status\":\"done\",\"state\":\"done\","
+           "\"profile\":\"a4flow\",\"status\":\"done\","
            "\"advance\":0,\"created_from\":{\"event_id\":\"%s\","
            "\"type\":\"work_step_result\"}}\n",
            wake_id);
@@ -2518,7 +2518,7 @@ int work_publication_pending_claim_resumes_same_run(void) {
                test_write_file(
                    "workspace/runs/run_002/runstate.json",
                    "{\"run_id\":\"run_002\",\"status\":\"done\","
-                   "\"state\":\"done\",\"created_from\":{"
+                   "\"created_from\":{"
                    "\"event_id\":\"bus_unrelated\",\"type\":\"tests\"}}\n") == 0,
                "create pinned older and unpinned newer terminal runs");
   rc |= expect(rt_publication_outbox_run_pending("run_001") == 1,

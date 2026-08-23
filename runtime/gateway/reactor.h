@@ -5,11 +5,21 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define FC_POLL_MAX_FDS         64
+/* Every descriptor the reactor watches in one pass shares this set. The
+ * worst realistic pass is the jobrunner's 16 concurrent jobs at up to four
+ * descriptors each (stdout, stderr, progress, secret broker), plus the wake
+ * and status sockets, the WebSocket listener and its 16 clients, and the
+ * Discord gateway/REST and IRC sockets — comfortably past 64, which is
+ * where this used to sit. A descriptor that does not fit is not watched,
+ * and a child pipe that is not watched stalls until the next poll deadline
+ * (5 s in daemon mode) or until its 4 KB kernel buffer fills. */
+#define FC_POLL_MAX_FDS         128
 #define FC_REACTOR_MAX_MODULES  16
 /* A single 250 ms callback has consumed more than the reactor's ordinary
- * 200 ms poll cadence by itself. That is operationally visible latency, while
- * shorter filesystem/TLS bursts remain below the warning line. */
+ * foreground 200 ms poll cadence by itself. The daemon polls at 5,000 ms
+ * (GW_DEFAULT_POLL_MS) and module deadlines shorten that as needed, so this
+ * line is about callback latency, not the sleep. Shorter filesystem/TLS
+ * bursts remain below the warning line. */
 #define FC_REACTOR_SLOW_TICK_MS 250ULL
 
 typedef struct FcReactorModule FcReactorModule;
@@ -24,6 +34,10 @@ typedef struct {
 typedef struct {
   FcPollEntry entries[FC_POLL_MAX_FDS];
   size_t count;
+  /* Descriptors refused this pass because the set was full. Counted here,
+   * not at the call sites: most callers discard fc_pollset_add's result,
+   * so the set itself has to be the one that cannot lose the fact. */
+  uint64_t overflows;
 } FcPollSet;
 
 typedef struct {
@@ -74,6 +88,11 @@ typedef struct {
   int default_timeout_ms;
   uint64_t total_ticks;
   uint64_t total_polls;
+  /* Cumulative descriptors the poll set could not accept. Nonzero means
+   * some module's fd went unwatched for a pass; sustained growth means the
+   * cap is too small for this deployment's shape. Surfaced by
+   * `fclaw gateway status` as reactor.poll_overflows. */
+  uint64_t poll_overflows;
   FcReactorModuleStats module_stats[FC_REACTOR_MAX_MODULES];
 } FcReactor;
 
@@ -89,6 +108,7 @@ int  fc_reactor_run(FcReactor *r, volatile sig_atomic_t *stop_flag, int default_
 void fc_reactor_shutdown(FcReactor *r);
 uint64_t fc_reactor_total_module_errors(const FcReactor *r);
 uint64_t fc_reactor_total_slow_ticks(const FcReactor *r);
+uint64_t fc_reactor_poll_overflows(const FcReactor *r);
 
 uint64_t fc_now_ms(void);
 

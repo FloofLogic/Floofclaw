@@ -131,17 +131,104 @@ int bus_envelope_locations(const char *envelope_id) {
   return locations;
 }
 
+int bus_type_token_valid(const char *type) {
+  size_t n;
+  if (!type) return 0;
+  n = strlen(type);
+  if (n == 0 || n > BUS_CUSTOM_TYPE_MAX) return 0;
+  if (!((type[0] >= 'a' && type[0] <= 'z') ||
+        (type[0] >= 'A' && type[0] <= 'Z')))
+    return 0;
+  for (size_t i = 1; i < n; ++i) {
+    char c = type[i];
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9') || c == '_' || c == '.' || c == ':' ||
+        c == '-')
+      continue;
+    return 0;
+  }
+  return 1;
+}
+
+int bus_type_is_reserved(const char *type) {
+  /* Whole namespaces, not today's spellings. Admission of these kinds
+   * carries runtime authority (correlation, lifecycle, reducer writes),
+   * so a custom producer must not be able to claim one — including a
+   * kind the kernel has not invented yet. */
+  static const char *kReservedPrefixes[] = {
+      "user_", "action_", "affair_", "operation_",
+      "work_", "task_",   "run_",    "memory_",    NULL};
+  if (!type || !*type) return 1;
+  for (int i = 0; kReservedPrefixes[i]; ++i)
+    if (strncmp(type, kReservedPrefixes[i],
+                strlen(kReservedPrefixes[i])) == 0)
+      return 1;
+  return 0;
+}
+
+/* Serialize the optional routing block, or "" when there is nothing to
+ * carry. Bounds are enforced here so no caller can widen them. */
+static int routing_json(const BusRouting *routing, char *out, size_t out_len) {
+  /* Six bytes per input byte is the \u00XX worst case json_escape emits. */
+  char eadapter[BUS_ROUTING_ADAPTER_MAX * 6 + 8];
+  char econtext[BUS_ROUTING_CONTEXT_MAX * 6 + 8];
+  char cref[BUS_ROUTING_REF_MAX + 1];
+  const char *adapter, *context, *ref;
+  size_t pos = 0;
+  int wrote = 0, n;
+  if (!out || out_len == 0) return -1;
+  out[0] = '\0';
+  if (!routing) return 0;
+  adapter = routing->adapter_id && routing->adapter_id[0] ? routing->adapter_id : NULL;
+  context = routing->context_id && routing->context_id[0] ? routing->context_id : NULL;
+  ref     = routing->ref_json  && routing->ref_json[0]  ? routing->ref_json  : NULL;
+  if (!adapter && !context && !ref) return 0;
+  if (adapter && strlen(adapter) > BUS_ROUTING_ADAPTER_MAX) return -1;
+  if (context && strlen(context) > BUS_ROUTING_CONTEXT_MAX) return -1;
+  if (ref && strlen(ref) > BUS_ROUTING_REF_MAX) return -1;
+  if (adapter && json_escape(adapter, eadapter, sizeof(eadapter)) != 0) return -1;
+  if (context && json_escape(context, econtext, sizeof(econtext)) != 0) return -1;
+  if (ref && json_compact(ref, cref, sizeof(cref)) != 0) return -1;
+  n = snprintf(out + pos, out_len - pos, "{");
+  if (n < 0 || (size_t)n >= out_len - pos) return -1;
+  pos += (size_t)n;
+  if (adapter) {
+    n = snprintf(out + pos, out_len - pos, "\"adapter_id\":\"%s\"", eadapter);
+    if (n < 0 || (size_t)n >= out_len - pos) return -1;
+    pos += (size_t)n;
+    wrote = 1;
+  }
+  if (context) {
+    n = snprintf(out + pos, out_len - pos, "%s\"context_id\":\"%s\"",
+                 wrote ? "," : "", econtext);
+    if (n < 0 || (size_t)n >= out_len - pos) return -1;
+    pos += (size_t)n;
+    wrote = 1;
+  }
+  if (ref) {
+    n = snprintf(out + pos, out_len - pos, "%s\"ref\":%s", wrote ? "," : "", cref);
+    if (n < 0 || (size_t)n >= out_len - pos) return -1;
+    pos += (size_t)n;
+  }
+  n = snprintf(out + pos, out_len - pos, "}");
+  if (n < 0 || (size_t)n >= out_len - pos) return -1;
+  return 0;
+}
+
 static int existing_envelope_matches(const char *path,
                                      const char *envelope_id,
                                      const char *channel,
                                      const char *type,
-                                     const char *payload_json) {
+                                     const char *payload_json,
+                                     const char *routing_expected) {
   char *text = NULL;
   char *buffers = NULL;
   char actual_id[BUS_ID_MAX] = "", actual_channel[BUS_CHANNEL_MAX] = "";
   char actual_type[BUS_TYPE_MAX] = "";
+  char actual_routing_raw[BUS_ROUTING_JSON_MAX] = "";
+  char actual_routing[BUS_ROUTING_JSON_MAX] = "";
   char *actual_raw, *actual_payload, *expected_payload;
-  JsonRef root, payload;
+  JsonRef root, payload, routing;
   int matches = 0;
   if (fs_read_text(path, &text, FS_READ_TEXT_DEFAULT_CAP) != 0 || !text)
     return -1;
@@ -166,68 +253,87 @@ static int existing_envelope_matches(const char *path,
       json_compact(actual_raw, actual_payload,
                    BUS_PAYLOAD_MAX) == 0 &&
       json_compact(payload_json, expected_payload,
-                   BUS_PAYLOAD_MAX) == 0 &&
-      strcmp(actual_id, envelope_id) == 0 &&
-      strcmp(actual_channel, channel) == 0 &&
-      strcmp(actual_type, type) == 0 &&
-      strcmp(actual_payload, expected_payload) == 0)
-    matches = 1;
+                   BUS_PAYLOAD_MAX) == 0) {
+    /* An absent routing block and an empty one are the same envelope. */
+    if (json_ref_object_get_object(&root, "routing", &routing) == 0 &&
+        (json_ref_value_copy(&routing, actual_routing_raw,
+                             sizeof(actual_routing_raw)) != 0 ||
+         json_compact(actual_routing_raw, actual_routing,
+                      sizeof(actual_routing)) != 0))
+      actual_routing[0] = '\0';
+    if (strcmp(actual_id, envelope_id) == 0 &&
+        strcmp(actual_channel, channel) == 0 &&
+        strcmp(actual_type, type) == 0 &&
+        strcmp(actual_payload, expected_payload) == 0 &&
+        strcmp(actual_routing, routing_expected ? routing_expected : "") == 0)
+      matches = 1;
+  }
   fc_xfree(buffers);
   free(text);
   return matches;
 }
 
-int bus_publish_stable(const char *envelope_id,
-                       const char *channel, const char *type,
-                       const char *payload_json) {
+int bus_publish_stable_routed(const char *envelope_id,
+                              const char *channel, const char *type,
+                              const char *payload_json,
+                              const BusRouting *routing) {
   char ts[64];
   char ec[BUS_CHANNEL_MAX], et[BUS_TYPE_MAX];
+  char routing_block[BUS_ROUTING_JSON_MAX];
+  char routing_field[BUS_ROUTING_JSON_MAX + 16];
   char *compact_payload = NULL;
   char *envelope = NULL;
   char inbox_path[BUS_PATH_MAX], processed_path[BUS_PATH_MAX];
-  int locations, n, rc = -1;
+  int locations, n, rc = BUS_PUBLISH_FAILED;
   if (!valid_envelope_id(envelope_id) ||
-      !channel || !type || !payload_json) return -1;
+      !channel || !type || !payload_json) return BUS_PUBLISH_FAILED;
+  if (routing_json(routing, routing_block, sizeof(routing_block)) != 0)
+    return BUS_PUBLISH_FAILED;
+  routing_field[0] = '\0';
+  if (routing_block[0] &&
+      snprintf(routing_field, sizeof(routing_field), ",\"routing\":%s",
+               routing_block) >= (int)sizeof(routing_field))
+    return BUS_PUBLISH_FAILED;
   locations = bus_envelope_locations(envelope_id);
   if (locations < 0 || locations == 3) {
     (void)rt_narrate("bus stable publish conflict: %s exists in multiple locations",
                      envelope_id);
-    return -1;
+    return BUS_PUBLISH_CONFLICT;
   }
   if (snprintf(inbox_path, sizeof(inbox_path), "%s/%s.json",
                INBOX_DIR, envelope_id) >= (int)sizeof(inbox_path) ||
       snprintf(processed_path, sizeof(processed_path), "%s/%s.json",
                PROCESSED_DIR, envelope_id) >= (int)sizeof(processed_path))
-    return -1;
+    return BUS_PUBLISH_FAILED;
   if (locations == 1 || locations == 2) {
     const char *path = locations == 1 ? inbox_path : processed_path;
     int same = existing_envelope_matches(path, envelope_id, channel,
-                                         type, payload_json);
+                                         type, payload_json, routing_block);
     if (same == 1) return 0;
     (void)rt_narrate("bus stable publish conflict: %s payload differs",
                      envelope_id);
-    return -1;
+    return BUS_PUBLISH_CONFLICT;
   }
-  if (fs_mkdir_p(INBOX_DIR) != 0) return -1;
-  if (fs_mkdir_p(LOG_DIR) != 0) return -1;
+  if (fs_mkdir_p(INBOX_DIR) != 0) return BUS_PUBLISH_FAILED;
+  if (fs_mkdir_p(LOG_DIR) != 0) return BUS_PUBLISH_FAILED;
   iso_time(ts, sizeof(ts));
-  if (json_escape(channel, ec, sizeof(ec)) != 0) return -1;
-  if (json_escape(type, et, sizeof(et)) != 0) return -1;
+  if (json_escape(channel, ec, sizeof(ec)) != 0) return BUS_PUBLISH_FAILED;
+  if (json_escape(type, et, sizeof(et)) != 0) return BUS_PUBLISH_FAILED;
   compact_payload = (char *)fc_xmalloc(BUS_PAYLOAD_MAX);
   if (!compact_payload ||
       json_compact(payload_json, compact_payload, BUS_PAYLOAD_MAX) != 0)
     goto done;
   n = snprintf(NULL, 0,
                "{\"event_id\":\"%s\",\"ts\":\"%s\",\"channel\":\"%s\","
-               "\"type\":\"%s\",\"payload\":%s}\n",
-               envelope_id, ts, ec, et, compact_payload);
+               "\"type\":\"%s\"%s,\"payload\":%s}\n",
+               envelope_id, ts, ec, et, routing_field, compact_payload);
   if (n < 0) goto done;
   envelope = (char *)fc_xmalloc((size_t)n + 1U);
   if (!envelope) goto done;
   snprintf(envelope, (size_t)n + 1U,
            "{\"event_id\":\"%s\",\"ts\":\"%s\",\"channel\":\"%s\","
-           "\"type\":\"%s\",\"payload\":%s}\n",
-           envelope_id, ts, ec, et, compact_payload);
+           "\"type\":\"%s\"%s,\"payload\":%s}\n",
+           envelope_id, ts, ec, et, routing_field, compact_payload);
   if (fs_write_text_atomic(inbox_path, envelope) != 0) goto done;
   /* The inbox file is the behavioral commit. A diagnostic-log failure must
    * not make a retry allocate a second envelope. */
@@ -240,6 +346,13 @@ done:
   fc_xfree(envelope);
   fc_xfree(compact_payload);
   return rc;
+}
+
+int bus_publish_stable(const char *envelope_id,
+                       const char *channel, const char *type,
+                       const char *payload_json) {
+  return bus_publish_stable_routed(envelope_id, channel, type, payload_json,
+                                   NULL);
 }
 
 int bus_requeue_processed(const char *envelope_id) {
@@ -258,16 +371,26 @@ int bus_requeue_processed(const char *envelope_id) {
   return 0;
 }
 
-int bus_publish(const char *channel, const char *type, const char *payload_json,
-                char *envelope_id_out, size_t envelope_id_out_len) {
+int bus_publish_routed(const char *channel, const char *type,
+                       const char *payload_json, const BusRouting *routing,
+                       char *envelope_id_out, size_t envelope_id_out_len) {
   char id[BUS_ID_MAX];
-  if (!channel || !type || !payload_json) return -1;
-  if (bus_reserve_envelope_id(id, sizeof(id)) != 0 ||
-      bus_publish_stable(id, channel, type, payload_json) != 0)
-    return -1;
+  int rc;
+  if (!channel || !type || !payload_json) return BUS_PUBLISH_FAILED;
+  if (bus_reserve_envelope_id(id, sizeof(id)) != 0) return BUS_PUBLISH_FAILED;
+  rc = bus_publish_stable_routed(id, channel, type, payload_json, routing);
+  if (rc != 0) return rc;
   if (envelope_id_out && envelope_id_out_len > 0)
     snprintf(envelope_id_out, envelope_id_out_len, "%s", id);
   return 0;
+}
+
+int bus_publish(const char *channel, const char *type, const char *payload_json,
+                char *envelope_id_out, size_t envelope_id_out_len) {
+  return bus_publish_routed(channel, type, payload_json, NULL,
+                            envelope_id_out, envelope_id_out_len) == 0
+             ? 0
+             : -1;
 }
 
 int bus_publish_with_retry(const char *channel, const char *type,
@@ -479,25 +602,42 @@ int bus_log_show(int tail_n) {
   return bus_log_show_filtered(&f);
 }
 
+/* Decide one log line against the filter. The JSON reader needs a
+ * NUL-terminated copy, so an envelope larger than the stack scratch takes
+ * the heap rather than skipping the filter: a filter that silently stops
+ * applying is worse than a slow one. Typed ingress made multi-KiB
+ * envelopes ordinary, and a producer tailing its own kind must not be
+ * handed another producer's events. */
 static int line_matches(const char *line, size_t len, const BusLogFilter *f) {
   JsonRef root;
   char buf[256];
-  char tmp[4096];
+  char scratch[4096];
+  char *tmp = scratch;
+  char *heap = NULL;
+  int result = 0;
   if (!f) return 1;
   if (!f->channel && !f->type) return 1;
-  if (len + 1 > sizeof(tmp)) return 1; /* don't filter oversized lines, just print */
+  if (len + 1U > sizeof(scratch)) {
+    heap = (char *)fc_xmalloc(len + 1U);
+    /* Undecidable, not unmatched: keep the historical fail-open. */
+    if (!heap) return 1;
+    tmp = heap;
+  }
   memcpy(tmp, line, len);
   tmp[len] = '\0';
-  if (json_ref_first_object(tmp, &root) != 0) return 0;
-  if (f->channel) {
-    if (json_ref_object_get_string(&root, "channel", buf, sizeof(buf)) != 0) return 0;
-    if (strcmp(buf, f->channel) != 0) return 0;
+  if (json_ref_first_object(tmp, &root) == 0) {
+    result = 1;
+    if (f->channel &&
+        (json_ref_object_get_string(&root, "channel", buf, sizeof(buf)) != 0 ||
+         strcmp(buf, f->channel) != 0))
+      result = 0;
+    if (result && f->type &&
+        (json_ref_object_get_string(&root, "type", buf, sizeof(buf)) != 0 ||
+         strcmp(buf, f->type) != 0))
+      result = 0;
   }
-  if (f->type) {
-    if (json_ref_object_get_string(&root, "type", buf, sizeof(buf)) != 0) return 0;
-    if (strcmp(buf, f->type) != 0) return 0;
-  }
-  return 1;
+  fc_xfree(heap);
+  return result;
 }
 
 /* Walk lines in [start..end), apply filter, print each match to stdout. */

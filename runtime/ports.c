@@ -61,6 +61,9 @@ typedef struct {
   int  is_action_exec;
   int  is_correlated;
   int  is_completion;
+  /* Product-owned typed ingress: an admissible non-reserved kind whose
+   * payload the kernel carries verbatim and never reads. */
+  int  is_custom;
 } ParsedEnvelope;
 
 static void log_rejected_envelope(const char *path, const char *reason) {
@@ -130,6 +133,20 @@ static const char *media_ref_parse(const JsonRef *media,
   return NULL;
 }
 
+/* Read one bounded routing string. Absent is fine (0); present but not a
+ * string, or longer than its documented bound, is a named rejection so the
+ * producer learns the exact field it got wrong. */
+static int routing_string(const JsonRef *routing, const char *key,
+                          char *out, size_t out_len, size_t max_bytes) {
+  JsonRef value;
+  if (json_ref_object_get(routing, key, &value) != 0) return 0;
+  if (value.type != JSON_REF_STRING ||
+      json_ref_string_copy(&value, out, out_len) != 0 ||
+      strlen(out) > max_bytes)
+    return -1;
+  return 0;
+}
+
 static int parse_inbound_envelope(const char *path, ParsedEnvelope *out,
                                   char *err, size_t err_len) {
   char *text = NULL;
@@ -165,9 +182,20 @@ static int parse_inbound_envelope(const char *path, ParsedEnvelope *out,
      * accepts it as the trigger for exactly one result run whose first
      * behavioral event is the runtime-stamped operation_result. */
     out->is_completion = 1;
-  } else {
-    if (err) snprintf(err, err_len, "unsupported_envelope_type: %s", out->type);
+  } else if (!bus_type_token_valid(out->type)) {
+    /* The kernel needs no list of product event names, but it does need a
+     * bounded token it can byte-compare in a floop gate. */
+    if (err) snprintf(err, err_len, "invalid_field: type (%s)", out->type);
     fc_xfree(text); return -1;
+  } else if (bus_type_is_reserved(out->type)) {
+    /* Admission of a runtime-owned namespace carries authority the custom
+     * path does not have. Refuse the forgery instead of downgrading it. */
+    if (err) snprintf(err, err_len, "reserved_envelope_type: %s", out->type);
+    fc_xfree(text); return -1;
+  } else {
+    /* Unknown but valid: admitted. A floop opts in with an exact
+     * event_kind: gate; no gate means an ordinary no-op run. */
+    out->is_custom = 1;
   }
   if (json_ref_object_get_object(&root, "payload", &payload) != 0)
                                                              PARSE_FAIL("missing_required_field: payload");
@@ -251,6 +279,11 @@ static int parse_inbound_envelope(const char *path, ParsedEnvelope *out,
                                                              PARSE_FAIL("missing_required_field: payload.affair_id");
     (void)json_ref_object_get_string(&payload, "text", out->user_text, sizeof(out->user_text));
     if (!out->user_text[0]) snprintf(out->user_text, sizeof(out->user_text), "(affair review)");
+  } else if (out->is_custom) {
+    /* Nothing to extract. The payload is one JSON object of the caller's
+     * facts, already bounded and copied verbatim above. There is no
+     * required `text`, and user_text stays empty so this event never
+     * becomes a conversational memory record. */
   } else {
     if (json_ref_object_get_string(&payload, "text", out->user_text, sizeof(out->user_text)) != 0)
                                                              PARSE_FAIL("missing_required_field: payload.text");
@@ -287,12 +320,41 @@ static int parse_inbound_envelope(const char *path, ParsedEnvelope *out,
   (void)json_ref_object_get_string(&root,    "channel",    out->channel,    sizeof(out->channel));
   if (out->channel[0] == '\0') snprintf(out->channel, sizeof(out->channel), "bus");
   (void)json_ref_object_get_string(&root,    "event_id",   out->envelope_id,sizeof(out->envelope_id));
-  (void)json_ref_object_get_string(&payload, "adapter_id", out->adapter_id, sizeof(out->adapter_id));
-  (void)json_ref_object_get_string(&payload, "context_id",
-                                   out->context_id,
-                                   sizeof(out->context_id));
-  if (json_ref_object_get_object(&payload, "ref", &ref_obj) == 0)
-    if (json_ref_value_copy(&ref_obj, out->ref_json, sizeof(out->ref_json)) == 0) out->has_ref = 1;
+  if (out->is_custom) {
+    /* Routing is transport metadata and lives in its own envelope block.
+     * Reading it from the payload would make an ordinary product key
+     * ("context_id", "ref") silently steer delivery. */
+    JsonRef routing;
+    if (json_ref_object_get(&root, "routing", &routing) == 0) {
+      if (routing.type != JSON_REF_OBJECT)          PARSE_FAIL("invalid_field: routing");
+      if (routing_string(&routing, "adapter_id", out->adapter_id,
+                         sizeof(out->adapter_id),
+                         BUS_ROUTING_ADAPTER_MAX) != 0)
+                                                    PARSE_FAIL("invalid_field: routing.adapter_id");
+      if (routing_string(&routing, "context_id", out->context_id,
+                         sizeof(out->context_id),
+                         BUS_ROUTING_CONTEXT_MAX) != 0)
+                                                    PARSE_FAIL("invalid_field: routing.context_id");
+      /* action: ids are runtime-owned correlation, never caller input. */
+      if (strncmp(out->context_id, "action:", 7) == 0)
+                                                    PARSE_FAIL("invalid_field: routing.context_id");
+      if (json_ref_object_get(&routing, "ref", &ref_obj) == 0) {
+        if (ref_obj.type != JSON_REF_OBJECT ||
+            json_ref_value_copy(&ref_obj, out->ref_json,
+                                sizeof(out->ref_json)) != 0 ||
+            strlen(out->ref_json) > BUS_ROUTING_REF_MAX)
+                                                    PARSE_FAIL("invalid_field: routing.ref");
+        out->has_ref = 1;
+      }
+    }
+  } else {
+    (void)json_ref_object_get_string(&payload, "adapter_id", out->adapter_id, sizeof(out->adapter_id));
+    (void)json_ref_object_get_string(&payload, "context_id",
+                                     out->context_id,
+                                     sizeof(out->context_id));
+    if (json_ref_object_get_object(&payload, "ref", &ref_obj) == 0)
+      if (json_ref_value_copy(&ref_obj, out->ref_json, sizeof(out->ref_json)) == 0) out->has_ref = 1;
+  }
   fc_xfree(text);
   return 0;
 }
@@ -418,7 +480,7 @@ static int populate_inbound_context(RtRun *r, const ParsedEnvelope *env,
   char escaped[RT_LARGE * 2], escaped_origin[RT_SMALL * 2];
   const char *origin_event_id = env->is_correlated && env->origin_event_id[0]
                               ? env->origin_event_id : env->envelope_id;
-  const char *event_type = env->is_correlated ? env->type
+  const char *event_type = env->is_correlated || env->is_custom ? env->type
                          : env->is_affair_review ? "affair_review"
                          : env->is_action_exec ? "action_exec"
                          : "user_message";
@@ -437,6 +499,23 @@ static int populate_inbound_context(RtRun *r, const ParsedEnvelope *env,
   if (env->is_action_exec) {
     snprintf(r->context_id, sizeof(r->context_id), "action:cli:%s",
              env->envelope_id);
+  } else if (env->is_custom) {
+    /* Typed ingress gets its own namespace. Folding it into chat: would
+     * hand a device or build event a conversation's memory scope and
+     * serialization lane by accident. A fully-qualified caller id is
+     * preserved verbatim so a product may deliberately run an event
+     * inside an existing context. */
+    if (strncmp(env->context_id, "event:", 6) == 0 ||
+        strncmp(env->context_id, "chat:", 5) == 0)
+      snprintf(r->context_id, sizeof(r->context_id), "%s", env->context_id);
+    else if (env->context_id[0])
+      snprintf(r->context_id, sizeof(r->context_id), "event:%s:%s",
+               env->channel, env->context_id);
+    else if (env->adapter_id[0])
+      snprintf(r->context_id, sizeof(r->context_id), "event:%s:%s",
+               env->channel, env->adapter_id);
+    else
+      snprintf(r->context_id, sizeof(r->context_id), "event:%s", env->channel);
   } else if (strncmp(env->context_id, "chat:", 5) == 0) {
     /* Runtime-produced correlated envelopes already carry the complete
      * durable context id. Preserve it verbatim across continuation runs. */
@@ -478,6 +557,13 @@ static int populate_inbound_context(RtRun *r, const ParsedEnvelope *env,
      * result/outcome payloads. Preserve them verbatim; the kernel does not
      * reshape or interpret them. */
     snprintf(payload, payload_len, "%s", env->payload_json);
+  } else if (env->is_custom) {
+    /* The producer's object, byte-for-byte: no renaming, no flattening
+     * into text, no routing metadata mixed in. Overflow is loud rather
+     * than a quietly truncated behavioral event. */
+    if (snprintf(payload, payload_len, "%s", env->payload_json) >=
+        (int)payload_len)
+      return -1;
   } else if (env->is_affair_review) {
     char escaped_affair[RT_SMALL * 2];
     if (json_escape(env->affair_id, escaped_affair, sizeof(escaped_affair)) != 0)
@@ -570,8 +656,11 @@ static int commit_inbound_event(RtRun *r, const ParsedEnvelope *env) {
    * input.text is the diagnostic label; the speaker's projection
    * branches on ctx->inbound_affair_id to render the full review
    * payload from the affair store. Operation lifecycle events are not
-   * user input and bind no input task. */
+   * user input and bind no input task, and neither is a custom typed
+   * event: publishing a fact must not mutate a reducer-owned projection
+   * on its own. */
   if (!env->is_correlated && !env->is_action_exec && !env->is_completion &&
+      !env->is_custom &&
       rt_task_create_input_for_user_message(&r->ctx, env->user_text) != 0) return -1;
   r->phase_index =
       env->is_action_exec && r->profile

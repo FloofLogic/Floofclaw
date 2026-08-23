@@ -52,6 +52,25 @@ static void restore_part_cleanup(const struct sigaction *prior) {
   if (prior) (void)sigaction(SIGTERM, prior, NULL);
 }
 
+/* Lives beside the state it clears and outside every #ifdef: the load path
+ * calls it on both the libcurl and the mock-only build, so defining it
+ * inside the libcurl region made the advertised curl-less build fail to
+ * compile. */
+static void clear_active_part(void) {
+  sigset_t blocked;
+  sigset_t prior;
+  sigemptyset(&blocked);
+  sigaddset(&blocked, SIGTERM);
+  if (sigprocmask(SIG_BLOCK, &blocked, &prior) != 0) {
+    g_active_media_part_ready = 0;
+    g_active_media_part[0] = '\0';
+    return;
+  }
+  g_active_media_part_ready = 0;
+  g_active_media_part[0] = '\0';
+  (void)sigprocmask(SIG_SETMASK, &prior, NULL);
+}
+
 static int media_error(char *err, size_t err_len, const char *format, ...) {
   va_list ap;
   if (err && err_len > 0U) {
@@ -177,6 +196,10 @@ static int source_protocol(const char *url, int *loopback_out) {
   return 0;
 }
 
+#ifdef FCLAW_HAVE_LIBCURL
+
+/* Only the download path inspects a cached or partial file, so this lives
+ * inside the transport region — the mock-only build must compile clean. */
 static int private_regular_file(const char *path, uint64_t expected_size) {
   struct stat st;
   if (lstat(path, &st) != 0) return errno == ENOENT ? 0 : -1;
@@ -186,8 +209,6 @@ static int private_regular_file(const char *path, uint64_t expected_size) {
     return -1;
   return 1;
 }
-
-#ifdef FCLAW_HAVE_LIBCURL
 
 typedef struct {
   int fd;
@@ -282,21 +303,6 @@ static int create_active_part_file(const char *target,
   }
   (void)sigprocmask(SIG_SETMASK, &prior, NULL);
   return fd;
-}
-
-static void clear_active_part(void) {
-  sigset_t blocked;
-  sigset_t prior;
-  sigemptyset(&blocked);
-  sigaddset(&blocked, SIGTERM);
-  if (sigprocmask(SIG_BLOCK, &blocked, &prior) != 0) {
-    g_active_media_part_ready = 0;
-    g_active_media_part[0] = '\0';
-    return;
-  }
-  g_active_media_part_ready = 0;
-  g_active_media_part[0] = '\0';
-  (void)sigprocmask(SIG_SETMASK, &prior, NULL);
 }
 
 static int sync_directory(const char *path) {

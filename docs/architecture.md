@@ -569,6 +569,43 @@ Task creation and update calls cross the same validation boundary as every
 other action. Unknown task references, runtime-owned identity fields, and
 invalid state transitions are rejected before durable append. Completed tasks
 are archived only after context quiescence.
+## Context Namespaces
+
+A run's `context_id` is the lane it belongs to: it scopes conversational
+memory, task and affair projections, and `serialize_contexts` ordering.
+The namespace prefix says which kind of lane it is:
+
+| prefix | lane | chosen by |
+|---|---|---|
+| `chat:<channel>:<conversation>` | one conversation | channel adapters and `user_message` intake |
+| `event:<channel>[:<context or adapter>]` | a typed-ingress producer | `fclaw bus publish --type` |
+| `action:cli:<event_id>` | one `fclaw action exec` invocation | the runtime |
+
+**One conversation, one context.** The adapter names the conversation and
+intake namespaces it; a channel that names nothing falls back to
+`chat:<channel>:<adapter_id>`, which would put every conversation on that
+deployment into a single lane. Shipped adapters all name one:
+
+| adapter | conversation key | resulting context |
+|---|---|---|
+| Discord | channel or thread id | `chat:discord:<channel_id>` |
+| Discord | direct message | `chat:discord:dm:<user_id>` |
+| IRC | channel (lowercased) | `chat:irc:#ops` |
+| IRC | private message (lowercased nick) | `chat:irc:dm:<nick>` |
+| WebSocket | session and client ctx | `chat:ws:<session_id>:<ctx>` |
+
+Getting this wrong is a privacy defect, not a tidiness one: contexts scope
+conversational memory, so collapsing them lets one channel recall what was
+said in another — or in a DM. IRC keys are lowercased because IRC names are
+case-insensitive; `#Ops` and `#ops` are one room and must not become two
+contexts.
+
+The `event:` namespace exists so publishing a device, build, or scan fact
+does not silently join a conversation and inherit its memory scope and
+serialization lane. A producer that *wants* that join passes a fully
+qualified `chat:` id, which intake preserves verbatim; the runtime-owned
+`action:` namespace is refused from caller input.
+
 ## Durable Memory
 
 Canonical durable memory lives in one append-only file:
@@ -1104,6 +1141,42 @@ Target responsibilities:
 - channels deliver approved `message` deliveries
 
 Channels must not call agents or actions directly. They should submit events and observe outputs.
+
+### Typed ingress for local producers
+
+A channel adapter is not the only supported way in. A local program that
+observes a **fact** rather than a conversation publishes a custom typed event
+through [`fclaw bus publish --type`](reference/cli.md#--type-typed-event-ingress):
+
+```text
+local producer (cron, git hook, build wrapper, device bridge)
+  -> fclaw bus publish --type <kind> --payload-stdin
+  -> bus envelope (routing block + opaque payload)
+  -> run with event.kind + event.payload
+  -> exact floop event_kind: gate
+  -> deterministic or model-backed agent
+  -> declared action and/or message
+  -> ordinary action/result events
+```
+
+This closes the gap that previously forced a producer to disguise a fact as
+user-authored text, put product behavior in a channel or UI layer, call an
+action outside a floop decision, or hand-write an inbox file. The kernel
+learns nothing product-shaped in exchange: it validates a token grammar, a
+reserved-namespace boundary, and a payload bound, then carries the kind and
+payload opaquely. There is no global list of product event kinds, and a floop
+opts in only by declaring an exact gate.
+
+Replies use the ordinary delivery path — one record in
+`workspace/logs/deliveries.jsonl` carrying the channel and the producer's
+opaque `ref`. A producer tails that file for its own channel exactly as
+`channels/message_deliver.sh` does; it does not need a channel adapter.
+
+The trust boundary is the local OS and filesystem authority already required
+to execute the correct `fclaw` binary in its configured home. `adapter_id`
+records provenance and is **not** authentication. Any future socket or remote
+transport that exposes custom publication must authenticate the producer and
+authorize its allowed kinds independently.
 
 ### Runtime owner boundary
 

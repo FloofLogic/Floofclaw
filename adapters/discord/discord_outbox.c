@@ -41,18 +41,16 @@ static int dc_delivery_for_us(DcAdapter *a, const char *line, char *channel_id, 
 }
 
 void dc_drain_deliveries(DcAdapter *a) {
-  char *t = NULL;
-  long long total;
+  long long total = fs_file_size(DC_DELIVERIES_LOG);
   FILE *fp;
+  /* stat, not a full read: the tick only needs the end offset, and the
+   * live log runs to 64 MiB before the janitor rotates it. */
   if (!a->delivery_cursor_init) {
-    if (fs_read_text(DC_DELIVERIES_LOG, &t, FS_READ_TEXT_DEFAULT_CAP) == 0 && t) { a->delivery_cursor = (long long)strlen(t); free(t); }
-    else a->delivery_cursor = 0;
+    a->delivery_cursor = total > 0 ? total : 0;
     a->delivery_cursor_init = 1;
     return;
   }
-  if (fs_read_text(DC_DELIVERIES_LOG, &t, FS_READ_TEXT_DEFAULT_CAP) != 0 || !t) return;
-  total = (long long)strlen(t);
-  free(t);
+  if (total < 0) return;
   /* Rotation detected: the file shrank because the janitor renamed
    * the live file to .1 and the append site created a fresh empty
    * one. Start from the top of the new file. */

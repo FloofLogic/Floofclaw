@@ -96,6 +96,42 @@ Per step: `gate` (including the declarative
 `"event_kind:kind1,kind2"` form) and `non_critical` (step failure never
 fails the processed event).
 
+### Gating a custom event kind
+
+`event_kind:` tokens are opaque to the kernel — it compares bytes. That means
+a step can gate a **product-defined** kind published by a local producer
+through [`fclaw bus publish --type`](../reference/cli.md#--type-typed-event-ingress),
+with no engine change and no registration:
+
+```json
+{
+  "steps": [
+    {"id": "scan", "type": "agent", "agent": "scan_handler",
+     "gate": "event_kind:device_scan_requested"},
+    {"id": "dispatch", "type": "builtin", "builtin": "action_runner"}
+  ]
+}
+```
+
+The handler listens to `event` and sees the kind plus the producer's payload
+unchanged:
+
+```json
+{"event": {"kind": "device_scan_requested",
+           "text": "",
+           "payload": {"scope": "installed_applications"}}}
+```
+
+`text` is empty for a custom kind — the projection keeps the field for shape
+stability, and the payload is where the facts are. A deterministic `script`
+agent can map those facts to its allowlisted actions and a reply with no
+provider call at all; an LLM agent is for when interpretation is actually
+needed.
+
+Opting in is the gate. A floop that does not name a kind never sees it: the
+event still becomes an inspectable run, every step skips, and the run
+completes. It does not fall through to the chat agent.
+
 ## LLM Output Contract
 
 An ordinary LLM agent may opt into a bounded task-decision contract in

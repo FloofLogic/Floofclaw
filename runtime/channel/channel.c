@@ -284,7 +284,7 @@ static int embedded_owner_wait_for_delivery(const char *loop_name,
   int rc = 1;
   int have_delivery = 0;
   char settled_without_delivery[RT_SMALL] = "";
-  scheduler = (RtScheduler *)fc_xmalloc(sizeof(*scheduler));
+  scheduler = (RtScheduler *)fc_xcalloc(1, sizeof(*scheduler));
   if (!scheduler) return 1;
   if (rt_scheduler_init(scheduler, loop_name, err, sizeof(err)) != 0) {
     channel_log(channel, "error", err[0] ? err : "embedded runtime owner init failed");

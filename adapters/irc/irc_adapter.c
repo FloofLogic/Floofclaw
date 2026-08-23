@@ -395,6 +395,31 @@ static int message_mentions_us(const char *content, const char *nick) {
   return 0;
 }
 
+/* The conversation this PRIVMSG belongs to: the channel for a channel
+ * message, "dm:<nick>" for a private message. Lowercased because IRC
+ * channel names and nicks are case-insensitive — "#Ops" and "#ops" are one
+ * room, and treating them as two contexts would split a conversation's
+ * memory in half. Without this the runtime falls back to
+ * chat:irc:<adapter_id> and every channel and every PM on the server share
+ * one memory scope and one serialization lane. */
+void irc_context_id(const char *target, const char *nick,
+                    char *out, size_t out_len) {
+  const char *source;
+  size_t i;
+  if (!out || out_len == 0) return;
+  out[0] = '\0';
+  if (!target || !target[0]) return;
+  if (target[0] == '#' || target[0] == '&') {
+    snprintf(out, out_len, "%s", target);
+  } else {
+    if (!nick || !nick[0]) return;
+    snprintf(out, out_len, "dm:%s", nick);
+  }
+  source = out;
+  for (i = 0; source[i]; ++i)
+    out[i] = (char)tolower((unsigned char)source[i]);
+}
+
 /* Publish an inbound PRIVMSG as a user_message bus envelope. */
 static void publish_privmsg(IrcAdapter *a, const char *src, const char *target, const char *text) {
   char nick[64];
@@ -406,6 +431,8 @@ static void publish_privmsg(IrcAdapter *a, const char *src, const char *target, 
   char esc_target[256];
   char esc_nick[256];
   char esc_adapter[256];
+  char context_id[256];
+  char esc_context[512];
   char payload[IRC_LINE_MAX * 4 + 1024];
   char id[BUS_ID_MAX];
 
@@ -425,11 +452,14 @@ static void publish_privmsg(IrcAdapter *a, const char *src, const char *target, 
   if (json_escape(reply_target, esc_target, sizeof(esc_target)) != 0) esc_target[0] = '\0';
   if (json_escape(nick, esc_nick, sizeof(esc_nick)) != 0) esc_nick[0] = '\0';
   if (json_escape(a->module_id_buf, esc_adapter, sizeof(esc_adapter)) != 0) esc_adapter[0] = '\0';
+  irc_context_id(target, nick, context_id, sizeof(context_id));
+  if (json_escape(context_id, esc_context, sizeof(esc_context)) != 0) esc_context[0] = '\0';
 
   snprintf(payload, sizeof(payload),
-           "{\"text\":\"%s\",\"adapter_id\":\"%s\","
+           "{\"text\":\"%s\",\"adapter_id\":\"%s\",\"context_id\":\"%s\","
            "\"ref\":{\"server\":\"%s\",\"target\":\"%s\",\"nick\":\"%s\",\"scope\":\"%s\"}}",
-           esc_text, esc_adapter, esc_server, esc_target, esc_nick, scope);
+           esc_text, esc_adapter, esc_context, esc_server, esc_target,
+           esc_nick, scope);
   (void)bus_publish("irc", "user_message", payload, id, sizeof(id));
 }
 
@@ -520,22 +550,16 @@ static int line_to_delivery_for_us(const char *line, IrcAdapter *a,
 }
 
 static void drain_deliveries(IrcAdapter *a) {
-  char *t = NULL;
-  long long total;
+  long long total = fs_file_size(DELIVERIES_LOG);
   FILE *fp;
+  /* stat, not a full read: the tick only needs the end offset, and the
+   * live log runs to 64 MiB before the janitor rotates it. */
   if (!a->delivery_cursor_init) {
-    if (fs_read_text(DELIVERIES_LOG, &t, FS_READ_TEXT_DEFAULT_CAP) == 0 && t) {
-      a->delivery_cursor = (long long)strlen(t);
-      free(t);
-    } else {
-      a->delivery_cursor = 0;
-    }
+    a->delivery_cursor = total > 0 ? total : 0;
     a->delivery_cursor_init = 1;
     return;
   }
-  if (fs_read_text(DELIVERIES_LOG, &t, FS_READ_TEXT_DEFAULT_CAP) != 0 || !t) return;
-  total = (long long)strlen(t);
-  free(t);
+  if (total < 0) return;
   /* Rotation detected: janitor renamed the live file; append site
    * created a fresh one. Reset cursor to top of the new file. */
   if (total < a->delivery_cursor) a->delivery_cursor = 0;
@@ -560,23 +584,17 @@ static void drain_deliveries(IrcAdapter *a) {
 #define NARRATION_LOG "workspace/logs/narration.jsonl"
 
 static void drain_narration(IrcAdapter *a) {
-  char *t = NULL;
   long long total;
   FILE *fp;
   if (!a->ops_channel[0]) return;
+  total = fs_file_size(NARRATION_LOG);
+  /* stat, not a full read — same reason as the deliveries tailer. */
   if (!a->narration_cursor_init) {
-    if (fs_read_text(NARRATION_LOG, &t, FS_READ_TEXT_DEFAULT_CAP) == 0 && t) {
-      a->narration_cursor = (long long)strlen(t);
-      free(t);
-    } else {
-      a->narration_cursor = 0;
-    }
+    a->narration_cursor = total > 0 ? total : 0;
     a->narration_cursor_init = 1;
     return;
   }
-  if (fs_read_text(NARRATION_LOG, &t, FS_READ_TEXT_DEFAULT_CAP) != 0 || !t) return;
-  total = (long long)strlen(t);
-  free(t);
+  if (total < 0) return;
   /* Rotation detected: the janitor renamed narration.jsonl to .1 and
    * the next append recreated a fresh empty file. Reset to top. */
   if (total < a->narration_cursor) a->narration_cursor = 0;

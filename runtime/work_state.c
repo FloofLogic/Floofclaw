@@ -1290,6 +1290,7 @@ int rt_work_state_rebuild_from_logs(void) {
   DIR *dir;
   struct dirent *entry;
   size_t count = 0;
+  long long skipped = 0;
   int saved_errno = 0, rc = -1;
   store = store_borrow();
   if (!store) return -1;
@@ -1369,13 +1370,32 @@ int rt_work_state_rebuild_from_logs(void) {
           json_ref_object_get_object(&event, "payload", &payload) == 0 &&
           json_ref_value_copy(&payload, payload_json, RT_XL) == 0 &&
           apply_to_store(store, ctx, type, payload_json, event_id) != 0) {
-        free(text);
-        goto done;
+        /* Replay sees a WINDOW of history, not all of it: run dirs older
+         * than the retention keep count are pruned, and the scan is capped
+         * at WORK_REBUILD_RUN_CAP. An event whose ancestor is outside that
+         * window cannot be applied and is not evidence of corruption — but
+         * aborting here left the ledger unwritten and the gateway unable to
+         * start at all, recoverable only by quarantining a run by hand
+         * (which frees a run number for reuse and risks
+         * workspace_task_id_collision). Skip the event, name it exactly, and
+         * keep rebuilding. The live path still rejects the same event,
+         * because there the store is complete and a rejection is real. */
+        skipped++;
+        (void)rt_narrate(
+            "work-step ledger rebuild: skipped %s %s in %s — its lineage is "
+            "outside the replayed window; the run's event log remains the "
+            "evidence",
+            type, event_id, runs[i].name);
       }
       line = next + 1;
     }
     free(text);
   }
+  if (skipped > 0)
+    (void)rt_narrate(
+        "work-step ledger rebuild: %lld event(s) skipped; ledger rebuilt "
+        "from the applicable history",
+        skipped);
   rc = write_store(store);
 done:
   fc_xfree(payload_json);

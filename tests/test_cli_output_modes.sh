@@ -111,6 +111,22 @@ publish_json="$(assert_agent "bus publish default" ./bin/fclaw bus publish --tex
 [[ "$publish_json" == *'"event_id":'* ]] || fail "bus publish omitted event_id"
 assert_agent "bus log default" ./bin/fclaw bus log -n 1 >/dev/null
 assert_agent "bus log -a" ./bin/fclaw bus log -a -n 1 >/dev/null
+assert_agent "bus reserve default" ./bin/fclaw bus reserve >/dev/null
+assert_agent "bus reserve -a" ./bin/fclaw bus reserve -a >/dev/null
+typed_json="$(assert_agent "bus publish --type default" ./bin/fclaw bus publish \
+  --type mode_test_kind --channel mode_test --context-id mode \
+  --payload '{"probe":true}')"
+[[ "$typed_json" == *'"type":"mode_test_kind"'* ]] ||
+  fail "typed bus publish omitted type"
+assert_agent_failure "bus publish reserved type" \
+  ./bin/fclaw bus publish -a --type work_forged --payload '{}'
+assert_agent_failure "bus publish non-object payload" \
+  ./bin/fclaw bus publish -a --type mode_test_kind --payload '[]'
+assert_human "bus publish --type -h" ./bin/fclaw bus publish -h \
+  --type mode_test_kind --channel mode_test --payload '{"probe":true}'
+assert_human "bus reserve -h" ./bin/fclaw bus reserve -h
+assert_human_failure "bus publish reserved type -h" \
+  ./bin/fclaw bus publish -h --type work_forged --payload '{}'
 
 affair_json="$(assert_agent "affair create default" ./bin/fclaw affair create \
   --context cli-mode --manage verify-output)"

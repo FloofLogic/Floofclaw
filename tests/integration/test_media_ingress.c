@@ -387,12 +387,16 @@ int discord_media_publish_keeps_source_urls_private_and_text_shape_stable(void) 
                               &bus) == 0,
                "read published text-only bus envelope");
   if (bus) {
+    /* The shape gained context_id in 0.27.2 so each conversation gets its
+     * own memory scope; a DM keys on the user. Everything else, including
+     * the ref that routes the reply, is unchanged. */
     rc |= expect_substr(
         bus,
         "\"payload\":{\"text\":\"hello\",\"adapter_id\":\"discord-main\","
+        "\"context_id\":\"dm:42\","
         "\"ref\":{\"channel_id\":\"99\",\"guild_id\":\"\","
         "\"user_id\":\"42\",\"scope\":\"dm\"}}",
-        "text-only payload shape remains byte-for-byte unchanged");
+        "text-only payload shape is exact");
     rc |= expect_no_substr(bus, "\"media\":",
                            "text-only payload has no media field");
   }

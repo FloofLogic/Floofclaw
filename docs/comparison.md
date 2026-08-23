@@ -25,7 +25,7 @@ see [gateway-reactor.md](concepts/gateway-reactor.md).
 | workers | common `manage_codex`, `manage_claude`, and `manage_hermes`, driven as managed operations |
 | result flow | uniform: every data-returning action is managed-op → `operation_result` → a later configured agent turn |
 | user-visible output | `message` action → `action_succeeded.delivery` → channel adapter tail → out |
-| appliance mode | janitor module rotates JSONL logs and bounds processed-bus, task-archive, and Codex-worker artifacts; terminal-run pruning is configured but currently blocked by a known run-state field mismatch |
+| appliance mode | janitor module rotates JSONL logs and bounds terminal-run, processed-bus, task-archive, and Codex-worker artifacts |
 
 ## Shipped floops
 
@@ -184,10 +184,8 @@ short-lived agent/action child jobs:
 - `runtime` — pumps finished jobs, steps ready runs
 - `status` — gateway status socket
 - `affair_watcher` — fires `affair_review` envelopes for due affairs
-- `janitor` — appliance-mode log rotation and bounded cleanup for processed
-  bus records, task archives, and Codex worker artifacts; terminal-run pruning
-  is configured but currently ineffective because of a known run-state field
-  mismatch
+- `janitor` — appliance-mode log rotation and bounded cleanup for terminal
+  runs, processed bus records, task archives, and Codex worker artifacts
 - `irc` / `ws` / `discord` — channel adapters
 
 `gateway start` daemonizes. `gateway run` runs the same code path in

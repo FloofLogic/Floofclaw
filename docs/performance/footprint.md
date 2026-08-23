@@ -8,12 +8,18 @@ The current reproducible source and binary measurements are emitted by
 tables below preserve the 2026-07-20 macOS/arm64 hardening snapshot and must
 not be read as current release values.
 
-The 2026-08-13 arm64 macOS 0.24.1 source-release measurement (Apple clang 17)
-reports 39,420 runtime C/header lines, a 650,664-byte stripped executable, a
-0.124-second isolated mock-backed `hello`, and 11,840 KiB RSS for an idle
-isolated gateway. `make metrics` includes the exact measured revision. RSS is
-a simple, naturally variable `ps` sample for this reproducible idle scenario,
-not the Mach `physical_footprint` stress metric described below.
+The 2026-08-23 arm64 macOS 0.28.0 measurement (Apple clang 17) reports 41,453
+runtime C/header lines, a 684,424-byte stripped executable, a 0.133-second
+isolated mock-backed `hello`, and 7,792 KiB RSS for an idle isolated gateway.
+`make metrics` includes the exact measured revision. RSS is a simple,
+naturally variable `ps` sample for this reproducible idle scenario, not the
+Mach `physical_footprint` stress metric described below.
+
+Idle RSS fell from ~11,840 KiB when the scheduler stopped being memset at
+startup. The struct is ~4.8 MB, nearly all of it the fixed run pool; zeroing
+it faulted every page before a single event arrived. `fc_xcalloc` hands back
+lazily-faulted zero pages instead, and each pool slot is cleared as it is
+taken, so only slots actually in use become resident.
 
 ## LOC
 
@@ -72,19 +78,23 @@ here unless they are freshly re-measured in the same change.
 Reported at gateway startup:
 
 ```
-gateway: rtrun_size=210688 max_active=16 pool_bytes=3371008
+gateway: rtrun_size=226048 max_active=16 pool_bytes=3616768
 ```
+
+Measured at 0.28.0 on arm64 macOS:
 
 | | size |
 |---|---:|
 | `RT_MAX_ACTIVE_RUNS` | 16 |
-| `sizeof(RtRun)` | 210,688 bytes (~206 KiB) |
-| `RtScheduler.pool` | 3,371,008 bytes (~3.21 MiB) always-resident |
+| `sizeof(RtRun)` | 226,048 bytes (~221 KiB) |
+| `RtScheduler.pool` | 3,616,768 bytes (~3.45 MiB), faulted per used slot |
 | `RT_MAX_PENDING_ACTIONS` per run | 16 |
-| `sizeof(RtPendingAction)` | 1,176 bytes |
+| `sizeof(RtPendingAction)` | 1,368 bytes |
 | `RT_MAX_COMPLETED_ACTIONS` per run | 32 |
+| `sizeof(RtContext)` | 175,512 bytes |
+| `sizeof(RtActionRegistry)` | 898,576 bytes |
 | `sizeof(RtProfile)` | 20,760 bytes |
-| `sizeof(RtScheduler)` | 4,837,856 bytes (~4.61 MiB) |
+| `sizeof(RtScheduler)` | 4,849,632 bytes (~4.62 MiB) |
 | `sizeof(RtJob)` | 12,216 bytes |
 | `JOB_OUTPUT_CAP_STDOUT_DEFAULT` | 8 MiB per child |
 | `JOB_OUTPUT_CAP_STDERR_DEFAULT` | 1 MiB per child |
@@ -105,11 +115,12 @@ retention work.
 
 `workspace/runs/<id>/` accumulates one subdirectory per processed run. The
 default configuration asks the janitor to retain 500 terminal runs and check
-every five minutes, but that pruning is temporarily ineffective because of a
-known `runstate.json` field mismatch. JSONL rotation still works and defaults
-to a 64 MiB active-file cap with five rotated files. Local config remains the
-authority for enabled cleanup tasks and their limits; until the pruning defect
-is fixed, do not assume the run-directory count is bounded.
+every five minutes. JSONL rotation defaults to a 64 MiB active-file cap with
+five rotated files. Local config remains the authority for enabled cleanup
+tasks and their limits. The retained count is a floor, not a ceiling: only
+terminal, unpinned runs are eligible, so a run that never terminates — a
+crash, a hang, a run still pinned by an unreconciled publication — is kept
+deliberately, which is the correct forensic outcome.
 
 ## See also
 

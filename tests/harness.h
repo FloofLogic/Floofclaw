@@ -134,6 +134,7 @@ void harness_gateway_close(HarnessGateway *g);
  * into *exit_code. argv elements are passed straight to the rt_*_main
  * function (no leading "fclaw" or subcommand prefix). */
 int harness_cli_gateway  (int argc, char **argv, char **stdout_out, int *exit_code);
+int harness_cli_bus      (int argc, char **argv, char **stdout_out, int *exit_code);
 int harness_cli_view     (int argc, char **argv, char **stdout_out, int *exit_code);
 int harness_cli_cacheview(int argc, char **argv, char **stdout_out, int *exit_code);
 int harness_cli_tools    (int argc, char **argv, char **stdout_out, int *exit_code);

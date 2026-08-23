@@ -89,7 +89,7 @@ runtime/
 ├── usage_cli.c                  — `fclaw usage`
 ├── qol_cli.c                    — clear / actions / adapters / floops / setup / version
 ├── auth_cli.c                   — `fclaw auth …`
-├── bus_cli.c                    — `fclaw bus publish|log`
+├── bus_cli.c                    — `fclaw bus publish|reserve|log`
 ├── gateway_cli.c                — `fclaw gateway start|run|status|stop|reload`
 ├── channel_cli.c                — `fclaw channel cli|ws|irc`
 ├── cacheview.c                  — `fclaw cacheview` raw-request diff

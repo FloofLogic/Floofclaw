@@ -469,3 +469,9 @@ void fs_trim_newline(char *text) {
     len--;
   }
 }
+
+long long fs_file_size(const char *path) {
+  struct stat st;
+  if (!path || stat(path, &st) != 0) return -1;
+  return (long long)st.st_size;
+}

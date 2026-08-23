@@ -38,9 +38,8 @@ subsystem-specific hot-path code, no special-cased subsystems:
 
 - `bus_wake`, `jobrunner`, `bus_intake`, `runtime`, `status` — core
 - `affair_watcher` — publishes review events when concerns come due
-- `janitor` — log rotation plus bounded cleanup of processed bus records,
-  archived tasks, and Codex worker artifacts; configured terminal-run pruning
-  is temporarily ineffective because of a known run-state field mismatch
+- `janitor` — log rotation plus bounded cleanup of terminal runs, processed
+  bus records, archived tasks, and Codex worker artifacts
 - `irc`, `ws`, `discord` — channel adapters
 
 Inbound events land on the bus (`workspace/bus/inbox/`). The bus

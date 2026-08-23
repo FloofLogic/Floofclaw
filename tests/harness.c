@@ -263,6 +263,10 @@ int harness_cli_gateway(int argc, char **argv, char **stdout_out, int *exit_code
   return capture_stdout(rt_gateway_main, argc, argv, stdout_out, exit_code);
 }
 
+int harness_cli_bus(int argc, char **argv, char **stdout_out, int *exit_code) {
+  return capture_stdout(rt_bus_main, argc, argv, stdout_out, exit_code);
+}
+
 int harness_cli_replay(const char *event_log_path, char **state_out) {
   if (!event_log_path || !state_out) return 1;
   char *events = NULL;

@@ -32,8 +32,8 @@ retention overrides, toolchain, and platform all change the absolute number.
 | Metric | Expected steady-state | Threshold for concern |
 |---|---|---|
 | RSS | Settles after startup and ordinary traffic bursts | Sustained linear growth; on macOS confirm with Mach `physical_footprint` because `ps` includes file-cache pages |
-| workspace/ disk | Log growth settles within configured rotation bounds; run directories may continue growing while the known pruning defect remains open | Unexpected growth outside accumulated runs or configured log history |
-| runs_count | Currently grows with processed runs because terminal-run pruning is ineffective | Use the trend as evidence for the known defect; do not treat `appliance.runs.keep` as an enforced bound yet |
+| workspace/ disk | Log growth settles within configured rotation bounds; run directories settle near `appliance.runs.keep` | Unexpected growth outside configured log history or a rising count of non-terminal runs |
+| runs_count | Settles near `appliance.runs.keep` once the janitor's cadence has run | Sustained growth past the keep count — inspect the excess for non-terminal status or an unreconciled publication pin, both of which retain deliberately |
 | bus.jsonl lines | Resets after active file reaches 64 MiB | No reset across repeated janitor cadences |
 | deliveries.jsonl lines | Resets after active file reaches 64 MiB | Same |
 | narration.jsonl lines | Resets after active file reaches 64 MiB | Same |
@@ -41,8 +41,7 @@ retention overrides, toolchain, and platform all change the absolute number.
 
 Sustained growth beyond the configured queue and log-rotation bounds is a
 defect to investigate. Short-window growth can be normal while an inbox drains
-or before the janitor's next rotation cadence. Run-directory growth is a
-separate known defect until terminal-run pruning is repaired.
+or before the janitor's next rotation cadence.
 
 The scheduler's fixed pool bounds its persistent run storage, but BSS is
 faulted lazily and file I/O can inflate `ps` RSS. Actual observations from the

@@ -3,6 +3,181 @@
 FloofClaw follows semantic versioning for public source releases. The public
 release tag and `runtime/version.h` carry the same plain `X.Y.Z` version.
 
+## 0.28.0 — 2026-08-23
+
+A minor bump, not a patch: giving each conversation its own context changes
+where Discord and IRC memory is filed. Existing records keep the old shared
+tag and nothing reads them afterward, so **every conversation on an upgraded
+deployment starts with empty memory** unless the operator retags them first.
+There is deliberately no automatic migration — only the operator knows which
+of those mixed records belonged to which conversation. Everything else in
+this release is a fix.
+
+### Fixed
+
+- **A work-ledger rebuild could stop the gateway from starting.**
+  `rt_work_state_rebuild_from_logs()` runs at startup and replays a window of
+  history — run directories older than the retention keep count are pruned,
+  and the scan is capped at `WORK_REBUILD_RUN_CAP`. An event whose ancestor
+  revision or selected step fell outside that window aborted the entire
+  rebuild, leaving the ledger unwritten and the gateway unable to start; the
+  observed incident (`run_043`, task `task_run_038_000008`) was recoverable
+  only by moving a run to `workspace/runs_quarantine/` by hand, which frees a
+  run number for reuse and risks `workspace_task_id_collision`. The rebuild
+  now skips such an event, names it exactly in
+  `workspace/logs/narration.jsonl` (run, event id, type), reports the total
+  skipped, and finishes. Skipping is not ignoring: the operator gets the run
+  and event to inspect, and the run's event log is still the evidence. The
+  live apply path is unchanged and still rejects the same event, because
+  there the store is complete and a rejection is real. This became more
+  reachable once terminal-run pruning started working in 0.27.2 — before
+  that, run directories never disappeared and the replay window was
+  effectively all of history.
+
+- **Discord and IRC gave every conversation the same context.** Neither
+  adapter published a `context_id`, so intake fell back to
+  `chat:<channel>:<adapter_id>` and every guild channel, thread, DM, and user
+  on a deployment shared one context — one conversational memory and one
+  compacted summary across everybody, one `serialize_contexts` queue for the
+  whole guild, and DM content recallable from a public channel. Each adapter
+  now names the conversation it received: Discord keys on the channel or
+  thread id, or `dm:<user_id>` for a direct message; IRC keys on the channel
+  or `dm:<nick>`, lowercased because IRC names are case-insensitive and
+  `#Ops` must not become a second `#ops`. Reply routing is unchanged — it has
+  always used `ref`, not the context.
+
+  **Upgrade note.** Records already in `workspace/memory/memory.jsonl` carry
+  the old shared tag (`chat:discord:discord-main`, `chat:irc:irc-main`) and
+  nothing reads them after this change, so every conversation starts with
+  empty memory. Either accept the reset — the old lines stay on disk, inert —
+  or retag the ones worth keeping to the conversation they belong to before
+  restarting. There is no automatic migration: only the operator knows which
+  of those mixed records belonged to which conversation.
+
+## 0.27.2 — 2026-08-23
+
+The one-day hygiene sprint: six isolated defects, each with its own
+regression. `make asan` is green over the set.
+
+### Fixed
+
+- **Idle gateway RSS drops from ~11.6 MiB to ~7.6 MiB.** `rt_scheduler_init`
+  memset the whole ~4.8 MB `RtScheduler` — nearly all of it the fixed run
+  pool — which faulted every page at startup before a single event arrived.
+  The struct is allocated with `fc_xcalloc` now and init leaves it alone;
+  each pool slot is already cleared as it is taken, so only slots in use
+  become resident. `rt_scheduler_init` therefore requires zeroed storage,
+  which every caller already provided.
+- **Poll-set overflow is counted and reported instead of silent.** The
+  reactor watched at most 64 descriptors and four call sites discarded
+  `fc_pollset_add`'s result, so a descriptor that did not fit was simply not
+  watched — a child pipe stalling until the next poll deadline (5 s in
+  daemon mode) or until its 4 KB buffer filled, with nothing in the logs or
+  in `gateway status` to say so. The cap is 128 now, which covers the worst
+  realistic pass (16 jobs × 4 descriptors, the wake and status sockets, the
+  WebSocket listener and its 16 clients, Discord's two sockets, IRC's one),
+  and the poll set counts every refusal itself so a caller that ignores the
+  return value cannot lose it. `fclaw gateway status -a` reports
+  `reactor.poll_overflows`, and the reactor logs the overflow on the same
+  rate-limited ladder as callback errors.
+- **The advertised mock-only build compiles again, and is now a gate.**
+  `clear_active_part()` had drifted inside `runtime/llm/media.c`'s
+  `FCLAW_HAVE_LIBCURL` region while the load path calls it unconditionally,
+  so a build without libcurl failed on an undeclared function. Nothing
+  noticed, because every gate builds with both libraries present.
+  `make MOCK_ONLY=1` is the supported way to build without libcurl and
+  OpenSSL, and `make test` now compiles that configuration warning-clean,
+  proves the binary links neither library, and runs the mock `hello` floop
+  through it.
+- **A build with no libcurl is refused instead of silently shipped.** It
+  could not reach any provider, including a loopback OpenAI-compatible
+  endpoint, and only failed at the agent layer at runtime. The error names
+  how to install the library and how to ask for the library-free build on
+  purpose.
+- **A command-line `CFLAGS=` no longer disarms the build.** The feature
+  defines and include paths are appended with `override`, so
+  `make CFLAGS=-O0` refines the base flags instead of dropping
+  `-DFCLAW_HAVE_LIBCURL`, `-DFCLAW_HAVE_OPENSSL`, and the build revision.
+  `MOCK_ONLY=1` strips those defines and libraries from an inherited
+  `CFLAGS`/`LDFLAGS` too, so it cannot end up declaring a transport it links
+  nothing for. `asan`/`ubsan` hand their sub-make the *base* flags and let it
+  run its own detection, instead of re-passing an augmented set for it to
+  append to a second time.
+- **Channel adapters no longer read the whole delivery log every tick.** All
+  three tailed `deliveries.jsonl` (and IRC also `narration.jsonl`) by reading
+  the entire file just to learn its length, then reopening it from the
+  cursor. Rotation is at 64 MiB and the foreground reactor ticks at ~16.7 Hz,
+  so the worst case was three 64 MB read+malloc pairs per tick to answer a
+  question `stat()` answers for free. An idle tick now allocates nothing at
+  any log size. The WebSocket adapter also gained the rotation check the
+  other two already had; without it a rotation stranded its cursor past every
+  future delivery.
+- **Terminal-run pruning works.** The janitor read the lifecycle field from
+  `runstate.json` as `state` while the serializer wrote `status`, so
+  `run_is_terminal` was always false and nothing was ever pruned — silently,
+  because "can't read → keep" is also the fail-safe. Every deployment
+  retained 100% of its run directories with the janitor reporting zero
+  errors. The key now has one owner (`RT_RUNSTATE_STATUS_KEY`) that the
+  serializer and every reader spell through, so it cannot drift again.
+  `appliance.runs.keep` is a floor, not a ceiling: only terminal, unpinned
+  runs are eligible, so a crashed, hung, or publication-pinned run is still
+  kept deliberately.
+- The janitor's bounded directory scan selected which entries to consider by
+  readdir order and only then sorted, so past the scan cap (2048 runs, 12288
+  processed bus records) it could carry the newest entries and prune the
+  wrong end. It now selects the oldest entries during the scan, which is the
+  end every one of its tasks deletes from.
+
+## 0.27.1 — 2026-08-23
+
+### Added
+
+- **Generic typed-event ingress.** `fclaw bus publish --type <kind>` lets a
+  local producer — a cron job, a git hook, a build wrapper, a device bridge —
+  publish a product-defined fact onto the bus without disguising it as chat,
+  putting product behavior in a channel layer, calling an action outside a
+  floop decision, or hand-writing an inbox file. The payload is one JSON
+  object supplied by `--payload` or, preferably, `--payload-stdin`; it reaches
+  `event.payload` byte-for-byte, with no required `text` key. A floop opts in
+  by gating a step on the exact kind (`"gate": "event_kind:device_scan_requested"`),
+  and a deterministic `script` agent can answer with its allowlisted actions
+  and a reply with no provider call at all. A valid kind no step gates
+  completes as an ordinary inspectable no-op run rather than falling through
+  to chat handling. The kernel stays product-ignorant: it keeps no list of
+  event names and enforces only a token grammar (1–63 bytes,
+  `[A-Za-z][A-Za-z0-9_.:-]*`), the runtime-owned namespaces (`user_`,
+  `action_`, `affair_`, `operation_`, `work_`, `task_`, `run_`, `memory_`),
+  and the ordinary bus payload bound.
+- `fclaw bus reserve` issues one bus identity without publishing it, so a
+  producer that may crash between commit and acknowledgement can record the
+  id beside its own source row and republish the identical envelope under
+  `--event-id`. An identical republish is absorbed and creates no second
+  envelope or run; reusing the id with a different type, payload, or routing
+  fails as a conflict. Publication idempotency only — it never retries a
+  model call, an action, or a product effect.
+- Bus envelopes may carry an optional top-level `routing` block
+  (`adapter_id`, `context_id`, `ref`) beside the payload. Typed events use it
+  so a `context_id` or `ref` key *inside* a product payload stays ordinary
+  data and steers nothing. Built-in kinds carry no routing block and read
+  those fields from their payloads exactly as before.
+- The `event:` context namespace. A typed event routes to
+  `event:<channel>:<context-id>`, falling back to the adapter id and then the
+  channel alone, so publishing a device or build fact never inherits a
+  conversation's memory scope or `serialize_contexts` lane. A fully qualified
+  `chat:` id is preserved verbatim for a product that deliberately wants that
+  join; the runtime-owned `action:` namespace is refused from caller input.
+- `fclaw bus publish` now reports validation (`1`), conflict (`3`), and
+  publication failure (`4`) with distinct exit codes, a JSON error object on
+  stdout in agent mode, and the exact offending field on stderr. A refused
+  command never leaves a partial inbox envelope.
+
+### Changed
+
+- An ordinary action call from a run with no task-bearing context is now
+  emitted unbound instead of rejected. This only affects typed-ingress runs,
+  which have no input task by design; every runtime-owned kind still requires
+  its existing task binding, unchanged.
+
 ## 0.27.0 — 2026-08-20
 
 ### Added
@@ -174,10 +349,6 @@ release tag and `runtime/version.h` carry the same plain `X.Y.Z` version.
 
 - Real providers require libcurl; TLS channels require OpenSSL.
 - `web_read` additionally requires Zig 0.15.2 and libxml2 to build `pluck`.
-- Configured terminal-run pruning is currently ineffective because the
-  janitor reads the wrong lifecycle field from `runstate.json`. JSONL rotation
-  and other configured cleanup tasks still run, but run directories
-  accumulate.
 - Janitor worker-artifact retention currently covers `codex_ops` only;
   `claude_ops` and `hermes_ops` accumulate until cleared manually.
 - The optional iMessage/email delivery bridge is best-effort: it advances its

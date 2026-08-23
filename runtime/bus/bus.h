@@ -10,6 +10,40 @@
 #define BUS_PAYLOAD_MAX 16384
 #define BUS_WAKE_SOCK_PATH ".fclaw/run/bus.wake.sock"
 
+/* Envelope routing bounds. Routing is transport metadata, never product
+ * payload, so it is bounded far below BUS_PAYLOAD_MAX. The ref bound
+ * matches the largest reply address the delivery path will carry. */
+#define BUS_ROUTING_ADAPTER_MAX 64
+#define BUS_ROUTING_CONTEXT_MAX 128
+#define BUS_ROUTING_REF_MAX     512
+/* Wide enough that any input inside the bounds above always serializes,
+ * even when every byte escapes to \u00XX. Routing must never turn a
+ * validation problem into a publication failure. */
+#define BUS_ROUTING_JSON_MAX    2048
+
+/* Custom typed-event grammar. A custom kind is an opaque token compared
+ * byte-for-byte by floop `event_kind:` gates; the runtime never reads
+ * meaning from it. Grammar: first byte [A-Za-z], remaining bytes
+ * [A-Za-z0-9_.:-], total length 1..BUS_CUSTOM_TYPE_MAX. */
+#define BUS_CUSTOM_TYPE_MAX 63
+
+/* 1 when `type` satisfies the custom-kind token grammar above. */
+int bus_type_token_valid(const char *type);
+
+/* 1 when `type` is runtime-owned and may never be forged by a custom
+ * producer. Reserves whole namespaces, not just today's spellings, so a
+ * future lifecycle kind cannot be claimed by a product first. */
+int bus_type_is_reserved(const char *type);
+
+/* Transport routing carried beside — never inside — the domain payload.
+ * Every field is optional; NULL or "" is omitted from the envelope.
+ * ref_json must already be a JSON object when present. */
+typedef struct {
+  const char *adapter_id;
+  const char *context_id;
+  const char *ref_json;
+} BusRouting;
+
 /* Publish an event envelope onto the bus. The payload_json must be a valid
  * JSON object. On success, the envelope is written to workspace/bus/inbox/
  * AND appended to workspace/logs/bus.jsonl. The assigned envelope id is
@@ -22,11 +56,32 @@ int bus_publish(const char *channel, const char *type, const char *payload_json,
  * identity and treats an identical existing inbox/processed envelope as
  * success; a conflicting envelope is a loud error. The location bitmask is
  * 1=inbox, 2=processed. Requeue moves a processed envelope back to inbox
- * when intake crashed before claiming a run. */
+ * when intake crashed before claiming a run.
+ *
+ * Returns 0 on commit (including an absorbed identical republish),
+ * BUS_PUBLISH_CONFLICT when the reserved identity already holds a
+ * different envelope, and BUS_PUBLISH_FAILED for any other failure. The
+ * two are distinguished so a caller can report "this id is already
+ * something else" separately from "the write did not land". */
+#define BUS_PUBLISH_FAILED   (-1)
+#define BUS_PUBLISH_CONFLICT (-2)
 int bus_reserve_envelope_id(char *out, size_t out_len);
 int bus_publish_stable(const char *envelope_id,
                        const char *channel, const char *type,
                        const char *payload_json);
+
+/* Routed variants. Identical to the plain forms except that `routing` is
+ * serialized into its own top-level envelope block, leaving `payload` the
+ * caller's object byte-for-byte. NULL routing produces exactly the
+ * envelope the plain forms produce. Routing participates in stable-publish
+ * conflict detection: same id + different routing is a conflict. */
+int bus_publish_routed(const char *channel, const char *type,
+                       const char *payload_json, const BusRouting *routing,
+                       char *envelope_id_out, size_t envelope_id_out_len);
+int bus_publish_stable_routed(const char *envelope_id,
+                              const char *channel, const char *type,
+                              const char *payload_json,
+                              const BusRouting *routing);
 int bus_envelope_locations(const char *envelope_id);
 int bus_requeue_processed(const char *envelope_id);
 

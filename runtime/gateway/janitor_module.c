@@ -198,10 +198,44 @@ static int by_num_asc(const void *a, const void *b) {
   return (x > y) - (x < y);
 }
 
+/* Max-heap on the trailing number, used to hold the `cap` OLDEST entries
+ * while the scan runs. Filling in readdir order and truncating whatever
+ * arrives last lets the filesystem decide which runs survive a cap
+ * overflow; every caller here prunes from the old end, so overflow must
+ * drop the NEWEST. Selecting with a heap keeps that O(log cap) per entry
+ * — a sorted-insert would memmove up to 12288 entries per overflow. */
+static void heap_swap(DirEntry *a, DirEntry *b) {
+  DirEntry tmp = *a;
+  *a = *b;
+  *b = tmp;
+}
+
+static void heap_sift_up(DirEntry *heap, int index) {
+  while (index > 0) {
+    int parent = (index - 1) / 2;
+    if (heap[parent].num >= heap[index].num) return;
+    heap_swap(&heap[parent], &heap[index]);
+    index = parent;
+  }
+}
+
+static void heap_sift_down(DirEntry *heap, int n, int index) {
+  for (;;) {
+    int left = 2 * index + 1;
+    int right = left + 1;
+    int largest = index;
+    if (left < n && heap[left].num > heap[largest].num) largest = left;
+    if (right < n && heap[right].num > heap[largest].num) largest = right;
+    if (largest == index) return;
+    heap_swap(&heap[index], &heap[largest]);
+    index = largest;
+  }
+}
+
 /* List every entry in dir matching prefix, extract trailing number,
  * sort ascending. Returns count or -1 on error. Caller supplies fixed
- * capacity; overflow just truncates from the newest (we're deleting
- * the oldest anyway). */
+ * capacity; overflow drops the newest entries, because every caller
+ * deletes from the oldest end. */
 static int list_sorted(const char *dir, const char *prefix,
                        DirEntry *out, int cap) {
   DIR *d = opendir(dir);
@@ -225,7 +259,13 @@ static int list_sorted(const char *dir, const char *prefix,
     if (n < cap) {
       out[n].num = num;
       snprintf(out[n].name, sizeof(out[n].name), "%s", e->d_name);
+      heap_sift_up(out, n);
       n++;
+    } else if (cap > 0 && num < out[0].num) {
+      /* Newest kept entry loses its slot to this older one. */
+      out[0].num = num;
+      snprintf(out[0].name, sizeof(out[0].name), "%s", e->d_name);
+      heap_sift_down(out, n, 0);
     }
   }
   saved_errno = errno;
@@ -242,21 +282,25 @@ static int list_sorted(const char *dir, const char *prefix,
 
 /* Is workspace/runs/<name>/runstate.json marked terminal (done/failed)?
  * If we can't read the file, treat as non-terminal — safer to keep
- * than to nuke an in-flight run. */
+ * than to nuke an in-flight run.
+ *
+ * The status is read through the runtime's own runstate reader, not by
+ * naming the key here. This module spelled it "state" while the
+ * serializer wrote "status", so every run looked non-terminal and nothing
+ * was ever pruned — silently, because "can't read → keep" is also the
+ * fail-safe. One owner for the key makes that drift impossible. */
 static int run_is_terminal(const char *runs_dir, const char *name) {
   char path[512];
   char *text = NULL;
-  JsonRef root;
-  char state[32] = "";
+  char status[32] = "";
   int terminal;
   if (snprintf(path, sizeof(path), "%s/%s/runstate.json", runs_dir, name)
       >= (int)sizeof(path))
     return 0;
   if (fs_read_text(path, &text, FS_READ_TEXT_DEFAULT_CAP) != 0 || !text) return 0;
-  if (json_ref_first_object(text, &root) == 0)
-    (void)json_ref_object_get_string(&root, "state", state, sizeof(state));
+  (void)rt_run_state_status_from_json(text, status, sizeof(status));
   free(text);
-  terminal = rt_run_status_is_terminal(state);
+  terminal = rt_run_status_is_terminal(status);
   return terminal;
 }
 
@@ -367,6 +411,28 @@ int fc_janitor_test_runs_prune(const char *path, int keep) {
   task.keep = keep;
   snprintf(task.path, sizeof(task.path), "%s", path);
   return task_runs_prune(&task);
+}
+
+int fc_janitor_test_list_oldest(const char *dir, const char *prefix, int cap,
+                                char *out_csv, size_t out_len) {
+  DirEntry *entries;
+  int n, i;
+  size_t pos = 0;
+  if (!out_csv || out_len == 0) return -1;
+  out_csv[0] = '\0';
+  if (cap <= 0 || cap > JANITOR_BUS_SCAN_CAP) return -1;
+  entries = janitor_entries_borrow();
+  if (!entries) return -1;
+  n = list_sorted(dir, prefix, entries, cap);
+  for (i = 0; i < n; ++i) {
+    int written = snprintf(out_csv + pos, out_len - pos, "%s%s",
+                           i ? "," : "", entries[i].name);
+    if (written < 0 || (size_t)written >= out_len - pos) {
+      return janitor_entries_release_result(-1);
+    }
+    pos += (size_t)written;
+  }
+  return janitor_entries_release_result(n);
 }
 
 /* ------------------------------------------------------------------

@@ -401,23 +401,44 @@ static int dc_extract_frame(DcAdapter *a, unsigned char *opcode_out, char *paylo
   return 1;
 }
 
+/* The conversation this message belongs to. Discord channel ids are
+ * per-channel AND per-thread, so a thread is naturally its own context; a
+ * DM is keyed by the user because its channel id is not stable enough to
+ * reason about. Without this the runtime falls back to
+ * chat:discord:<adapter_id> and every channel, thread, and DM on the
+ * deployment shares one memory scope and one serialization lane — which
+ * means DM content recallable from a public channel. */
+void dc_context_id(const DcInboundMessage *msg, char *out, size_t out_len) {
+  if (!out || out_len == 0) return;
+  out[0] = '\0';
+  if (!msg) return;
+  if (msg->is_dm)
+    snprintf(out, out_len, "dm:%s", msg->user_id);
+  else
+    snprintf(out, out_len, "%s", msg->channel_id);
+}
+
 int dc_publish_message(DcAdapter *a, const DcInboundMessage *msg) {
   char esc_text[DC_TEXT_MAX * 2];
   char esc_adapter[128];
   char esc_channel[256];
   char esc_guild[256];
   char esc_user[128];
+  char context_id[256];
+  char esc_context[512];
   char payload[DC_TEXT_MAX * 2 + 1024];
   char id[BUS_ID_MAX];
   int n;
   const char *scope;
   if (!a || !msg) return -1;
   scope = msg->is_dm ? "dm" : "guild";
+  dc_context_id(msg, context_id, sizeof(context_id));
   if (json_escape(msg->content, esc_text, sizeof(esc_text)) != 0 ||
       json_escape(a->module_id_buf, esc_adapter, sizeof(esc_adapter)) != 0 ||
       json_escape(msg->channel_id, esc_channel, sizeof(esc_channel)) != 0 ||
       json_escape(msg->guild_id, esc_guild, sizeof(esc_guild)) != 0 ||
-      json_escape(msg->user_id, esc_user, sizeof(esc_user)) != 0)
+      json_escape(msg->user_id, esc_user, sizeof(esc_user)) != 0 ||
+      json_escape(context_id, esc_context, sizeof(esc_context)) != 0)
     return -1;
   if (msg->attachment_count > 0U) {
     FcMediaManifestRef media_ref;
@@ -433,17 +454,19 @@ int dc_publish_message(DcAdapter *a, const DcInboundMessage *msg) {
     }
     n = snprintf(payload, sizeof(payload),
                  "{\"text\":\"%s\",\"media\":%s,\"adapter_id\":\"%s\","
+                 "\"context_id\":\"%s\","
                  "\"ref\":{\"channel_id\":\"%s\",\"guild_id\":\"%s\","
                  "\"user_id\":\"%s\",\"scope\":\"%s\"}}",
-                 esc_text, media_json, esc_adapter, esc_channel, esc_guild,
-                 esc_user, scope);
+                 esc_text, media_json, esc_adapter, esc_context, esc_channel,
+                 esc_guild, esc_user, scope);
   } else {
     n = snprintf(payload, sizeof(payload),
                  "{\"text\":\"%s\",\"adapter_id\":\"%s\","
+                 "\"context_id\":\"%s\","
                  "\"ref\":{\"channel_id\":\"%s\",\"guild_id\":\"%s\","
                  "\"user_id\":\"%s\",\"scope\":\"%s\"}}",
-                 esc_text, esc_adapter, esc_channel, esc_guild, esc_user,
-                 scope);
+                 esc_text, esc_adapter, esc_context, esc_channel, esc_guild,
+                 esc_user, scope);
   }
   if (n < 0 || (size_t)n >= sizeof(payload) ||
       bus_publish("discord", "user_message", payload, id, sizeof(id)) != 0) {

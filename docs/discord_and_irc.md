@@ -39,7 +39,8 @@ Two shapes both work.
 Probe connects to the configured ircd, registers as a nick (for example
 `probe1`), sends `PRIVMSG floofclaw :<your message>`, and waits for
 `PRIVMSG probe1 :<reply>`. Fully isolated — nobody else sees the exchange,
-and the bot's response uses the `chat:irc:irc-main` context.
+and the bot's response uses that probe's own `chat:irc:dm:probe1` context,
+so a probe never reads or writes the memory of a real conversation.
 
 Preferred whenever the test is about whether the configured product responded
 correctly to a message.

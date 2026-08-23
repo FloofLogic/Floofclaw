@@ -191,6 +191,8 @@ typedef struct RtScheduler {
 /* Loads the loop profile into s->profile. Returns 0 on success, -1
  * if the profile failed to load (err filled). The gateway aborts
  * startup on failure rather than running with an unloaded profile. */
+/* `s` must be zeroed storage (fc_xcalloc or a calloc-d enclosing struct):
+ * init does not memset the ~4.8 MB pool, so that it stays lazily faulted. */
 int  rt_scheduler_init(RtScheduler *s, const char *loop_name, char *err, size_t err_len);
 void rt_scheduler_destroy(RtScheduler *s);
 

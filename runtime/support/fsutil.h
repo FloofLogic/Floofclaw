@@ -23,6 +23,10 @@ void fs_test_reset_append_sync(void);
 struct dirent *fs_readdir_checked(DIR *dir);
 void fs_test_fail_readdir_after(long successful_calls);
 void fs_test_reset_readdir(void);
+/* Byte length of `path`, or -1 when it cannot be stat'd. Cursor tailers ask
+ * this instead of reading a whole log just to learn where its end is. */
+long long fs_file_size(const char *path);
+
 int fs_read_text(const char *path, char **out_text, size_t max_bytes);
 int fs_read_tail(const char *path, char **out_text, size_t max_bytes);
 int fs_join(char *out, size_t out_len, const char *left, const char *right);

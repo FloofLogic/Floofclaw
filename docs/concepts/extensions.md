@@ -3,8 +3,8 @@
 **Preconditions:** a built `bin/fclaw` (`make -j4`). Paths are relative to the
 repository root.
 
-FloofClaw has three extension surfaces, and you add to each one by copying a
-directory into it.
+FloofClaw has three extension surfaces you add to by copying a directory into
+them, plus one you use without installing anything at all.
 
 ```text
 floofclaw/
@@ -12,6 +12,8 @@ floofclaw/
 ├── adapters/     # copy native adapter here; make; restart
 ├── floops/       # copy floop here
 └── runtime/      # does not know their names
+
+fclaw bus publish --type   # typed ingress: nothing to install
 ```
 
 The invariant: **installing an extension never requires editing a registration
@@ -46,6 +48,7 @@ time** and statically linked into the same binary.
 action:          copy directory → restart          → fclaw actions -h
 native adapter:  copy directory → make → restart   → fclaw adapters -h
 floop:           copy directory → select and run   → fclaw floops -h
+typed ingress:   gate a kind in a floop            → fclaw bus log -h --type <kind>
 ```
 
 Only the adapter rebuilds. Then configure it if it needs configuring.
@@ -132,6 +135,34 @@ See [adding an adapter](../getting-started/adding-an-adapter.md).
 Floops need nothing architectural: `floops/<name>/` holds `loop.json` plus the
 agents that loop uses. Copy the directory, select it with `--floop <name>` or
 `default_floop` in config. See [floops](floops.md).
+
+## Typed ingress
+
+The fourth surface installs nothing. A local producer — a cron job, a git
+hook, a build wrapper, an MQTT bridge, an app on the same machine — publishes
+a product-defined fact straight onto the bus:
+
+```bash
+printf '%s' '{"scope":"installed_applications"}' |
+  ./bin/fclaw bus publish -a --type device_scan_requested \
+    --channel local_product --context-id device --payload-stdin
+```
+
+A floop opts in by gating a step on that exact kind
+(`"gate": "event_kind:device_scan_requested"`); the handler receives the kind
+and the payload unchanged. Nothing is registered, nothing is rebuilt, and the
+kernel keeps no list of product event names — it only enforces a token
+grammar, the runtime-owned namespaces, and the payload bound.
+
+Use it when the thing you observed is a **fact**, not a conversation. Write a
+channel adapter instead when you are connecting a human conversation surface,
+and write an action when you want FloofClaw to *cause* an effect rather than
+be told about one.
+
+See [`fclaw bus publish --type`](../reference/cli.md#--type-typed-event-ingress)
+for the full flag, bound, and exit-code contract, and
+[gating a custom event kind](floops.md#gating-a-custom-event-kind) for the
+floop side.
 
 ## Seeing what a deployment has
 

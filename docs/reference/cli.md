@@ -13,7 +13,7 @@ fclaw view [-a|-h] [-f] [-d] <run_id|run_dir>
 fclaw usage [-a|-h] [--agent <id>] [--profile <id>]
 fclaw cacheview [-a|-h] --agent <id> [-n <count>] [--run <run_id> [--call <seq>] | --list]
 fclaw auth set|set-stdin|get|delete|header [-a|-h] <endpoint> [...]
-fclaw bus publish|log [-a|-h] [...]
+fclaw bus publish|reserve|log [-a|-h] [...]
 fclaw affair create|list|pause|resume|close|review|schedule [-a|-h] [...]
 fclaw gateway start|run|status|stop|reload [-a|-h] [...]
 fclaw -i [-a|-h] [--floop <name>]
@@ -304,13 +304,142 @@ Inspect or publish bus envelopes. Publishing does not create runs; the
 runtime owner consumes inbox envelopes and creates/wakes runs.
 
 ```bash
-./bin/fclaw bus publish -h [--channel <id>] --text <text>
+./bin/fclaw bus publish -h [--channel <id>] [--adapter-id <id>] [--ref <json>] --text <text>
+./bin/fclaw bus publish -h --type <kind> (--payload <json> | --payload-stdin)
+                        [--channel <id>] [--adapter-id <id>] [--context-id <id>]
+                        [--ref <json>] [--event-id <reserved>]
+./bin/fclaw bus reserve -h
 ./bin/fclaw bus log -h [-f|--follow] [--channel <id>] [--type <name>] [-n|--last <count>]
 ```
 
-`publish` writes a `user_message` envelope to `workspace/bus/inbox/`.
-The gateway or embedded runtime owner picks it up. `log` reads
-`workspace/logs/bus.jsonl` with optional filters.
+`log` reads `workspace/logs/bus.jsonl` with optional filters. `--channel`
+and `--type` are exact at any envelope size, so a producer can tail its own
+kind and see only its own events.
+
+### `--text`: the user-message shortcut
+
+`publish --text` writes a `user_message` envelope to `workspace/bus/inbox/`
+and the gateway or embedded runtime owner picks it up. Its payload shape and
+its agent-mode output — `{"event_id":…,"channel":…}` — are unchanged.
+
+### `--type`: typed-event ingress
+
+`publish --type` is the supported way for a local producer (a cron job, a git
+hook, a build wrapper, a device bridge) to publish a **product-owned fact**
+without disguising it as chat and without hand-writing an inbox file:
+
+```bash
+printf '%s' '{"scope":"installed_applications"}' |
+  ./bin/fclaw bus publish -a \
+    --type device_scan_requested \
+    --channel local_product \
+    --adapter-id local_product_android \
+    --context-id device \
+    --ref '{"session_id":"session_123"}' \
+    --payload-stdin
+```
+
+```json
+{"event_id":"bus_000042","type":"device_scan_requested","channel":"local_product","context_id":"device"}
+```
+
+- **`--type`** is the custom event kind, matched byte-for-byte by a floop's
+  `event_kind:` gate. Grammar: 1–63 bytes, first byte `[A-Za-z]`, the rest
+  `[A-Za-z0-9_.:-]` — so `build.observed`, `wishware:scan`, and
+  `device_scan_requested` are all fine. Runtime-owned namespaces are
+  reserved and refused: `user_`, `action_`, `affair_`, `operation_`,
+  `work_`, `task_`, `run_`, `memory_`.
+- **`--payload` / `--payload-stdin`** supply exactly one JSON *object*, up to
+  16 KiB. Prefer stdin: no shell escaping, and the payload never appears
+  in process arguments. The object reaches the floop unchanged — no `text`
+  key is required or invented.
+- **`--channel`** (default `cli`) is the delivery route a `message` action
+  replies through, using the ordinary channel contract.
+- **`--adapter-id`** (≤64 bytes) records producer provenance. It is a label,
+  not authentication.
+- **`--context-id`** (≤128 bytes) selects the context lane — see
+  [context namespaces](#context-namespaces) below.
+- **`--ref`** (a JSON object, ≤512 bytes) is the opaque return address the
+  delivery record carries back. Fire-and-forget producers omit it.
+- **`--event-id`** republishes under a previously reserved identity — see
+  [stable publication](#stable-publication).
+
+`--text` and `--type` are mutually exclusive; so are `--payload` and
+`--payload-stdin`. Routing metadata is carried in the envelope's own
+`routing` block, so a `context_id` or `ref` key inside your payload is
+ordinary product data and steers nothing.
+
+Success means **published durably to the bus** — not handled, understood, or
+completed. Publishing grants no action authority: an effect happens only when
+the selected floop runs an agent that is explicitly allowed to call a
+declared action.
+
+#### Context namespaces
+
+Typed events get their own namespace so a device or build fact never inherits
+a conversation's memory scope or serialization lane:
+
+| supplied `--context-id` | resulting context |
+|---|---|
+| `device` | `event:<channel>:device` |
+| omitted, `--adapter-id android` given | `event:<channel>:android` |
+| omitted, no adapter id | `event:<channel>` |
+| `event:…` or `chat:…` (fully qualified) | preserved verbatim |
+
+Passing a fully qualified `chat:` id is how a product deliberately runs an
+event inside an existing conversation. The runtime-owned `action:` namespace
+is refused.
+
+#### Stable publication
+
+A producer that may crash between "FloofClaw committed" and "I saw the
+response" reserves the identity first, records it beside its own source row,
+and republishes that exact envelope on restart:
+
+```bash
+id="$(./bin/fclaw bus reserve -a | jq -r .event_id)"
+./bin/fclaw bus publish -a --type build_observation_changed \
+  --event-id "$id" --payload '{"status":"green"}'
+```
+
+Republishing an identical envelope under the same id succeeds and creates no
+second envelope or run. Reusing the id with a different type, payload, or
+routing fails as a conflict. This is publication idempotency only: it never
+retries a model call, an action, or a product effect.
+
+#### Exit codes
+
+| code | meaning |
+|---|---|
+| `0` | published (or an identical republish was absorbed) |
+| `1` | validation: bad type, payload, routing, or reserved id |
+| `3` | conflict: that reserved id already holds a different envelope |
+| `4` | publication failure: the envelope could not be committed |
+
+A nonzero exit publishes nothing — a refused command never leaves a partial
+inbox envelope. Agent mode prints a JSON error object on stdout and the
+specific field on stderr.
+
+#### Inspecting what you published
+
+```bash
+./bin/fclaw bus log -a --type device_scan_requested   # the committed envelope
+./bin/fclaw view -a <run_id>                          # the triggering event
+cat workspace/logs/deliveries.jsonl                   # replies, with channel + ref
+cat workspace/logs/rejected_events.jsonl              # refusals, with the exact field
+```
+
+A producer that wants replies tails `workspace/logs/deliveries.jsonl` for its
+own channel, the same way `channels/message_deliver.sh` does. No channel
+adapter is required to receive a typed event's reply.
+
+### `fclaw bus reserve`
+
+Allocates one ordinary bus identity without publishing anything:
+
+```json
+{"event_id":"bus_000042"}
+```
 
 ## `fclaw affair …`
 
@@ -364,6 +493,13 @@ Long-running coordinator that owns the reactor.
 around it; `run` keeps it in the foreground. Both register
 `.fclaw/run/gateway.pid` and `.fclaw/run/gateway.loop`, so `status` and
 `stop` work for either form.
+
+`status -a` reports runs, jobs, and inbox depth plus a `reactor` block:
+`module_errors` and `slow_ticks` per module, and `poll_overflows` — the
+count of descriptors the reactor could not watch because its poll set was
+full. `poll_overflows` should be 0; a nonzero value means some module's
+descriptor went unwatched for a pass, which stalls whatever was behind it
+until the next poll deadline.
 
 For process-listing clarity, `start` and `run` best-effort label the gateway
 process as `fclaw_<bot_name>`, for example `fclaw_FloofClaw` from the committed

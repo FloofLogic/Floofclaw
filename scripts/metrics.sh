@@ -31,5 +31,5 @@ printf 'stripped_binary_bytes=%s\n' "$binary_bytes"
 printf 'runtime_c_header_lines=%s\n' "$runtime_lines"
 printf 'unit_tests=%s\n' "$unit_tests"
 printf 'integration_tests=%s\n' "$integration_tests"
-printf 'required_core_libraries=2 (OpenSSL and libcurl; mock-only build can omit both)\n'
+printf 'required_core_libraries=2 (OpenSSL and libcurl; make MOCK_ONLY=1 omits both)\n'
 printf '%s\n' "$runtime_metrics"

@@ -123,6 +123,10 @@ typedef struct {
 
 /* ----- base64 + SHA-1 handshake ----------------------------------- */
 
+#ifdef FCLAW_HAVE_OPENSSL
+
+/* Only the handshake accept-key uses this, and that needs SHA1 from
+ * OpenSSL — so it compiles only where it is reachable. */
 static const char base64_alphabet[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -150,6 +154,8 @@ static int base64_encode(const unsigned char *src, size_t src_len,
   dst[o] = '\0';
   return 0;
 }
+
+#endif /* FCLAW_HAVE_OPENSSL */
 
 static int compute_accept(const char *client_key, char *out,
                           size_t out_len) {
@@ -1254,25 +1260,21 @@ static void reconcile_delivery(WsAdapter *a, const char *line) {
 }
 
 static void drain_deliveries(WsAdapter *a) {
-  char *text = NULL;
-  long long total;
+  long long total = fs_file_size(WS_DELIVERIES_LOG);
   FILE *fp;
+  /* stat, not a full read: the tick only needs the end offset, and the
+   * live log runs to 64 MiB before the janitor rotates it. */
   if (!a->delivery_cursor_init) {
-    if (fs_read_text(WS_DELIVERIES_LOG, &text,
-                     FS_READ_TEXT_DEFAULT_CAP) == 0 && text) {
-      a->delivery_cursor = (long long)strlen(text);
-      free(text);
-    } else {
-      a->delivery_cursor = 0;
-    }
+    a->delivery_cursor = total > 0 ? total : 0;
     a->delivery_cursor_init = 1;
     return;
   }
-  if (fs_read_text(WS_DELIVERIES_LOG, &text,
-                   FS_READ_TEXT_DEFAULT_CAP) != 0 || !text)
-    return;
-  total = (long long)strlen(text);
-  free(text);
+  if (total < 0) return;
+  /* Rotation detected: the janitor renamed the live file and the append
+   * site created a fresh one. Start from the top of the new file — the
+   * IRC and Discord tailers have always done this; this one did not, so
+   * a rotation stranded its cursor past every future delivery. */
+  if (total < a->delivery_cursor) a->delivery_cursor = 0;
   if (total <= a->delivery_cursor) return;
   fp = fopen(WS_DELIVERIES_LOG, "rb");
   if (!fp) return;

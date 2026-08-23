@@ -1,4 +1,5 @@
 #include "agent_exec.h"
+#include "bus/bus.h"
 #include "floop.h"
 #include "support/heap_guard.h"
 
@@ -415,7 +416,12 @@ static void infer_missing_task_id(RtContext *ctx, const char *bound_task_id,
     snprintf(task_id, task_len, "%s", inferred);
     return;
   }
-  if (ctx->event_payload_json[0] &&
+  /* Only a runtime-owned kind carries correlation in its payload. In a
+   * product-owned typed event a "task_id" key is the producer's data, so
+   * it must never bind this agent to a runtime task. bus_type_is_reserved
+   * is the single owner of that boundary. */
+  if (bus_type_is_reserved(ctx->event_kind) &&
+      ctx->event_payload_json[0] &&
       json_ref_top_object(ctx->event_payload_json, &payload) == 0 &&
       json_ref_object_get_string(&payload, "task_id", inferred,
                                  sizeof(inferred)) == 0 && inferred[0] &&
@@ -820,20 +826,32 @@ int rt_agent_normalize_output(RtContext *ctx, const RtStep *step,
                    "%s{\"type\":\"%s\",\"payload\":%s}",
                    emitted ? "," : "", type, args_raw);
     } else {
+      /* A runtime-owned kind always runs in a task-bearing context, so an
+       * ordinary action with no task there is a correlation bug. A typed
+       * ingress run has no task by design — publishing a fact must not
+       * create one — so its declared actions are emitted unbound, the way
+       * the context-scoped actions above already are. */
+      int unbound_ok = !bus_type_is_reserved(ctx->event_kind);
       infer_missing_task_id(ctx, bound_task_id, task_id, sizeof(task_id));
       if (task_id[0] && json_escape(task_id, etask, sizeof(etask)) != 0) {
         fc_xfree(args_raw);
         return -1;
       }
-      if (!task_id[0] || !rt_task_reference_in_context(ctx->context_id, task_id)) {
+      if ((!task_id[0] && !unbound_ok) ||
+          (task_id[0] &&
+           !rt_task_reference_in_context(ctx->context_id, task_id))) {
         fc_xfree(args_raw);
         rt_log_rejected_agent_event(step->target, "invalid_agent_call", "action call requires existing task_id");
         return -1;
       }
       n = snprintf(item, sizeof(item),
                    "%s{\"type\":\"action_request\",\"payload\":{\"action\":\"%s\","
-                   "\"args\":%s,\"task_id\":\"%s\"%s}}",
-                   emitted ? "," : "", ename, args_raw, etask, work_rev_clause);
+                   "\"args\":%s%s%s%s%s}}",
+                   emitted ? "," : "", ename, args_raw,
+                   task_id[0] ? ",\"task_id\":\"" : "",
+                   task_id[0] ? etask : "",
+                   task_id[0] ? "\"" : "",
+                   work_rev_clause);
     }
     fc_xfree(args_raw);
     if (n < 0 || (size_t)n >= sizeof(item) ||

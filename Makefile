@@ -2,7 +2,40 @@ CC ?= cc
 CFLAGS ?= -std=c11 -Wall -Wextra -Wpedantic -O2 -D_DARWIN_C_SOURCE -D_GNU_SOURCE -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L
 LDFLAGS ?=
 BUILD_REVISION ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
-CFLAGS += -DFCLAW_BUILD_REVISION=\"$(BUILD_REVISION)\"
+
+# The base flags before this file adds anything. Targets that re-invoke make
+# with their own CFLAGS (asan, ubsan) start from this, so the sub-make runs
+# its own library detection once instead of inheriting an already-augmented
+# set and appending a second copy of everything.
+FCLAW_BASE_CFLAGS := $(CFLAGS)
+
+# Everything below is appended with `override`. A plain `+=` after a
+# command-line `CFLAGS=...` is silently discarded by make, which would drop
+# the feature defines and include paths the sources need and produce a
+# binary that compiles but cannot reach a provider. `override` lets
+# `make CFLAGS=-O0` refine the base flags without disarming the build.
+ifeq ($(findstring -DFCLAW_BUILD_REVISION,$(CFLAGS)),)
+override CFLAGS += -DFCLAW_BUILD_REVISION=\"$(BUILD_REVISION)\"
+endif
+
+# MOCK_ONLY=1 builds the advertised no-optional-library runtime: no libcurl
+# HTTP transport, no OpenSSL TLS. It is the supported way to get that build,
+# and the only way to get it without an explicit request.
+ifeq ($(strip $(MOCK_ONLY)),1)
+  # Skipping detection is not enough. A caller-supplied CFLAGS/LDFLAGS can
+  # already carry the feature defines and libraries — `make asan` re-passes
+  # the parent's fully expanded flags to its sub-make, and MAKEFLAGS carries
+  # them into any nested `make MOCK_ONLY=1`. Left alone, MOCK_ONLY would
+  # define macros for transports it links nothing for, or link the very
+  # libraries it claims to omit. Strip them.
+  override CFLAGS  := $(filter-out -DFCLAW_HAVE_LIBCURL -DFCLAW_HAVE_OPENSSL,$(CFLAGS))
+  override LDFLAGS := $(filter-out -lcurl -lssl -lcrypto,$(LDFLAGS))
+  OPENSSL_PREFIX :=
+  OPENSSL_CFLAGS :=
+  OPENSSL_LIBS   :=
+  CURL_CFLAGS    :=
+  CURL_LIBS      :=
+endif
 
 # Optional OpenSSL — enables nonblocking TLS in runtime/support/net_tls.c.
 # Channel adapters configured with tls: true (Discord, IRC-with-tls)
@@ -11,6 +44,7 @@ CFLAGS += -DFCLAW_BUILD_REVISION=\"$(BUILD_REVISION)\"
 # IRC config refuses to start with a clear error.
 # Auto-detected: portable pkg-config first, then Homebrew's keg-only
 # openssl@3. Override either with OPENSSL_PREFIX=/path.
+ifneq ($(strip $(MOCK_ONLY)),1)
 ifeq ($(strip $(OPENSSL_PREFIX)),)
   ifeq ($(shell pkg-config --exists openssl 2>/dev/null && echo yes),yes)
     OPENSSL_CFLAGS := -DFCLAW_HAVE_OPENSSL $(shell pkg-config --cflags openssl)
@@ -28,24 +62,33 @@ ifeq ($(strip $(OPENSSL_CFLAGS)),)
   $(warning   Channels requiring TLS (Discord WSS, IRC tls:true, WS adapter) will refuse to start.)
   $(warning   To enable: install openssl-devel/libssl-dev (Linux), brew install openssl@3 (macOS), or pass OPENSSL_PREFIX=/path.)
 endif
-CFLAGS  += $(OPENSSL_CFLAGS)
-LDFLAGS += $(OPENSSL_LIBS)
+endif
+override CFLAGS  += $(OPENSSL_CFLAGS)
+override LDFLAGS += $(OPENSSL_LIBS)
 
 # Optional libcurl — enables real HTTP LLM transport (runtime/llm/call.c).
 # Without it, the LLM call path returns -1 for every current non-mock provider
 # kind, including loopback OpenAI-compatible local endpoints. The mock-backed
 # test suite stays green
 # without it, so this miss is easy to make and only surfaces at runtime.
+ifneq ($(strip $(MOCK_ONLY)),1)
 CURL_CFLAGS ?= $(shell curl-config --cflags 2>/dev/null || pkg-config --cflags libcurl 2>/dev/null)
 CURL_LIBS   ?= $(shell curl-config --libs 2>/dev/null || pkg-config --libs libcurl 2>/dev/null)
-ifneq ($(CURL_LIBS),)
-  CFLAGS  += -DFCLAW_HAVE_LIBCURL $(CURL_CFLAGS)
-  LDFLAGS += $(CURL_LIBS)
+endif
+ifneq ($(strip $(CURL_LIBS)),)
+  override CFLAGS  += -DFCLAW_HAVE_LIBCURL $(CURL_CFLAGS)
+  override LDFLAGS += $(CURL_LIBS)
+else ifeq ($(strip $(MOCK_ONLY)),1)
+  $(info FloofClaw: MOCK_ONLY=1 — building without libcurl or OpenSSL.)
+  $(info   Mock providers and local execution work; every network provider and TLS channel refuses to start.)
 else
-  $(warning libcurl not detected via 'curl-config'. Building without HTTP LLM transport.)
-  $(warning   Every non-mock provider, including loopback OpenAI-compatible endpoints, will fail at the agent layer.)
-  $(warning   To enable: install libcurl-devel (Fedora) / libcurl4-openssl-dev (Debian) / brew install curl (macOS).)
-  $(warning   If you've extracted headers somewhere else, pass CURL_CFLAGS='-I.../include' CURL_LIBS='-L.../lib -lcurl' to make.)
+  $(error libcurl not detected via 'curl-config' or pkg-config. \
+Every non-mock provider, including loopback OpenAI-compatible endpoints, would \
+fail at the agent layer, so this build is refused rather than shipped silently. \
+To enable: install libcurl-devel (Fedora) / libcurl4-openssl-dev (Debian) / \
+brew install curl (macOS). If your headers are elsewhere, pass \
+CURL_CFLAGS='-I.../include' CURL_LIBS='-L.../lib -lcurl'. To build the \
+mock-only runtime deliberately, run: make MOCK_ONLY=1)
 endif
 
 SUPPORT_SRC = \
@@ -258,6 +301,12 @@ INTEGRATION_TEST_SRC = \
 	tests/integration/test_budget.c \
 	tests/integration/test_gateway_hardening.c \
 	tests/integration/test_media_ingress.c \
+	tests/integration/test_typed_ingress.c \
+	tests/integration/test_janitor_retention.c \
+	tests/integration/test_adapter_tailers.c \
+	tests/integration/test_reactor_pollset.c \
+	tests/integration/test_channel_contexts.c \
+	tests/integration/test_work_ledger_rebuild.c \
 	tests/integration/test_media_handoff.c \
 	tests/integration/test_llm_media_download.c \
 	tests/integration/test_provider_limits.c \
@@ -361,6 +410,8 @@ test: unit integration bin/fclaw_local_client_probe
 	./tests/run_in_isolated_copy.sh ./tests/test_local_client_api.sh
 	./tests/run_in_isolated_copy.sh bash ./tests/test_action_cli.sh
 	./tests/run_in_isolated_copy.sh bash ./tests/test_config_cli.sh
+	./tests/run_in_isolated_copy.sh bash ./tests/test_bus_typed_ingress.sh
+	./tests/run_in_isolated_copy.sh bash ./tests/test_mock_only_build_contract.sh
 	./tests/run_in_isolated_copy.sh bash ./tests/test_web_read_action.sh
 	./tests/run_in_isolated_copy.sh bash ./tests/test_tokenwatch_app.sh
 	./tests/run_in_isolated_copy.sh bash ./tests/test_managed_handle_restart.sh
@@ -371,8 +422,11 @@ test: unit integration bin/fclaw_local_client_probe
 test-small-stack:
 	@bash -c 'ulimit -s 1024; exec $(MAKE) test'
 
-SANITIZER_CFLAGS = $(filter-out -O%,$(CFLAGS)) -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined
-SANITIZER_LDFLAGS = $(LDFLAGS) -fsanitize=address,undefined
+# Built from the base flags, not the augmented ones: the sub-make appends
+# its own detected defines and libraries with `override`, so re-passing them
+# here would define FCLAW_BUILD_REVISION twice with two different values.
+SANITIZER_CFLAGS = $(filter-out -O%,$(FCLAW_BASE_CFLAGS)) -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined
+SANITIZER_LDFLAGS = -fsanitize=address,undefined
 
 # libFuzzer needs a clang that ships the fuzzer runtime. Apple clang
 # does NOT; install real LLVM (`brew install llvm`) and build with

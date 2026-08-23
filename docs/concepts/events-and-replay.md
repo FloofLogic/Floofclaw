@@ -58,6 +58,35 @@ signed transport URLs.
 the emitter (`"user"`, `"kernel"`, `"action_runner"`, `"<agent_name>"`, …).
 `payload` is type-specific JSON.
 
+## Bus envelope shape
+
+An inbox envelope is not a behavioral event — it is the submission the runtime
+owner admits, validates, and turns into a run's first event:
+
+```json
+{
+  "event_id": "bus_000042",
+  "ts": "2026-04-30T00:00:00Z",
+  "channel": "local_product",
+  "type": "device_scan_requested",
+  "routing": {
+    "adapter_id": "local_product_android",
+    "context_id": "device",
+    "ref": {"session_id": "session_123"}
+  },
+  "payload": {"scope": "installed_applications"}
+}
+```
+
+`routing` is optional transport metadata: the producer's provenance, the
+context lane, and the opaque reply address. It exists so a custom event's
+`payload` can stay the producer's object with nothing mixed in — a
+`context_id` or `ref` key *inside* a payload is ordinary data and routes
+nothing. Built-in kinds (`user_message`, `affair_review`, `action_exec`, the
+correlated work/result kinds, `operation_completed`) carry no `routing` block
+and continue to read `adapter_id`, `context_id`, and `ref` from their own
+payloads exactly as before.
+
 ## Event types
 
 The kernel and action_runner emit:
@@ -87,6 +116,22 @@ The kernel and action_runner emit:
   one start plus exactly one terminal event per run (idempotent through
   `apply_run_terminal_event`). Graceful gateway shutdown cancels active runs.
 - `error` — any kernel-detected failure that doesn't end the run.
+
+A local producer contributes one more initial event type:
+
+- **a custom typed kind** — the initial event for a run started from
+  `fclaw bus publish --type <kind>`. The event's `type` is the producer's own
+  token and its `payload` is the producer's object, byte-for-byte. The kernel
+  keeps no list of product kinds: it checks the token grammar
+  (1–63 bytes, `[A-Za-z][A-Za-z0-9_.:-]*`), refuses the runtime-owned
+  namespaces (`user_`, `action_`, `affair_`, `operation_`, `work_`, `task_`,
+  `run_`, `memory_`), requires the payload to be one JSON object inside the
+  ordinary bus bound, and otherwise treats it as opaque. There is no required
+  `text`, no `user` memory record, and no input task — a published fact
+  changes a reducer-owned projection only through an action the selected floop
+  chose. A kind no step gates completes as an ordinary inspectable no-op run;
+  it never falls back to chat handling. See
+  [`fclaw bus publish --type`](../reference/cli.md#--type-typed-event-ingress).
 
 The memory agent emits:
 
@@ -252,6 +297,26 @@ Given just the event log:
 …the runtime should reconstruct the same `state.json`. Trace files,
 agent artifacts, and action call files are **not** required for replay;
 they explain how the log was produced.
+
+### Rebuilding the work-step ledger
+
+`workspace/memory/state/work_steps.json` is a rebuildable projection, not
+truth: at startup `rt_work_state_rebuild_from_logs()` replays the
+work-controller events out of the run logs on disk.
+
+That replay sees a **window** of history, not all of it. Run directories
+older than the retention keep count have been pruned, and the scan is capped
+at `WORK_REBUILD_RUN_CAP` runs. An event whose ancestor revision or selected
+step fell outside that window cannot be applied — and that is ordinary, not
+corruption. The rebuild skips such an event, names it exactly in
+`workspace/logs/narration.jsonl` (run, event id, and type), reports the total
+skipped, and finishes. The run's own event log stays the evidence.
+
+It has to work this way: a rebuild that aborts leaves the ledger unwritten
+and the gateway unable to start, recoverable only by moving a run out of
+`workspace/runs/` by hand — which frees a run number for reuse and risks
+`workspace_task_id_collision`. The live apply path still rejects the same
+event, because there the store is complete and a rejection is real.
 
 This is the correctness check. If a feature can't be replayed from
 events, that feature is leaking truth into a non-event surface.

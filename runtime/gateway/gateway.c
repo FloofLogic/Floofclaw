@@ -353,7 +353,7 @@ static int run_gateway_reactor(const char *loop_name, int poll_ms,
                                LogoAnimState *logo_state, int verbose,
                                int human) {
   FcReactor reactor;
-  RtScheduler *scheduler = (RtScheduler *)fc_xmalloc(sizeof(*scheduler));
+  RtScheduler *scheduler = (RtScheduler *)fc_xcalloc(1, sizeof(*scheduler));
   FcReactorModule *wake = NULL, *jr = NULL, *intake = NULL, *runtime = NULL;
   FcReactorModule *status = NULL, *logo_anim = NULL, *affair_watcher = NULL, *janitor = NULL;
   LiveAdapter adapters[FC_REACTOR_MAX_MODULES];

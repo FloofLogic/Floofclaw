@@ -33,6 +33,19 @@ while (!stop) {
 Four phases per pass — `collect_fds → poll → dispatch on_fd → tick`.
 Nothing else. No subsystem-specific phase names live in the loop.
 
+The poll set holds `FC_POLL_MAX_FDS` (128) descriptors per pass, sized for
+the worst pass this gateway can build: 16 concurrent jobs at up to four
+descriptors each (stdout, stderr, progress, secret broker), the wake and
+status sockets, the WebSocket listener and its 16 clients, Discord's gateway
+and REST sockets, and IRC's socket. A descriptor that does not fit is not
+watched, which stalls it until the next poll deadline — so the set counts
+every refusal itself rather than relying on callers to check
+`fc_pollset_add`. The reactor accumulates those counts, logs them on the
+same rate-limited ladder as callback errors, and reports the total as
+`reactor.poll_overflows` in `fclaw gateway status -a`. A nonzero value means
+some module's descriptor went unwatched; sustained growth means the cap is
+too small for that deployment's shape.
+
 ## Modules
 
 Every reactor participant implements `FcReactorModule` in
@@ -84,11 +97,10 @@ Order matters when modules share state.
    - `tick` (every ~5s) — walks `workspace/memory/state/affairs.json`; for each active affair whose `next_review_at_ms` has passed (i.e. `now ≥ next_review_at_ms`), publishes an `affair_review` bus envelope and stamps `affair_reviewed` (which clears `next_review_at_ms` to 0). Re-arming after that is the review manager's `defer` call with `args.value` set to a duration (or the CLI's `affair schedule -h`); without re-arming, the affair stays dormant. Skips affairs whose `context_id` already has an active run, and serializes multiple due affairs within the same context across ticks
    - `next_deadline_ms` — `now + (next_tick_ms - now)` so the reactor wakes at the next 5s tick boundary
 7. **`janitor`** (`runtime/gateway/janitor_module.c`) — periodically rotates
-   JSONL logs and prunes processed bus records, archived tasks, and Codex
-   worker directories. Terminal-run retention is configured here but is
-   temporarily ineffective because the janitor reads the wrong lifecycle
-   field from `runstate.json`; see the
-   [known limitations](../../CHANGELOG.md#known-limitations)
+   JSONL logs and prunes terminal runs, processed bus records, archived
+   tasks, and Codex worker directories. A run is pruned only when its
+   persisted status is terminal and nothing pins it; the scan is bounded and
+   always considers the oldest entries first
 8. **`logo_anim`** when foreground output is a TTY — optional display module
 9. **`irc`** (`adapters/irc/irc_adapter.c`) — connect/PING/PRIVMSG state machine; tails `workspace/logs/deliveries.jsonl` for outbound `message` deliveries matching its `module_id`
 10. **`ws`** (`adapters/ws/ws_adapter.c`) — listens, completes RFC-6455 handshake, routes inbound text frames to bus, delivers outbound messages to the matching connection
@@ -284,6 +296,12 @@ Adapters that tail `workspace/logs/deliveries.jsonl` (and IRC's optional
 on later bytes. This prevents a restart from replaying old outbound log lines.
 Those JSONL files are evidence/hand-off logs, not a general-purpose outbound
 queue; runtime recovery and delivery IDs own the durable execution contract.
+
+A tick asks `stat()` for the file's size and returns immediately when it has
+not grown, so an idle tick costs nothing however large the log is — it never
+reads a byte it has already passed. When the size drops below the cursor the
+janitor has rotated the file, and the adapter restarts from the top of the
+fresh one.
 
 ## Shutdown protocol
 

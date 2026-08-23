@@ -30,4 +30,10 @@
  * startup_error 0 — "no IRC adapter to register", not an error. */
 extern const FcAdapter fc_adapter_irc;
 
+/* Conversation key for one inbound PRIVMSG: the channel for a channel
+ * message, "dm:<nick>" for a private message, lowercased because IRC
+ * names are case-insensitive. Exposed for the context-isolation test. */
+void irc_context_id(const char *target, const char *nick,
+                    char *out, size_t out_len);
+
 #endif

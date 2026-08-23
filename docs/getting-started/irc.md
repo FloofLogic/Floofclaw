@@ -73,6 +73,26 @@ must keep verification enabled; startup rejects a remote opt-out.
 - Missing `nick`, `username`, or `realname` values default to `fclaw`, `fclaw`,
   and `FloofClaw` respectively, but explicit values are easier to recognize.
 
+## Conversations and memory
+
+Each IRC conversation is its own context, with its own conversational memory
+and serialization lane:
+
+| where the message came from | context |
+|---|---|
+| a channel | `chat:irc:#ops` |
+| a private message | `chat:irc:dm:<nick>` |
+
+Keys are lowercased, because IRC channel names and nicks are
+case-insensitive — `#Ops` and `#ops` are one room and must not split into two
+memories.
+
+**Upgrading a deployment that ran before 0.28.0:** every channel and PM
+shared one context, `chat:irc:irc-main`, and the existing records in
+`workspace/memory/memory.jsonl` carry that tag. After the upgrade nothing
+reads them, so each conversation starts empty. Accept the reset, or retag the
+lines worth keeping to the conversation they belong to, before restarting.
+
 ## Current authentication limit
 
 FloofClaw does not implement IRC SASL or NickServ identification yet. It works

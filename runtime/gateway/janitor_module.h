@@ -32,5 +32,10 @@ int fc_janitor_test_scratch_reentry_guard(void);
 int fc_janitor_test_runs_prune(const char *path, int keep);
 int fc_janitor_test_bus_processed_prune(const char *path, int keep);
 int fc_janitor_test_bus_scan_cap(void);
+/* Run the bounded oldest-first selection over `dir` with an explicit cap
+ * and report the chosen names, comma-joined, in the order the pruner walks
+ * them. Returns the count selected, or -1. */
+int fc_janitor_test_list_oldest(const char *dir, const char *prefix, int cap,
+                                char *out_csv, size_t out_len);
 
 #endif

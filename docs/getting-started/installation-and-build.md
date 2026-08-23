@@ -22,9 +22,21 @@ Needed for real providers and network channels:
   `curl-config`; mock-provider execution does not use the library.
 
 TLS-backed channels refuse startup with a fix-naming error when OpenSSL support
-is absent. A build without libcurl warns that real LLM HTTP calls are
-unavailable; selecting one later fails at the provider call. Neither library
-is needed for the mock-backed first run.
+is absent. Neither library is needed for the mock-backed first run.
+
+A build with no libcurl cannot reach any real provider, so the Makefile
+**refuses** it rather than producing a binary that fails later at the
+provider call. The message names how to install the library — and how to ask
+for the library-free build on purpose:
+
+```bash
+make MOCK_ONLY=1
+```
+
+`MOCK_ONLY=1` omits both libcurl and OpenSSL. Mock providers and local
+execution work; every network provider and TLS channel refuses to start.
+`make test` builds and runs that configuration as a contract, so it cannot
+quietly stop compiling.
 
 ## Bundled actions
 
@@ -56,7 +68,9 @@ make -j4
 ```
 
 Produces the `bin/fclaw` runtime. Test and robustness targets may also place
-harness binaries under `bin/`.
+harness binaries under `bin/`. Passing `CFLAGS=` on the command line refines
+the base flags; it does not drop the feature defines and include paths the
+build detects.
 
 ## Verify
 

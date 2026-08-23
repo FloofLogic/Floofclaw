@@ -115,6 +115,17 @@ static const BudgetOverride kBudgetOverrides[] = {
   { "one_pass_floop_resumes_instead_of_rewinding_on_a_parked_subprocess", 5000 },
   { "looping_floop_still_rewinds_on_a_parked_subprocess", 5000 },
   { "generic_calls_large_write_file_payload_executes", 1000 },
+  /* Typed ingress: each drives real script agents and a subprocess action
+   * through complete runs, and the context test drives five. Process
+   * launch and durable-state fsyncs dominate. */
+  { "typed_event_gates_replies_and_stays_inspectable", 5000 },
+  { "typed_event_adds_no_chat_memory_or_correlation", 3000 },
+  { "typed_event_context_namespace_is_the_callers_choice", 8000 },
+  { "typed_event_survives_a_restart_before_intake", 3000 },
+  { "typed_publication_is_stable_and_conflicts_loudly", 3000 },
+  { "typed_ingress_rejects_reserved_and_malformed_publications", 2000 },
+  { "ungated_typed_event_completes_as_a_noop_run", 1000 },
+  { "legacy_user_message_ingress_is_unchanged", 1000 },
   { "memory_after_appends_only_user_asst_and_compact_skip_is_traced", 1000 },
   /* Builds a script-backed floop and drives its real subprocess through a
    * complete durable run; APFS fsync and process launch dominate wall time

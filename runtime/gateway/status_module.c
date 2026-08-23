@@ -86,11 +86,13 @@ int fc_status_build_json_with_reactor(const RtScheduler *scheduler,
               "  \"reactor\": {\n"
               "    \"module_errors\": %llu,\n"
               "    \"slow_ticks\": %llu,\n"
+              "    \"poll_overflows\": %llu,\n"
               "    \"modules\": [",
               getpid(), active_runs, waiting_action, completed, failed,
               active_jobs, inbox,
               (unsigned long long)fc_reactor_total_module_errors(reactor),
-              (unsigned long long)fc_reactor_total_slow_ticks(reactor)) != 0)
+              (unsigned long long)fc_reactor_total_slow_ticks(reactor),
+              (unsigned long long)fc_reactor_poll_overflows(reactor)) != 0)
     return -1;
 
   if (reactor) {

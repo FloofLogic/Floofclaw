@@ -15,11 +15,18 @@ uint64_t fc_now_ms(void) {
 void fc_pollset_clear(FcPollSet *ps) {
   if (!ps) return;
   ps->count = 0;
+  ps->overflows = 0;
 }
 
 int fc_pollset_add(FcPollSet *ps, int fd, short events, FcReactorModule *owner, void *tag) {
   if (!ps || fd < 0) return -1;
-  if (ps->count >= FC_POLL_MAX_FDS) return -1;
+  if (ps->count >= FC_POLL_MAX_FDS) {
+    /* Refused, and recorded. The caller may ignore this return value —
+     * most do — but the reactor still learns the descriptor went
+     * unwatched. */
+    ps->overflows++;
+    return -1;
+  }
   ps->entries[ps->count].fd = fd;
   ps->entries[ps->count].events = events;
   ps->entries[ps->count].owner = owner;
@@ -125,6 +132,17 @@ int fc_reactor_run(FcReactor *r, volatile sig_atomic_t *stop_flag, int default_t
         if (callback_rc != 0)
           record_callback_error(r, i, "collect_fds", callback_rc);
       }
+    }
+    if (ps.overflows > 0) {
+      /* An unwatched descriptor is a stall, not a crash, so it has to be
+       * loud on its own. Rate-limited the same way callback errors are. */
+      r->poll_overflows += ps.overflows;
+      if (report_count(r->poll_overflows))
+        fprintf(stderr,
+                "reactor: poll set full at %d descriptors; %llu not watched "
+                "this pass, %llu total\n",
+                FC_POLL_MAX_FDS, (unsigned long long)ps.overflows,
+                (unsigned long long)r->poll_overflows);
     }
     for (i = 0; i < ps.count; ++i) {
       pfds[i].fd = ps.entries[i].fd;
@@ -263,4 +281,8 @@ uint64_t fc_noop_module_tick_count(const FcReactorModule *m) {
   if (!m || !m->state) return 0;
   s = (const NoopState *)m->state;
   return s->tick_count;
+}
+
+uint64_t fc_reactor_poll_overflows(const FcReactor *r) {
+  return r ? r->poll_overflows : 0;
 }

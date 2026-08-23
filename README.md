@@ -22,7 +22,7 @@
 timers, API calls, and worker results into inspectable event-driven runs that
 survive restarts and continue until no work remains.
 
-**~635 KiB single binary · C11 · durable filesystem state · JSON/JSONL by
+**~668 KiB single binary · C11 · durable filesystem state · JSON/JSONL by
 default · macOS, Linux, and Android ARM64**
 
 ## 🚀 Quickstart
@@ -91,9 +91,9 @@ bash actions/common/web_read/build.sh
 ### 🐜 Native C, all the way down
 
 **The engine is written entirely in C from scratch.** No Node, Python, JVM,
-framework, or language runtime sits underneath it—just a **~635 KiB C
+framework, or language runtime sits underneath it—just a **~668 KiB C
 binary**. The full provider/TLS build links libcurl and OpenSSL 3; the
-mock-only build can omit both.
+mock-only build (`make MOCK_ONLY=1`) can omit both.
 
 ### 📂 The filesystem is the database
 
@@ -121,16 +121,16 @@ and traced without treating an opaque “agent turn” as truth.
 
 ## 📏 Small enough to audit
 
-Measurements from the 0.24.1 source release on arm64 macOS with Apple clang
-17. Run `make metrics` to reproduce them at the exact measured revision.
+Measurements from 0.28.0 on arm64 macOS with Apple clang 17. Run
+`make metrics` to reproduce them at the exact measured revision.
 
 | What | Measured result |
 | --- | ---: |
-| Stripped executable | **650,664 bytes (~635 KiB)** |
-| Runtime C/header source | **39,420 lines** |
-| Full provider/TLS build libraries | **2** — libcurl and OpenSSL 3; the mock-only build can omit both |
-| Mock-backed `hello` run | **0.124 s** |
-| Idle isolated gateway RSS | **~11.6 MiB** |
+| Stripped executable | **684,424 bytes (~668 KiB)** |
+| Runtime C/header source | **41,453 lines** |
+| Full provider/TLS build libraries | **2** — libcurl and OpenSSL 3; `make MOCK_ONLY=1` omits both |
+| Mock-backed `hello` run | **0.133 s** |
+| Idle isolated gateway RSS | **~7.6 MiB** |
 | Quiet supervision review | **exactly 1 model call** |
 
 ## 🧭 How it works
