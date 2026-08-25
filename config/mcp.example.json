@@ -1,0 +1,33 @@
+{
+  "_notes": {
+    "shape": "The same mcpServers map Claude Desktop and Claude Code use, so an existing config can be copied over.",
+    "command": "stdio transport: the server is spawned per call and exits after it.",
+    "url": "HTTP transport: one JSON-RPC POST per call, for plain stateless endpoints only. Real remote MCP servers (session ids, SSE) need the stdio transport through a proxy: command npx, args [-y, mcp-remote, <url>]. See docs/getting-started/mcp.md.",
+    "env": "Values are literal, or ${NAME} to take NAME from the action's environment at call time. Store the credential once per server with `printf %s \"$VALUE\" | scripts/mcp_secret.sh <server> <NAME>` \u2014 it copies the value into each generated action's own secret namespace, which is the only scope the gateway injects. The value never appears in this file, in argv, or in an artifact.",
+    "sync": "Run scripts/mcp_sync.sh after any change here, then restart the gateway.",
+    "secrets": "Re-run scripts/mcp_secret.sh after a sync that adds tools to a server, so the new actions get the credential too."
+  },
+  "mcpServers": {
+    "files": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/tmp"
+      ]
+    },
+    "github": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-github"
+      ],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+      }
+    },
+    "remote": {
+      "url": "https://mcp.example.test/rpc"
+    }
+  }
+}

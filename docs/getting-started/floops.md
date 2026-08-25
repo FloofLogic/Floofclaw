@@ -21,8 +21,8 @@ The committed configuration explicitly selects `hello`. If
 |---|---|---|---|---|
 | `hello` | Minimal conversational first run with a deterministic friendly reply. | The `hello` profile, using the built-in mock by default. | None; terminal, gateway, or any configured channel. | **Yes.** It is the fresh-clone default and needs no account. |
 | `companion` | Caring conversational companion with memory and durable-concern extraction; no work delegation. | The `responses` profile for three LLM agents. | None; terminal, gateway, or any configured channel. | No; choose it after configuring a real provider. |
-| `floofclaw` | Durable background-work manager for chat, scheduled affair reviews, and managed-operation results. | `floofclaw_manager` plus `responses` for memory compaction. | None intrinsically; configure a channel for an always-on bot. | No; it is the full advanced workflow. |
-| `openclaw` | One-main-agent coding/tool loop that can read, write, patch, run shell commands, and keep selecting actions across durable managed-operation result turns. | The `responses` profile. | None intrinsically. | No; start here only when you want the coding-action surface. |
+| `floofclaw` | Durable background-work manager for chat, scheduled affair reviews, and managed-operation results. | `floofclaw_manager` for the chat/review/result managers, `floofclaw_work_manager` for the bound work controller, and `responses` for memory compaction. | None intrinsically; configure a channel for an always-on bot. | No; it is the full advanced workflow. |
+| `openclaw` | One-main-agent coding/tool loop that can read, write, patch, run shell commands, and keep selecting actions across durable managed-operation result turns. | `default_gemini_flash` for `main_claw`, `responses` for memory compaction. | None intrinsically. | No; start here only when you want the coding-action surface. |
 | `fast` | Native no-op fixture used by integration, performance, chaos, and thrash harnesses. | None. | None. | No; test harness only. |
 | `thrash_cap` | Holds serialized work while the thrash harness proves the active-run cap. | None; one test script agent. | None. | No; test harness only. |
 
@@ -40,6 +40,7 @@ rejected before the message reaches the bus.
 
 To put `hello` on a real model, edit its single `hello` entry in
 `config/model_profiles.json`: set `provider` to a configured provider such as
-`gemini_key` and `model` to that provider's model ID. `companion` and
-`openclaw` share the `responses` profile. The [provider guide](providers.md)
-gives complete recipes.
+`gemini_key` and `model` to that provider's model ID. `companion` runs entirely
+on `responses`; `floofclaw` and `openclaw` each name their own profiles per
+agent, listed in the table above. Every floop's memory compactor uses
+`responses`. The [provider guide](providers.md) gives complete recipes.

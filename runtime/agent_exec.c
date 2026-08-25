@@ -257,7 +257,15 @@ static int build_agent_input(const RtContext *ctx, const char *agent_dir, const 
     if (agent_meta && (agent_meta->conversational_payload_only ||
                        agent_meta->affair_extraction_context_only ||
                        agent_meta->memory_compaction_context_only)) {
-      n = snprintf(out, out_len, "%s", rendered_prompt);
+      /* These agents get no action catalog, but they still get their
+       * projected input. A template that names {{json}} placed it
+       * already; one that does not gets the same appended section the
+       * general path below uses. Emitting the prompt alone here sent
+       * the model an instruction with nothing to act on. */
+      n = snprintf(out, out_len, "%s%s%s",
+                   rendered_prompt,
+                   has_json ? "" : "\n\n=== model input ===\n",
+                   has_json ? "" : model_input);
       if (n < 0 || (size_t)n >= out_len) {
         if (err) snprintf(err, err_len,
                           "agent %s complete prompt and action catalog exceed "
@@ -661,7 +669,9 @@ int rt_agent_normalize_output(RtContext *ctx, const RtStep *step,
   for (size_t i = 0; i < json_ref_array_size(&calls); ++i) {
     char name[RT_SMALL] = "", ename[RT_MED];
     char task_id[RT_SMALL] = "", etask[RT_MED] = "", item[RT_XL];
+    char call_task_id[RT_SMALL] = "";
     char work_rev_clause[RT_MED] = "";
+    JsonRef call_task_ref;
     char *args_raw = NULL;
     size_t cursor = 0;
     char key[RT_SMALL];
@@ -700,10 +710,26 @@ int rt_agent_normalize_output(RtContext *ctx, const RtStep *step,
       continue;
     while (json_ref_object_iter(&call, &cursor, key, sizeof(key), &value) == 1) {
       if (strcmp(key, "name") != 0 && strcmp(key, "action") != 0 &&
-          strcmp(key, "args") != 0) {
-        rt_log_rejected_agent_event(step->target, "invalid_agent_call", "call has non-intent key");
+          strcmp(key, "args") != 0 && strcmp(key, "task_id") != 0) {
+        char detail[RT_MED];
+        snprintf(detail, sizeof(detail),
+                 "call has non-intent key \"%s\"; a call is exactly {name, args}",
+                 key);
+        rt_log_rejected_agent_event(step->target, "invalid_agent_call", detail);
         return -1;
       }
+    }
+    /* task_id beside args instead of inside it. The binding is the same
+     * fact either way, and Gemini writes it there often enough that three
+     * repairs in a row have all carried it (Truly run_130). Accept the
+     * placement; refuse two values that disagree. */
+    if (json_ref_object_get(&call, "task_id", &call_task_ref) == 0 &&
+        (json_ref_string_copy(&call_task_ref, call_task_id,
+                              sizeof(call_task_id)) != 0 ||
+         !call_task_id[0])) {
+      rt_log_rejected_agent_event(step->target, "invalid_agent_call",
+                                  "call task_id must be a non-empty string");
+      return -1;
     }
     if (json_ref_object_get(&call, "args", &args_ref) == 0) {
       args_raw = normalize_call_args_dup(&args_ref, task_id, sizeof(task_id));
@@ -714,6 +740,15 @@ int rt_agent_normalize_output(RtContext *ctx, const RtStep *step,
     } else {
       args_raw = fc_xstrdup("{}");
       if (!args_raw) return -1;
+    }
+    if (call_task_id[0]) {
+      if (task_id[0] && strcmp(task_id, call_task_id) != 0) {
+        fc_xfree(args_raw);
+        rt_log_rejected_agent_event(step->target, "invalid_agent_call",
+                                    "call task_id disagrees with args.task_id");
+        return -1;
+      }
+      snprintf(task_id, sizeof(task_id), "%s", call_task_id);
     }
     if (agent_meta && agent_meta->bind_task_open_work) {
       if (task_id[0] && strcmp(task_id, bound_task_id) != 0) {

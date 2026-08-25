@@ -57,7 +57,7 @@ remain retrievable from git history):
   narrated the failure and recovered without losing a delivery.
 - **The suite itself:** at the pinned hardening-close commit, 20 unit + 80
   integration tests + one isolated, mock-provider-backed smoke. The current
-  0.25.0 release has 32 unit + 139 integration + the same representative
+  0.28.0 release has 37 unit + 177 integration + the same representative
   smoke, now hermetic through a committed local lookup fixture and a
   network-command guard.
   The project does not claim that every historical commit was green; the

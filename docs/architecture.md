@@ -295,7 +295,10 @@ with `state: "completed"`. A message by itself changes no task state, and
 `one_pass` only ends the run created for the current event. The older
 `autocomplete_message_task_on_send` feature remains independent for floops
 that deliberately want a successful message delivery to complete its input
-task.
+task. Failure is engine-owned either way: a run that fails or is canceled
+stamps its own input task and, for a continuation run, the task its
+runtime-owned triggering event bound it to (`docs/concepts/task-feature.md`,
+"Who closes an input task").
 
 Main Claw declares the generic agent-boundary
 `output_contract.kind: "task_action_or_finalize"`. Before any call is
@@ -308,6 +311,15 @@ job with the exact rejected response and a specific correction; Main Claw
 configures two such repairs. Exhaustion fails with
 `agent_decision_contract_exhausted`. The scheduler still only walks the floop;
 it does not infer whether prose sounds finished.
+
+The bounded repair itself is not contract machinery. A normalizer rejection —
+structural, not semantic — engages it for any LLM agent, whether or not a
+contract is declared; an agent without one carries a top-level
+`repair_attempts` budget instead (default 2) and exhausts as
+`agent_output_invalid`. The correction text differs accordingly: a contract
+agent is shown the two forms its contract accepts, and a contract-less agent
+is pointed back at its own prompt with the rejection named. Script and native
+agents are never re-run.
 
 `memory.before` recalls runtime-owned memory projection:
 `conversation_summary`, `recent_summary`, and the canonical `recent` raw
@@ -650,6 +662,16 @@ role schema.
 The runtime then checks `compact_after_messages` and `compact_after_tokens`.
 If due, it selects the compaction window, emits `memory_compaction_requested`,
 and lets the visible gated `memory.compact` phase summarize that exact range.
+
+The request travels as an event payload, is replayed into the run context, and
+is rendered into the compactor's input — three buffers of the same size. The
+selected window is therefore bounded by a payload budget
+(`RT_MEMORY_COMPACTION_PAYLOAD_MAX`), and a window that does not fit is
+narrowed by dropping its newest entries rather than refused. Compaction is
+incremental, so a narrowed round still advances `summary_covers_through_message_id`
+and the next round takes the rest. Refusing instead would wedge the context
+permanently: nothing compacts, the store keeps growing, and every later turn
+overflows harder.
 
 ## Agents
 
@@ -1296,8 +1318,16 @@ delivery ledger remain exactly-once. A request with no committed
 started outside-world action with no provable terminal outcome is never
 replayed and never inferred successful: recovery appends a correlated
 `work_blocked` with reason `ambiguous_completion`. Declared local actions may
-be replayed; action authors must therefore classify `outside_world`
-honestly. A remote channel send is not a transactional exactly-once boundary,
+be replayed, so a local action must be safe to dispatch twice under one
+request id. Every runtime intrinsic that mutates durable state stamps that
+request id into the event it appends and asks
+`rt_action_committed_effect` before appending: if the effect is already in
+the run's log, the replay commits nothing and reports what is durable. That
+is what makes replay eligibility safe rather than merely cheap — without it
+a crash in the window between `action_started` and the terminal would add a
+second note, a second counter delta, a whole second concern, or a second
+work task. Action authors must therefore classify `outside_world` honestly
+*and*, for a local action, key its effect on the request id. A remote channel send is not a transactional exactly-once boundary,
 though the committed message-delivery ledger remains the recognized
 reconciliation exception.
 
@@ -1443,7 +1473,7 @@ The tests should preserve these guarantees:
 
 Test style:
 
-- keep `make test` centered on 32 unit checks, 139 integration checks, and one
+- keep `make test` centered on 37 unit checks, 177 integration checks, and one
   representative hermetic, mock-provider-backed smoke, with focused shell
   probes for public CLI, app, recovery, and portability contracts
 - test contracts rather than implementation trivia, using unit/integration

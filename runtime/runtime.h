@@ -17,6 +17,11 @@
 #define RT_OPERATION_RESULT_TEXT_MAX 8192
 #define RT_EVENT_PAYLOAD_MAX 16384
 #define RT_XL 65536
+/* A memory compaction request travels as an event payload, is replayed
+ * into ctx->memory_compaction_json, and is then rendered into an agent
+ * input alongside the compactor's prompt -- every one of those is RT_XL.
+ * The reserve is the prompt and the wrapper that share the last buffer. */
+#define RT_MEMORY_COMPACTION_PAYLOAD_MAX (RT_XL - 4096)
 #define RT_TASK_WORKING_MEMORY_MAX RT_LARGE
 #define RT_DEFAULT_LOOP "floofclaw"
 #define RT_MAX_ACTIONS 64
@@ -38,6 +43,12 @@
  * uncommitted decision. Repairs are ordinary agent jobs/provider calls; this
  * is only the static configuration ceiling at the agent boundary. */
 #define RT_AGENT_OUTPUT_REPAIR_LIMIT 4
+/* Repair budget for an LLM agent that declares no output_contract. A
+ * normalizer rejection is a slip, not a verdict, and re-running the
+ * identical turn under floop retry_attempts costs the same model call
+ * while showing the model nothing about what was wrong. Matches the
+ * budget the one shipped output_contract declares. */
+#define RT_AGENT_DECISION_REPAIR_DEFAULT 2
 
 /* Durable state-store ceilings. These are boundary contracts, not private
  * array trivia: overflow behavior is exercised by the robustness suite. */
@@ -246,6 +257,9 @@ typedef struct {
    * with explicit feedback. Empty means the ordinary calls[] contract. */
   char output_contract[RT_SMALL];
   int output_repair_attempts;
+  /* Bounded repair budget for a normalizer rejection when no
+   * output_contract is declared. agent.json "repair_attempts". */
+  int decision_repair_attempts;
   int conversational_payload_only;
   int affair_extraction_context_only;
   int memory_compaction_context_only;
@@ -357,6 +371,8 @@ int rt_append_events_from_output(RtContext *ctx, const char *source, int source_
                                  const char *output_json,
                                  char *committed_out, size_t committed_len);
 void rt_log_rejected_agent_event(const char *source, const char *reason, const char *detail);
+const char *rt_last_rejected_agent_detail(void);
+void rt_clear_rejected_agent_detail(void);
 /* printf-style "error" event emitter. Builds payload `{"message":"<msg>"}`
  * with proper JSON escaping and forwards to rt_append_event with the
  * given source ("kernel" if NULL). Use this for message-only error
@@ -677,6 +693,7 @@ int rt_setup_main(int argc, char **argv);
 int rt_config_main(int argc, char **argv);
 int rt_version_main(int argc, char **argv);
 int rt_channel_main(int argc, char **argv);
+int rt_mcp_main(int argc, char **argv);
 int rt_chat_interactive(int argc, char **argv);
 int rt_auth_main(int argc, char **argv);
 int rt_bus_main(int argc, char **argv);

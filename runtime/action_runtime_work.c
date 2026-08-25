@@ -11,58 +11,34 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Recovery may replay a locally safe intrinsic after action_started when its
- * terminal event is missing. The append event carries the stable request id,
- * so that replay returns the already-committed result instead of duplicating
- * text. */
+/* working_memory_append's own reconciliation. It needs more than "did
+ * this request commit?": the committed text must be the text being
+ * appended, because a request id that matches while the payload does
+ * not means the id space is broken, and silently returning success
+ * would drop a real append. */
 static int working_memory_append_committed(const RtRun *r, const char *rid,
                                            const char *task_id,
                                            const char *incoming) {
-  char path[PATH_MAX];
-  char *text = NULL;
-  char *line;
-  int found = 0;
+  char payload[RT_XL];
+  JsonRef obj;
+  char event_task[RT_SMALL] = "";
+  char event_text[RT_TASK_WORKING_MEMORY_MAX] = "";
+  int found;
   if (!r || !rid || !*rid || !task_id || !incoming) return -1;
-  rt_event_log_path(&r->ctx, path, sizeof(path));
-  if (fs_read_text(path, &text, FS_READ_TEXT_DEFAULT_CAP) != 0 || !text)
-    return errno == ENOENT ? 0 : -1;
-  line = text;
-  while (line && *line) {
-    char *next = strchr(line, '\n');
-    JsonRef event, payload;
-    char type[RT_SMALL] = "", request_id[RT_SMALL] = "";
-    char event_task[RT_SMALL] = "";
-    char event_text[RT_TASK_WORKING_MEMORY_MAX] = "";
-    if (next) *next = '\0';
-    if (*line && json_ref_top_object(line, &event) == 0 &&
-        json_ref_object_get_string(&event, "type", type,
-                                   sizeof(type)) == 0 &&
-        strcmp(type, "task_working_memory_appended") == 0 &&
-        json_ref_object_get_object(&event, "payload", &payload) == 0 &&
-        json_ref_object_get_string(&payload, "request_id", request_id,
-                                   sizeof(request_id)) == 0 &&
-        strcmp(request_id, rid) == 0) {
-      if (json_ref_object_get_string(&payload, "task_id", event_task,
-                                     sizeof(event_task)) != 0 ||
-          json_ref_object_get_string(&payload, "working_memory", event_text,
-                                     sizeof(event_text)) != 0 ||
-          strcmp(event_task, task_id) != 0 ||
-          strcmp(event_text, incoming) != 0) {
-        found = -1;
-      } else {
-        found = 1;
-      }
-      break;
-    }
-    line = next ? next + 1 : NULL;
-  }
-  fc_xfree(text);
-  return found;
+  found = rt_action_committed_effect(r, "task_working_memory_appended", rid,
+                                     payload, sizeof(payload));
+  if (found <= 0) return found;
+  if (json_ref_first_object(payload, &obj) != 0 ||
+      json_ref_object_get_string(&obj, "task_id", event_task,
+                                 sizeof(event_task)) != 0 ||
+      json_ref_object_get_string(&obj, "working_memory", event_text,
+                                 sizeof(event_text)) != 0 ||
+      strcmp(event_task, task_id) != 0 ||
+      strcmp(event_text, incoming) != 0)
+    return -1;
+  return 1;
 }
 
-/* Append opaque, task-owned working text. Task identity is trusted routing
- * metadata stamped onto the pending request by the normalizer (or inherited
- * by a managed worker's action CLI), never an action content argument. */
 int fc_working_memory_append(RtRun *r, const char *rid,
                                     const RtActionDef *def,
                                     const char *args,
@@ -160,6 +136,8 @@ int fc_work(RtRun *r, const char *rid, const RtActionDef *def,
   char work[RT_LARGE] = "", done[RT_LARGE] = "", task_id[RT_SMALL] = "";
   char ework[RT_LARGE * 2], edone[RT_LARGE * 2], etask[RT_MED];
   char revision_clause[RT_LARGE] = "";
+  char erid[RT_MED];
+  char committed[RT_XL];
   long long prior_rev = 0, new_rev = 0;
   char payload[RT_XL];
   int pending_idx = -1;
@@ -171,6 +149,51 @@ int fc_work(RtRun *r, const char *rid, const RtActionDef *def,
              "{\"message\":\"args.work and args.done_when are required\"}");
     snprintf(result, result_len, "{}");
     return -1;
+  }
+  /* Replay reconciliation before target selection, because both
+   * branches are destructive under a second dispatch: create mints its
+   * task id from the run's event counter, so a replay adds a second
+   * work task to the context -- after which
+   * rt_task_select_unique_revisable_work reports ambiguity and every
+   * later work call in that context fails. Revise bumps work_rev again,
+   * inventing a revision no agent asked for. */
+  {
+    int prior = rt_action_committed_effect(r, "task_created", rid,
+                                           committed, sizeof(committed));
+    const char *kind = "created";
+    if (prior == 0) {
+      prior = rt_action_committed_effect(r, "task_updated", rid,
+                                         committed, sizeof(committed));
+      kind = "revised";
+    }
+    if (prior < 0) {
+      snprintf(error, error_len,
+               "{\"message\":\"work could not read its own committed effect\"}");
+      snprintf(result, result_len, "{}");
+      return -1;
+    }
+    if (prior > 0) {
+      JsonRef prior_obj;
+      char prior_task[RT_SMALL] = "";
+      long long prior_work_rev = 0;
+      if (json_ref_first_object(committed, &prior_obj) != 0 ||
+          json_ref_object_get_string(&prior_obj, "task_id", prior_task,
+                                     sizeof(prior_task)) != 0 ||
+          json_ref_object_get_long(&prior_obj, "work_rev",
+                                   &prior_work_rev) != 0) {
+        snprintf(error, error_len,
+                 "{\"message\":\"work committed effect is unreadable\"}");
+        snprintf(result, result_len, "{}");
+        return -1;
+      }
+      if (json_escape(prior_task, etask, sizeof(etask)) != 0) return -1;
+      snprintf(result, result_len,
+               "{\"task_id\":\"%s\",\"work_rev\":%lld,\"%s\":true,"
+               "\"recovered\":true}",
+               etask, prior_work_rev, kind);
+      snprintf(error, error_len, "null");
+      return 0;
+    }
   }
   /* The normalized action_request owns the explicit target. The runtime
    * function recovers it from the pending entry because RuntimeActionFn
@@ -238,28 +261,29 @@ int fc_work(RtRun *r, const char *rid, const RtActionDef *def,
           pending->trigger_event_id[0] &&
           strcmp(pending->task_id, task_id) == 0 &&
           strcmp(pending->action, "work") == 0) {
-        char erid[RT_MED], eaction[RT_MED], etrigger[RT_MED];
+        char eaction[RT_MED], etrigger[RT_MED];
         char econtext[RT_LARGE];
-        if (json_escape(pending->request_id, erid, sizeof(erid)) != 0 ||
-            json_escape(pending->action, eaction, sizeof(eaction)) != 0 ||
+        if (json_escape(pending->action, eaction, sizeof(eaction)) != 0 ||
             json_escape(pending->trigger_event_id, etrigger,
                         sizeof(etrigger)) != 0 ||
             json_escape(r->ctx.context_id, econtext, sizeof(econtext)) != 0)
           return -1;
         snprintf(revision_clause, sizeof(revision_clause),
                  ",\"revision_origin\":\"controller\","
-                 "\"parent_work_rev\":%lld,\"request_id\":\"%s\","
+                 "\"parent_work_rev\":%lld,"
                  "\"action\":\"%s\",\"trigger_event_id\":\"%s\","
                  "\"context_id\":\"%s\"",
-                 pending->work_rev, erid, eaction, etrigger, econtext);
+                 pending->work_rev, eaction, etrigger, econtext);
       }
     }
+    if (json_escape(rid ? rid : "", erid, sizeof(erid)) != 0) return -1;
     if (rt_append_event_format(
             &r->ctx, "task_updated", "action", payload, sizeof(payload), 0,
             "{\"task_id\":\"%s\",\"work_rev\":%lld,"
+            "\"request_id\":\"%s\","
             "\"state\":{\"status\":\"open\","
             "\"work\":\"%s\",\"done_when\":\"%s\"}%s}",
-            etask, prior_rev + 1, ework, edone, revision_clause) != 0) {
+            etask, prior_rev + 1, erid, ework, edone, revision_clause) != 0) {
       snprintf(error, error_len, "{\"message\":\"failed to append task_updated\"}");
       snprintf(result, result_len, "{}");
       return -1;
@@ -287,7 +311,8 @@ int fc_work(RtRun *r, const char *rid, const RtActionDef *def,
     snprintf(task_id, sizeof(task_id), "task_%s_%06d", r->ctx.run_id, event_seq);
     snprintf(event_id, sizeof(event_id), "evt_%s_%06d", r->ctx.run_id, event_seq);
     if (json_escape(context, ectx, sizeof(ectx)) != 0 ||
-        json_escape(task_id, etask, sizeof(etask)) != 0) return -1;
+        json_escape(task_id, etask, sizeof(etask)) != 0 ||
+        json_escape(rid ? rid : "", erid, sizeof(erid)) != 0) return -1;
     /* Work admitted from an affair review durably carries its origin
      * affair through task state, so a later operation_result turn can
      * correlate exactly instead of matching affair prose. Replay-safe:
@@ -302,11 +327,11 @@ int fc_work(RtRun *r, const char *rid, const RtActionDef *def,
     if (rt_append_event_format(
             &r->ctx, "task_created", "action", payload, sizeof(payload), 0,
             "{\"task_id\":\"%s\",\"context_id\":\"%s\",\"kind\":\"work\","
-            "\"work_rev\":1,"
+            "\"work_rev\":1,\"request_id\":\"%s\","
             "\"input\":null,\"created_event_id\":\"%s\",\"created_ms\":%lld,"
             "\"state\":{%s\"status\":\"open\",\"work\":\"%s\",\"done_when\":\"%s\","
             "\"artifacts\":[],\"updated_ms\":%lld}}",
-            etask, ectx, event_id, ms, affair_clause, ework, edone, ms) != 0) {
+            etask, ectx, erid, event_id, ms, affair_clause, ework, edone, ms) != 0) {
       snprintf(error, error_len, "{\"message\":\"failed to append task_created\"}");
       snprintf(result, result_len, "{}");
       return -1;
@@ -365,6 +390,54 @@ static int terminalize_bound_work(RtRun *r, const char *rid,
     return -1;
   }
   pending = &r->pending_actions[pidx];
+  /* Replay reconciliation. The payload already carries the request id,
+   * and the terminal also prepares a work_outcome publication, so a
+   * second dispatch would publish the same outcome twice. Without this
+   * a replay instead fails as a stale binding -- safe, but it stamps a
+   * failed terminal on work that actually completed. */
+  {
+    char *prior_payload = (char *)fc_xmalloc(RT_XL);
+    int prior;
+    if (!prior_payload) {
+      snprintf(error, error_len,
+               "{\"message\":\"terminal work scratch allocation failed\"}");
+      snprintf(result, result_len, "{}");
+      return -1;
+    }
+    prior = rt_action_committed_effect(r, event_type, rid,
+                                       prior_payload, RT_XL);
+    if (prior > 0) {
+      JsonRef prior_obj;
+      char prior_task[RT_SMALL] = "";
+      long long prior_rev = 0;
+      int ok = json_ref_first_object(prior_payload, &prior_obj) == 0 &&
+               json_ref_object_get_string(&prior_obj, "task_id", prior_task,
+                                          sizeof(prior_task)) == 0 &&
+               json_ref_object_get_long(&prior_obj, "work_rev",
+                                        &prior_rev) == 0;
+      fc_xfree(prior_payload);
+      if (!ok) {
+        snprintf(error, error_len,
+                 "{\"message\":\"terminal work committed effect is unreadable\"}");
+        snprintf(result, result_len, "{}");
+        return -1;
+      }
+      if (json_escape(prior_task, etask, sizeof(etask)) != 0) return -1;
+      snprintf(result, result_len,
+               "{\"task_id\":\"%s\",\"work_rev\":%lld,\"status\":\"%s\","
+               "\"recovered\":true}",
+               etask, prior_rev, status);
+      snprintf(error, error_len, "null");
+      return 0;
+    }
+    fc_xfree(prior_payload);
+    if (prior < 0) {
+      snprintf(error, error_len,
+               "{\"message\":\"terminal work could not read its own committed effect\"}");
+      snprintf(result, result_len, "{}");
+      return -1;
+    }
+  }
   large = (char *)fc_xcalloc(5U, RT_XL);
   if (!large) {
     snprintf(error, error_len,

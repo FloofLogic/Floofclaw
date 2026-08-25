@@ -153,8 +153,37 @@ exact current `task.update(state:"completed")` without a substantive action.
 Validation happens before any event or delivery is committed. An invalid
 response is preserved, and the same agent phase receives it with a specific
 correction through another ordinary provider call. `repair_attempts` accepts
-`0` through `4`; exhaustion fails the run. Events without a task binding, such
-as an affair review, retain the ordinary calls-array contract.
+`0` through `4`; exhaustion fails the run as
+`agent_decision_contract_exhausted`. Events without a task binding, such as an
+affair review, retain the ordinary calls-array contract.
+
+### Repair without a contract
+
+The bounded repair is not the contract's. Any LLM agent whose output the
+normalizer rejects — a stray key beside `args`, a missing `name`, a call the
+agent is not allowed — gets the same treatment: the rejected response is
+preserved, the phase re-runs as another ordinary provider call, and the prompt
+names what the normalizer objected to. An agent that declares no contract sets
+its budget at the top level of `agent.json`:
+
+```json
+{
+  "executor": "llm",
+  "repair_attempts": 2
+}
+```
+
+The default is `2`, the same budget the shipped contract declares; `0` through
+`4` are accepted, and `0` restores the old behavior of failing on the first
+rejection. It is an error to set this key alongside an `output_contract`, which
+carries its own `repair_attempts`, or on a non-LLM agent — a script or native
+agent is deterministic, so re-running the identical turn buys nothing.
+
+Exhausting a contract-less budget fails the run as `agent_output_invalid`,
+the same code that shape produced before, with the normalizer's own detail in
+the message. Without this, one slip ended the turn and floop `retry_attempts`
+re-ran the identical turn at full model price with nothing said about what was
+wrong.
 
 ## Bound Work Controller Policy
 

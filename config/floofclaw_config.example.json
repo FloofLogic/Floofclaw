@@ -20,6 +20,34 @@
     },
     "cross_context_read": true
   },
+  "appliance": {
+    "_notes": {
+      "what": "Housekeeping cadences and retention counts for the gateway janitor module. The whole block is optional; every task has a safe default and an absent block means the defaults below are already in effect.",
+      "disabling": "check_interval_ms: 0 or keep: 0 disables that one task.",
+      "runs": "workspace/runs/<run_id>/ — a run directory is removed only when its persisted status is terminal; a running or waiting run is never touched, however old.",
+      "worker_stores": "codex_ops, claude_ops, and hermes_ops each hold one entry per managed-worker operation under workspace/logs/. Count-only retention keeps the newest `keep` entries, except that an operation still running in workspace/memory/state/operations.json is never removed.",
+      "bus_processed": "workspace/bus/processed/ — envelopes already consumed by intake.",
+      "tasks_archive": "workspace/memory/state/tasks_archive.jsonl — trimmed by age, not count.",
+      "logs": "JSONL rotation. check_interval_ms is one cadence for every target; per-target max_size_bytes, keep, and compress (\"gzip\" or \"none\") live under targets.<name>. Targets: bus, deliveries, narration, llm_usage, rejected_events, gateway."
+    },
+    "runs": { "keep": 500, "check_interval_ms": 300000 },
+    "codex_ops": { "keep": 200, "check_interval_ms": 300000 },
+    "claude_ops": { "keep": 200, "check_interval_ms": 300000 },
+    "hermes_ops": { "keep": 200, "check_interval_ms": 300000 },
+    "bus_processed": { "keep": 10000, "check_interval_ms": 300000 },
+    "tasks_archive": { "keep_days": 90, "check_interval_ms": 3600000 },
+    "logs": {
+      "check_interval_ms": 60000,
+      "targets": {
+        "bus": { "max_size_bytes": 67108864, "keep": 5, "compress": "gzip" },
+        "deliveries": { "max_size_bytes": 67108864, "keep": 5, "compress": "gzip" },
+        "narration": { "max_size_bytes": 67108864, "keep": 5, "compress": "gzip" },
+        "llm_usage": { "max_size_bytes": 67108864, "keep": 5, "compress": "gzip" },
+        "rejected_events": { "max_size_bytes": 67108864, "keep": 5, "compress": "gzip" },
+        "gateway": { "max_size_bytes": 67108864, "keep": 5, "compress": "gzip" }
+      }
+    }
+  },
   "_force_disable_notes": {
     "what": "Action ids this deployment refuses to run. Masked actions stay registered — floop allowlists keep declaring intent and still validate — but they are omitted from every agent catalog and rejected at dispatch.",
     "why_shipped_populated": "Each listed action needs operator setup before it can work (a built helper, credentials, or an installed CLI). Complete the setup, then delete the id from this list to enable it. See each action's SETUP_<NAME>.md or README under actions/common/.",
@@ -97,6 +125,24 @@
       ],
       "token_key": "discord_token",
       "home_channel_id": "YOUR_HOME_CHANNEL_ID"
+    },
+    "telegram": {
+      "_notes": {
+        "enabled": "Connect the Telegram adapter when the gateway starts.",
+        "allow_dms": "Accept private chats with the bot.",
+        "allow_bots": "Accept messages authored by other bots. Leave false for normal installs.",
+        "allowed_chat_ids": "Group and supergroup chat IDs the bot may read and answer in; group traffic is refused unless listed.",
+        "token_key": "Auth-store key containing the BotFather token; this is a key name, never the token itself.",
+        "tls_verify": "Verify the api.telegram.org certificate. Leave true."
+      },
+      "enabled": true,
+      "allow_dms": true,
+      "allow_bots": false,
+      "allowed_chat_ids": [
+        "YOUR_CHAT_ID"
+      ],
+      "token_key": "telegram_token",
+      "tls_verify": true
     }
   }
 }

@@ -211,6 +211,17 @@ static int agent_output_repair_attempt(const char *output_path,
   return 0;
 }
 
+/* One bounded repair budget for a rejected decision. A declared contract
+ * keeps its own number exactly; every other LLM agent gets the top-level
+ * repair_attempts budget. A script or native agent is never re-run: its
+ * output is deterministic, so a second identical turn buys nothing. */
+static int decision_repair_budget(const RtAgentMeta *meta) {
+  if (!meta || !meta->executor[0] || strcmp(meta->executor, "llm") != 0)
+    return 0;
+  return meta->output_contract[0] ? meta->output_repair_attempts
+                                  : meta->decision_repair_attempts;
+}
+
 static int apply_agent_output_repair(const RtStep *step,
                                      const RtAgentMeta *meta,
                                      RtAgentInvocation *inv) {
@@ -219,7 +230,7 @@ static int apply_agent_output_repair(const RtStep *step,
   char *repaired = NULL;
   int seq = 0, attempt = 0;
   int n;
-  if (!step || !meta || !inv || !meta->output_contract[0]) return 0;
+  if (!step || !meta || !inv || decision_repair_budget(meta) <= 0) return 0;
   if (agent_output_repair_attempt(inv->out_path, &attempt,
                                   marker_reason,
                                   sizeof(marker_reason)) != 0)
@@ -234,6 +245,10 @@ static int apply_agent_output_repair(const RtStep *step,
     goto fail;
   repaired = (char *)fc_xmalloc(RT_XL);
   if (!repaired) goto fail;
+  /* The contract's correction text prescribes the two shapes that
+   * contract enforces. An agent that declares no contract is answerable
+   * to its own prompt, so name the rejection and point back at that
+   * instead of demanding a form it was never asked for. */
   n = snprintf(
       repaired, RT_XL,
       "%s\n\n"
@@ -242,13 +257,18 @@ static int apply_agent_output_repair(const RtStep *step,
       "or delivered.\n"
       "Reason: %s\n"
       "Previous response (exactly as returned):\n%s\n"
-      "Correction required: return one JSON object using exactly one of "
-      "these forms. CONTINUE = one substantive action, optionally one "
-      "message and one working_memory_append, with no task.update. "
-      "FINALIZE = one final message plus task.update for the exact current "
-      "task_id with state completed, with no substantive action or "
-      "working_memory_append. A message alone is invalid.\n",
-      inv->input, attempt, marker_reason, previous);
+      "Correction required: %s\n",
+      inv->input, attempt, marker_reason, previous,
+      meta->output_contract[0]
+          ? "return one JSON object using exactly one of these forms. "
+            "CONTINUE = one substantive action, optionally one message and "
+            "one working_memory_append, with no task.update. FINALIZE = one "
+            "final message plus task.update for the exact current task_id "
+            "with state completed, with no substantive action or "
+            "working_memory_append. A message alone is invalid."
+          : "return one JSON object that follows your prompt exactly and "
+            "corrects the reason above. Do not repeat the rejected "
+            "response.");
   if (n < 0 || n >= RT_XL) goto fail;
   snprintf(inv->input, sizeof(inv->input), "%s", repaired);
   if (fs_write_text(inv->in_path, inv->input) != 0) goto fail;
@@ -263,9 +283,11 @@ fail:
 
 static int write_agent_decision_rejection(const RtStep *step,
                                           const RtJob *job,
+                                          const RtAgentMeta *meta,
                                           const char *reason,
                                           int repair_attempt,
                                           int schedule_next) {
+  char contract[RT_SMALL * 2];
   char dir[PATH_MAX], rejected_path[PATH_MAX], next_path[PATH_MAX];
   char ereason[RT_LARGE * 2], eartifact[PATH_MAX * 2];
   char body[RT_LARGE * 3];
@@ -277,24 +299,30 @@ static int write_agent_decision_rejection(const RtStep *step,
     return -1;
   artifact = strstr(job->out_path, "agent_outputs/");
   if (!artifact) artifact = job->out_path;
+  /* Name the contract that rejected this, or null when the normalizer
+   * did it on an agent that declares none. The artifact is evidence. */
+  if (meta && meta->output_contract[0])
+    snprintf(contract, sizeof(contract), "\"%s\"", meta->output_contract);
+  else
+    snprintf(contract, sizeof(contract), "null");
   if (json_escape(artifact, eartifact, sizeof(eartifact)) != 0 ||
       snprintf(rejected_path, sizeof(rejected_path), "%s.rejected.json",
                job->out_path) >= (int)sizeof(rejected_path) ||
       snprintf(body, sizeof(body),
-               "{\"contract\":\"task_action_or_finalize\","
+               "{\"contract\":%s,"
                "\"repair_attempt\":%d,\"reason\":\"%s\","
                "\"response_artifact\":\"%s\","
                "\"executed\":false,\"delivered\":false}\n",
-               repair_attempt, ereason, eartifact) >= (int)sizeof(body) ||
+               contract, repair_attempt, ereason, eartifact) >= (int)sizeof(body) ||
       fs_write_text_atomic(rejected_path, body) != 0)
     return -1;
   if (!schedule_next) return 0;
   if (snprintf(next_path, sizeof(next_path), "%s/%03d_%s.repair.json",
                dir, seq + 1, step->id) >= (int)sizeof(next_path) ||
       snprintf(body, sizeof(body),
-               "{\"contract\":\"task_action_or_finalize\","
+               "{\"contract\":%s,"
                "\"attempt\":%d,\"reason\":\"%s\"}\n",
-               repair_attempt + 1, ereason) >= (int)sizeof(body) ||
+               contract, repair_attempt + 1, ereason) >= (int)sizeof(body) ||
       fs_write_text_atomic(next_path, body) != 0)
     return -1;
   return 0;
@@ -599,6 +627,7 @@ static int reject_or_repair_decision(RtRun *r, const RtStep *step,
   char marker_reason[RT_LARGE] = "";
   int repair_attempt = 0;
   int can_repair;
+  int budget;
   if (agent_output_repair_attempt(job->out_path, &repair_attempt,
                                   marker_reason,
                                   sizeof(marker_reason)) != 0) {
@@ -608,8 +637,9 @@ static int reject_or_repair_decision(RtRun *r, const RtStep *step,
         job->job_id);
     return -1;
   }
-  can_repair = repair_attempt < meta->output_repair_attempts;
-  if (write_agent_decision_rejection(step, job, reason,
+  budget = decision_repair_budget(meta);
+  can_repair = repair_attempt < budget;
+  if (write_agent_decision_rejection(step, job, meta, reason,
                                      repair_attempt,
                                      can_repair) != 0) {
     rt_run_set_error_code(
@@ -631,8 +661,9 @@ static int reject_or_repair_decision(RtRun *r, const RtStep *step,
       return -1;
     }
     snprintf(detail, sizeof(detail),
-             "output contract rejected decision; repair %d of %d: %s",
-             repair_attempt + 1, meta->output_repair_attempts, reason);
+             "%s rejected decision; repair %d of %d: %s",
+             meta->output_contract[0] ? "output contract" : "output normalizer",
+             repair_attempt + 1, budget, reason);
     (void)rt_write_trace(&r->ctx, step->id, detail);
     r->phase_index--;
     if (rt_run_persist_state(r) != 0) {
@@ -643,6 +674,16 @@ static int reject_or_repair_decision(RtRun *r, const RtStep *step,
       return -1;
     }
     return 0;
+  }
+  /* A contract-less agent has no contract to exhaust. Keep the terminal
+   * code operators already read for that shape; only the number of tries
+   * before it changed. */
+  if (!meta->output_contract[0]) {
+    rt_run_set_error_code(
+        r, FC_ERROR_MALFORMED, "agent_output_invalid",
+        reason[0] ? reason : "Agent output was missing or malformed.",
+        job->job_id);
+    return -1;
   }
   rt_run_set_error_code(
       r, FC_ERROR_MALFORMED, "agent_decision_contract_exhausted",
@@ -706,19 +747,27 @@ int rt_agent_runner_complete_job(RtRun *r, RtJob *job) {
     if (contract_rc < 0)
       return reject_or_repair_decision(r, step, job, meta, reason);
   }
+  rt_clear_rejected_agent_detail();
   if (!step ||
       rt_agent_append_output_file(&r->ctx, step, meta ? meta->executor : "script",
                                   meta, job->bound_task_id,
                                   job->bound_work_rev,
                                   job->out_path, normalized, sizeof(normalized)) != 0) {
     /* A structurally malformed decision (stray call key, missing name)
-     * gets the same bounded repair as a contract violation; the model
-     * sees its rejected response, so a generic reason suffices. */
-    if (step && meta && meta->output_contract[0])
-      return reject_or_repair_decision(
-          r, step, job, meta,
-          "response was not the correct output format, please follow "
-          "your prompt exactly");
+     * gets the same bounded repair as a contract violation. Showing the
+     * model its rejected response is not enough: Truly's main_claw
+     * repeated the identical shape through every repair attempt while the
+     * reason said only "not the correct output format". Name the
+     * rejection the normalizer just logged. */
+    if (step && meta && decision_repair_budget(meta) > 0) {
+      char why[RT_LARGE];
+      const char *detail = rt_last_rejected_agent_detail();
+      snprintf(why, sizeof(why),
+               "response was not the correct output format%s%s; please "
+               "follow your prompt exactly",
+               detail && *detail ? ": " : "", detail && *detail ? detail : "");
+      return reject_or_repair_decision(r, step, job, meta, why);
+    }
     rt_run_set_error_code(r, FC_ERROR_MALFORMED, "agent_output_invalid",
                           "Agent output was missing or malformed.", job->job_id);
     return -1;

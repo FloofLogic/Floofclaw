@@ -61,9 +61,13 @@ Omit a limit for no local cap; `0` deliberately blocks calls. These are local
 guardrails, not a claim about the account's server-side quota.
 
 A model profile may also declare `"effort": "low"`, `"medium"`, or
-`"high"`. For Gemini 3 models the transport emits that value as
-`generationConfig.thinkingConfig.thinkingLevel`; profiles without `effort`
-use the legacy `thinkingBudget: 0` request. See
+`"high"`. The Gemini transport emits that value as
+`generationConfig.thinkingConfig.thinkingLevel` for **any** Gemini profile
+that sets it, not only Gemini 3 models — the shipped `floofclaw_manager`
+profile sends it on gemini-2.5-flash. Profiles without `effort` use the
+legacy `thinkingBudget: 0` request. The engine does not whitelist values or
+models; an unsupported combination fails loudly at the API, with the request
+artifact on disk. See
 [Executors and model profiles](../concepts/executors.md#model-effort).
 
 ## OpenAI

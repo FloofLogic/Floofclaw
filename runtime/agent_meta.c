@@ -181,6 +181,7 @@ int rt_agent_read_listen_config(const char *floop_name, const char *agent_id, co
   meta->autocomplete_message_task_on_send = meta->conversational_payload_only = 0;
   meta->output_contract[0] = '\0';
   meta->output_repair_attempts = 0;
+  meta->decision_repair_attempts = RT_AGENT_DECISION_REPAIR_DEFAULT;
   meta->affair_extraction_context_only = 0;
   meta->memory_compaction_context_only = 0;
   meta->can_write_memory = 0;
@@ -251,6 +252,46 @@ int rt_agent_read_listen_config(const char *floop_name, const char *agent_id, co
         }
       }
       meta->output_repair_attempts = (int)repair_attempts;
+    }
+  }
+  {
+    /* Top-level repair_attempts is the budget for an agent that declares
+     * no output_contract. Under a contract the contract's own value wins
+     * and this key is meaningless, so say so rather than silently
+     * preferring one of two numbers the operator wrote down. */
+    JsonRef repair_value;
+    long long repair_attempts = 0;
+    if (json_ref_object_get(&root, "repair_attempts", &repair_value) == 0) {
+      if (json_ref_get_long(&repair_value, &repair_attempts) != 0 ||
+          repair_attempts < 0 ||
+          repair_attempts > RT_AGENT_OUTPUT_REPAIR_LIMIT) {
+        if (err) snprintf(
+            err, err_len,
+            "agent %s has invalid repair_attempts; fix: use an integer "
+            "from 0 through %d in %s",
+            agent_id, RT_AGENT_OUTPUT_REPAIR_LIMIT, path);
+        free(text);
+        return -1;
+      }
+      if (meta->output_contract[0]) {
+        if (err) snprintf(
+            err, err_len,
+            "agent %s declares both output_contract and a top-level "
+            "repair_attempts; fix: keep output_contract.repair_attempts "
+            "and remove the top-level key from %s",
+            agent_id, path);
+        free(text);
+        return -1;
+      }
+      if (executor && strcmp(executor, "llm") != 0) {
+        if (err) snprintf(err, err_len,
+                          "agent %s declares repair_attempts but is not "
+                          "executor=llm; fix: remove repair_attempts from %s",
+                          agent_id, path);
+        free(text);
+        return -1;
+      }
+      meta->decision_repair_attempts = (int)repair_attempts;
     }
   }
   {

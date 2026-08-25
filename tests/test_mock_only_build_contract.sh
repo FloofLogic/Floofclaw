@@ -6,10 +6,17 @@
 # libraries present. This compiles and RUNS the advertised build.
 set -euo pipefail
 
+# This script drives its own `make` invocations. Under `make -jN test`,
+# inherited MAKEFLAGS carry the parent's jobserver into them, and make
+# then prints "warning: -jN forced in submake" — which the warning-clean
+# check below would misread as a compiler warning. These are fresh,
+# self-contained builds; sever them from the parent make entirely.
+unset MAKEFLAGS MFLAGS
+
 fail() { printf 'mock-only build contract: %s\n' "$1" >&2; exit 1; }
 
 # 1. Absent libcurl is a refusal, not a silent degraded binary.
-if make CURL_LIBS= CURL_CFLAGS= -n >/dev/null 2>/tmp/fclaw_mockonly_err.$$; then
+if make CURL_LIBS= CURL_CFLAGS= -Bn >/dev/null 2>/tmp/fclaw_mockonly_err.$$; then
   fail "a build with no libcurl and no MOCK_ONLY=1 was accepted"
 fi
 grep -Fq 'make MOCK_ONLY=1' /tmp/fclaw_mockonly_err.$$ ||
@@ -17,13 +24,15 @@ grep -Fq 'make MOCK_ONLY=1' /tmp/fclaw_mockonly_err.$$ ||
 rm -f /tmp/fclaw_mockonly_err.$$
 
 # 2. A command-line CFLAGS must not disarm the feature defines.
-make CFLAGS='-std=c11 -O0' -n 2>/dev/null | grep -Fq -- '-DFCLAW_HAVE_LIBCURL' ||
+#    -Bn, not -n: a dry run over an already-current tree prints no recipe at
+#    all, which would pass every grep below for the wrong reason.
+make CFLAGS='-std=c11 -O0' -Bn 2>/dev/null | grep -Fq -- '-DFCLAW_HAVE_LIBCURL' ||
   fail "a command-line CFLAGS dropped -DFCLAW_HAVE_LIBCURL"
 
 # 3. MOCK_ONLY=1 omits both optional libraries...
-make MOCK_ONLY=1 -n 2>/dev/null | grep -Fq -- '-DFCLAW_HAVE_LIBCURL' &&
+make MOCK_ONLY=1 -Bn 2>/dev/null | grep -Fq -- '-DFCLAW_HAVE_LIBCURL' &&
   fail "MOCK_ONLY=1 still defined FCLAW_HAVE_LIBCURL"
-make MOCK_ONLY=1 -n 2>/dev/null | grep -Fq -- '-DFCLAW_HAVE_OPENSSL' &&
+make MOCK_ONLY=1 -Bn 2>/dev/null | grep -Fq -- '-DFCLAW_HAVE_OPENSSL' &&
   fail "MOCK_ONLY=1 still defined FCLAW_HAVE_OPENSSL"
 
 # 4. ...and the result compiles clean and runs the shipped mock floop.
@@ -51,6 +60,14 @@ if [ -n "$linked" ]; then
 fi
 
 mkdir -p workspace
+# The checked-in config may default to a deployment floop that needs a real
+# model (a bot branch); this proof only needs the mock-backed hello floop.
+python3 - <<'PY'
+import json
+p = "config/floofclaw_config.json"
+cfg = json.load(open(p)); cfg["default_floop"] = "hello"
+json.dump(cfg, open(p, "w"), indent=2)
+PY
 out="$(./bin/fclaw run -a --text 'hello from the mock-only build')" ||
   fail "the mock-only binary could not complete a run"
 case "$out" in

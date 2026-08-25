@@ -204,7 +204,53 @@ cfg_set default_floop "$floop"
 
 # ------------------------------------------------------------- 5. channels
 hdr 5/7 "Channels"
-if yesno "enable discord?" n; then
+
+# Channels are chosen at build time, so a channel the operator wants may
+# simply not be in this binary. Offer the rebuild rather than letting them
+# configure something that will refuse to start. The full build is seconds.
+adapter_built() {
+  "$FCLAW" adapters -a 2>/dev/null | grep -q "\"id\":\"$1\""
+}
+ensure_adapter() {
+  local want="$1" have
+  adapter_built "$want" && return 0
+  bad "this binary was built without the $want adapter"
+  have="$("$FCLAW" adapters -a 2>/dev/null |
+    tr ',' '\n' | sed -n 's/.*"id":"\([^"]*\)".*/\1/p' | tr '\n' ' ')"
+  note "it currently contains: ${have:-none}"
+  if yesno "rebuild with $want included?" y; then
+    if make -j4 FCLAW_ADAPTERS="$(printf '%s%s' "$have" "$want")" >/dev/null 2>&1; then
+      good "rebuilt with $want"
+      return 0
+    fi
+    bad "rebuild failed; run it yourself: make FCLAW_ADAPTERS=\"$have$want\""
+    return 1
+  fi
+  note "skipping $want; enabling it without rebuilding would refuse to start"
+  return 1
+}
+
+if yesno "enable telegram?" n && ensure_adapter telegram; then
+  read -rs -p "  ${CYA}${ARROW}${RST} telegram bot token from BotFather (input hidden): " token; echo
+  [ -n "$token" ] || die "empty token"
+  printf %s "$token" | "$FCLAW" auth set-stdin telegram_token >/dev/null
+  unset token
+  good "stored secrets/endpoint:telegram_token"
+  if yesno "  accept direct messages?" y; then
+    cfg_set channels.telegram.allow_dms true
+  else
+    cfg_set channels.telegram.allow_dms false
+  fi
+  ask tgchat "group chat_id (blank for DMs only)" "$(cfg_get channels.telegram.allowed_chat_ids)"
+  if [ -n "$tgchat" ] && [ "$tgchat" != "null" ]; then
+    cfg_set channels.telegram.allowed_chat_ids "[\"$tgchat\"]"
+  fi
+  cfg_set channels.telegram.token_key telegram_token
+  cfg_set channels.telegram.enabled true
+  note "READY is proven in step 7"
+fi
+
+if yesno "enable discord?" n && ensure_adapter discord; then
   read -rs -p "  ${CYA}${ARROW}${RST} discord bot token (input hidden): " token; echo
   [ -n "$token" ] || die "empty token"
   printf %s "$token" | "$FCLAW" auth set-stdin discord_token >/dev/null

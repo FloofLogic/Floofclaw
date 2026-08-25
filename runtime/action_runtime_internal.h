@@ -26,6 +26,22 @@ int fc_manage_claude(RtRun *, const char *, const RtActionDef *,
 int rt_action_resolve_workspace_path(const RtRun *, const char *,
                                      char *, size_t, char *, size_t);
 
+/* Replay reconciliation for a local (outside_world:false) intrinsic.
+ *
+ * A crash between action_started and the action's terminal leaves the
+ * request replay-eligible, and recovery re-dispatches it under the same
+ * stable request id. If the mutation event already committed, appending
+ * it again would double the effect: a second note, a second counter
+ * delta, a second affair, a second work revision. Every mutation
+ * intrinsic therefore stamps its request id into the event it appends
+ * and asks this first.
+ *
+ * Returns 1 with the committed payload copied into payload_out, 0 when
+ * this request has not committed that event, -1 on error. */
+int rt_action_committed_effect(const RtRun *r, const char *type,
+                               const char *request_id,
+                               char *payload_out, size_t payload_len);
+
 int fc_work(RtRun *, const char *, const RtActionDef *,
             const char *, char *, size_t, char *, size_t);
 int fc_working_memory_append(RtRun *, const char *, const RtActionDef *,

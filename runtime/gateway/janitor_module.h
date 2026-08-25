@@ -13,8 +13,17 @@
  *
  *   runs_prune            workspace/runs/                 (§1)
  *   codex_ops_prune       workspace/logs/codex_ops/       (§1 same shape)
+ *   claude_ops_prune      workspace/logs/claude_ops/      (§1 same shape)
+ *   hermes_ops_prune      workspace/logs/hermes_ops/      (§1 same shape)
  *   bus_processed_prune   workspace/bus/processed/        (§5)
  *   tasks_archive_prune   workspace/memory/state/         (§7)
+ *
+ * The three managed-worker stores share one task implementation and one
+ * config shape (appliance.<store>.keep / .check_interval_ms). A worker
+ * added later that writes one entry per operation belongs in that table
+ * rather than in a task of its own. They also share the one exception to
+ * count-only retention: an entry whose operation is still running in
+ * workspace/memory/state/operations.json is never removed.
  *
  * Later commits add JSONL rotation and gateway.log SIGHUP rotation
  * to the same module (§§2, 4).
@@ -31,6 +40,11 @@ void fc_janitor_module_destroy(FcReactorModule *m);
 int fc_janitor_test_scratch_reentry_guard(void);
 int fc_janitor_test_runs_prune(const char *path, int keep);
 int fc_janitor_test_bus_processed_prune(const char *path, int keep);
+/* Run one managed-worker store's retention directly. `op_prefix` is the
+ * entry-name prefix stripped before "op_" rebuilds the operation id
+ * ("" when the entry name is already the id). */
+int fc_janitor_test_worker_store_prune(const char *path, const char *op_prefix,
+                                       int keep);
 int fc_janitor_test_bus_scan_cap(void);
 /* Run the bounded oldest-first selection over `dir` with an explicit cap
  * and report the chosen names, comma-joined, in the order the pruner walks

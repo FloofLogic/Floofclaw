@@ -1,4 +1,5 @@
 #include "task_internal.h"
+#include "bus/bus.h"
 #include "support/scratch_guard.h"
 #include "support/timing.h"
 
@@ -802,10 +803,23 @@ int rt_task_complete_message_on_send(RtContext *ctx, const char *task_id) {
       "{\"task_id\":\"%s\",\"state\":\"completed\"}", etask);
 }
 
+/* A run that ends in failure or cancellation records that on the open
+ * message task it was responsible for. Two tasks qualify: the one born in
+ * this run (the user_message that started it), and the one this run was
+ * bound to by its triggering event -- a runtime-owned kind such as
+ * operation_result carries task_id explicitly. The second is a continuation
+ * of an older ask: when that run dies nothing else is scheduled for the ask,
+ * the human has already seen the failure narration, and an "open" record
+ * would claim work in flight that no longer exists. Only reserved kinds are
+ * trusted for the binding -- in a product-owned typed event a "task_id" key
+ * is producer data (bus_type_is_reserved owns that boundary, exactly as in
+ * agent_exec's task inference) -- and only within the run's own context. */
 int rt_task_terminalize_open_message_tasks_for_run(RtContext *ctx,
                                                    const char *task_event_type) {
   TaskStore *st;
+  JsonRef payload;
   char prefix[RT_SMALL + 16];
+  char bound[RT_SMALL] = "";
   char task_ids[TASK_MAX_ITEMS][RT_SMALL];
   const char *state;
   size_t task_count = 0;
@@ -815,15 +829,21 @@ int rt_task_terminalize_open_message_tasks_for_run(RtContext *ctx,
     return 0;
   if (snprintf(prefix, sizeof(prefix), "task_%s_", ctx->run_id) >= (int)sizeof(prefix))
     return -1;
+  if (ctx->event_payload_json[0] && bus_type_is_reserved(ctx->event_kind) &&
+      json_ref_top_object(ctx->event_payload_json, &payload) == 0)
+    (void)json_ref_object_get_string(&payload, "task_id", bound, sizeof(bound));
   st = task_store_borrow();
   if (!st) return -1;
   if (load_store(st) != 0) return task_store_release_result(0);
   state = strcmp(task_event_type, "task_failed") == 0 ? "failed" : "canceled";
   for (size_t i = 0; i < st->count; ++i) {
     TaskItem *t = &st->items[i];
+    int born_here = strncmp(t->task_id, prefix, strlen(prefix)) == 0;
+    int bound_here = bound[0] && strcmp(t->task_id, bound) == 0 &&
+                     strcmp(t->context_id, ctx->context_id) == 0;
     if (!task_kind_is_message(t->kind) ||
         strcmp(t->state, "open") != 0 ||
-        strncmp(t->task_id, prefix, strlen(prefix)) != 0)
+        (!born_here && !bound_here))
       continue;
     snprintf(task_ids[task_count], sizeof(task_ids[task_count]), "%s", t->task_id);
     task_count++;

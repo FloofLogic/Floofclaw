@@ -84,6 +84,11 @@ static const BudgetOverride kBudgetOverrides[] = {
   { "manage_codex_project_root_is_explicit_cached_and_contained", 8000 },
   { "claude_handler_delivers_modern_operation_result", 2500 },
   { "concrete_request_queues_managed_work", 2500 },
+  /* Each drives two full LLM manager turns through the mock provider --
+   * the rejected decision and its bounded repair -- with durable state
+   * fsynced between them. Measured 320-480ms. */
+  { "floofclaw_contract_less_agent_repairs_a_normalizer_rejection", 1500 },
+  { "floofclaw_contract_less_repair_budget_is_bounded", 1500 },
   { "manual_affair_review_with_note_add_records_note", 1000 },
   { "manual_affair_review_with_close_marks_affair_closed", 1000 },
   /* Two real split-role manager turns prove result rejection followed by

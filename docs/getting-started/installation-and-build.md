@@ -81,7 +81,7 @@ build detects.
 Expected output (current branch):
 
 ```text
-fclaw 0.26.2
+fclaw 0.28.0
 ```
 
 Then run the routine suite:
@@ -97,7 +97,7 @@ enabling the bundled actions — run the guided wizard from the checkout root:
 ./scripts/onboard.sh
 ```
 
-It currently runs 32 unit cases, 139 integration cases, auxiliary contract
+It currently runs 37 unit cases, 177 integration cases, auxiliary contract
 probes, and the end-to-end smoke:
 
 - `tests/smoke_lookup_and_poem.sh` — runs a mock-backed lookup-and-poem prompt

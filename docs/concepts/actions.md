@@ -49,8 +49,9 @@ floops:
 - `web_read` — Reader-style URL extraction via `pluck`
 
 `actions/core/` holds runtime primitives. These two areas are the only action
-directories tracked by the repository; other top-level areas are local
-installation surface and ignored by Git. Common `web_read` owns a public
+directories tracked by the repository, apart from the shared MCP bridge at
+`actions/mcp/_bridge.sh` (see [generated actions](#generated-actions)); other
+top-level areas are local installation surface and ignored by Git. Common `web_read` owns a public
 `pluck` submodule from [FloofLogic/pluck](https://github.com/FloofLogic/pluck),
 and public releases flatten its pinned contents into ordinary files.
 
@@ -67,6 +68,25 @@ as `http_status`, and returns a small `text` summary containing that code and a
 1,200-character body excerpt. The managed-operation wrapper owns the separate
 `status:"finished"` lifecycle field and publishes the summary exactly once on
 a later `operation_result` turn.
+
+### Generated actions
+
+`actions/mcp/` is written, not hand-installed. `scripts/mcp_sync.sh` asks each
+server in `config/mcp.json` for its `tools/list` and emits one action per
+tool: `actions/mcp/<server>__<tool>/`, each with an `action.json` carrying the
+tool's own `inputSchema` as its `args_schema` and a two-line `run.sh` that
+execs the shared `actions/mcp/_bridge.sh`.
+
+Nothing about them is special once written. They are discovered by the same
+scan, gated by the same allowlists and `force_disable`, bounded by the same
+`timeout_ms`, and — being `contract: "managed_operation"` — return through the
+same `operation_result` path. The runtime holds no MCP protocol code — only
+`fclaw mcp sync`, a wrapper that execs the generator.
+
+The generated directories are git-ignored and rewritten from scratch on every
+sync; only the bridge is committed. Sync never runs at startup, so the on-disk
+catalog is the truth between syncs. See
+[MCP servers](../getting-started/mcp.md).
 
 ### Delegate actions
 
@@ -408,6 +428,34 @@ replays or infers success: it records `ambiguous_completion` and blocks the
 current bound revision. This conservative recovery behavior is why
 `outside_world` must describe the manifest honestly.
 
+### Local actions are replayed, so their effects are keyed
+
+An `outside_world: false` action is the other half of that rule: a started
+request with no terminal stays launchable and recovery dispatches it again
+under the same request id. That is only safe if a second dispatch cannot
+repeat an effect the first one committed, and for every durable mutation the
+effect is an appended event that survives the crash whether or not its
+terminal did.
+
+Every mutating runtime intrinsic therefore stamps its `request_id` into the
+event it appends and consults `rt_action_committed_effect` first. When the
+effect is already committed the replay appends nothing and returns the
+committed answer with `"recovered": true` — the affair that was opened, the
+deadline that was chosen, the task and revision that exist. The alternatives
+are all worse than they look: a duplicated note is visible noise, a
+duplicated counter delta is a number that is quietly wrong, a replayed
+`defer` silently pushes a review out by however long the gateway was down,
+and a replayed `work` create mints a second task from the run's event
+counter — after which every later `work` call in that context fails as an
+ambiguous revision target.
+
+This is a contract for new local actions, not just a property of the
+existing ones. An `outside_world: false` action whose effect is not keyed to
+its request id is a durability defect, and
+`tests/integration/test_local_action_replay.c` covers both halves of the
+crash window — the effect not yet applied, and the effect applied without a
+terminal — for each mutation class.
+
 ## `run.sh` Contract
 
 Subprocess actions read one JSON object from stdin:
@@ -673,6 +721,37 @@ For a subprocess action:
 - Exit `0` for success and nonzero for failure.
 - Do not emit durable runtime events from the script. `events` is reserved and
   ignored for truth today.
+- Take the deadline from `FCLAW_ACTION_TIMEOUT_MS`, not a constant. The
+  kernel exports the manifest's own `timeout_ms` and kills the job at it, so
+  a script that enforces a different number can only disagree.
+- If the action executes anything — a shell command, a patch, a fetch —
+  confine its writes. See below.
+
+### Deadlines and confinement for executing actions
+
+An action that runs another program is the one place a model's output
+becomes local execution, so two rules apply to it that do not apply to a
+manifest-only action. Both live in `actions/common/_lib/sandbox.sh`, which
+every such action sources; the kernel stays ignorant of both.
+
+**One deadline.** `timeout_ms` is what the kernel kills the job at. It
+arrives in the child as `FCLAW_ACTION_TIMEOUT_MS`, and
+`fclaw_action_timeout_s` derives the command's own budget from it, reserving
+a few seconds so the script reports a clean timeout instead of being
+SIGKILLed mid-write. A managed-operation action also declares
+`default_timeout_ms` / `max_timeout_ms`: those are the backstop for a result
+that never arrives, so they belong just above the job deadline, not an order
+of magnitude above it.
+
+**Write confinement.** `fclaw_sandbox_argv` returns the argv prefix that
+confines writes to the workspace — `sandbox-exec` on macOS, `bwrap` on
+Linux. Reads and execution stay unrestricted; scratch space is a
+per-invocation directory inside the workspace that `TMPDIR` points at. It
+fails closed: with no mechanism available the action refuses rather than
+running unconfined, and the operator opts out deliberately by setting
+`actions.<id>.sandbox` to `"off"`, which the manifest declares as ordinary
+action config so a model cannot reach it. `SECURITY.md` states what this
+does and does not protect against.
 
 For a runtime-function action:
 

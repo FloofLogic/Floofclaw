@@ -39,8 +39,9 @@ subsystem-specific hot-path code, no special-cased subsystems:
 - `bus_wake`, `jobrunner`, `bus_intake`, `runtime`, `status` — core
 - `affair_watcher` — publishes review events when concerns come due
 - `janitor` — log rotation plus bounded cleanup of terminal runs, processed
-  bus records, archived tasks, and Codex worker artifacts
-- `irc`, `ws`, `discord` — channel adapters
+  bus records, archived tasks, and every managed-worker store (`codex_ops`,
+  `claude_ops`, `hermes_ops`)
+- `irc`, `ws`, `discord`, `telegram` — channel adapters; which ones the binary contains is chosen at build time with `FCLAW_ADAPTERS`
 
 Inbound events land on the bus (`workspace/bus/inbox/`). The bus
 intake module drains them into runs. Each run steps through the

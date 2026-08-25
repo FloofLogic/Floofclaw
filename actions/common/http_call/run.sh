@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+lib=""
+probe="$(cd "$(dirname "$0")" && pwd -P)"
+while [ "$probe" != "/" ]; do
+  if [ -f "$probe/common/_lib/sandbox.sh" ]; then lib="$probe/common/_lib/sandbox.sh"; break; fi
+  probe="$(dirname "$probe")"
+done
+if [ -z "$lib" ]; then
+  printf '%s\n' '{"events":[],"result":{},"error":{"message":"http_call could not locate actions/common/_lib/sandbox.sh"}}'
+  exit 1
+fi
+# shellcheck source=/dev/null
+. "$lib"
+
 input="$(cat)"
 
 emit_error() {
@@ -35,13 +48,34 @@ case "$authority" in *@*) emit_error "BAD_ARGS" "credentials must not be embedde
 workspace_root="${FCLAW_WORKSPACE_ROOT:-}"
 body_artifact="$(jq -r '.artifacts.body // ""' <<<"$input")"
 [ -n "$workspace_root" ] || emit_error "CONFIG_ERROR" "FCLAW_WORKSPACE_ROOT is required"
+# curl needs the network, which the sandbox allows; it does not need to
+# write anywhere but the response artifact under the workspace. TMPDIR is
+# deliberately left alone -- the per-user temp directory the sandbox
+# permits is where the bearer-token curl config belongs, not the workspace.
+sandbox_argv=()
+if [ "$(fclaw_sandbox_mode)" = "on" ]; then
+  sandbox_lines="$(fclaw_sandbox_argv "$workspace_root")" ||
+    emit_error "SANDBOX_UNAVAILABLE" "$(fclaw_sandbox_unavailable_message http_call)"
+  while IFS= read -r sandbox_line; do
+    [ -n "$sandbox_line" ] && sandbox_argv+=("$sandbox_line")
+  done <<<"$sandbox_lines"
+fi
+call_timeout_s="$(fclaw_action_timeout_s 40 5)"
+# The bearer-token curl config needs a writable directory the sandbox
+# permits, which is the workspace and nothing else. A 0600 file in a 0700
+# directory, removed on exit, on the same disk and under the same user as
+# the auth store the token came from.
+scratch="$(fclaw_sandbox_scratch "$workspace_root")" ||
+  emit_error "CONFIG_ERROR" "could not create the confined scratch directory"
+export TMPDIR="$scratch" TMP="$scratch" TEMP="$scratch"
+curl_max_time="$(( call_timeout_s > 5 ? call_timeout_s - 5 : 1 ))"
 case "$body_artifact" in ""|/*|..|../*|*/../*|*/..) emit_error "BAD_ARTIFACT" "artifacts.body must be a safe workspace-relative path" ;; esac
 body_path="$workspace_root/$body_artifact"
 mkdir -p "$(dirname "$body_path")" || emit_error "ARTIFACT_ERROR" "could not create response artifact directory"
 
 header_count="$(jq -r '(.args.headers // []) | length' <<<"$input")"
 [ "$header_count" -le 32 ] || emit_error "BAD_ARGS" "args.headers supports at most 32 entries"
-curl_args=(--silent --show-error --proto '=http,https' --connect-timeout 10 --max-time 30 --request "$method" --output "$body_path" --write-out '%{http_code}')
+curl_args=(--silent --show-error --proto '=http,https' --connect-timeout 10 --max-time "$curl_max_time" --request "$method" --output "$body_path" --write-out '%{http_code}')
 for ((i = 0; i < header_count; i++)); do
   header="$(jq -r --argjson i "$i" '.args.headers[$i]' <<<"$input")"
   case "$header" in *$'\r'*|*$'\n'*|:*|*:) emit_error "BAD_ARGS" "headers must be non-empty 'Name: value' strings without newlines" ;; esac
@@ -55,7 +89,11 @@ done
 
 auth_ref="$(jq -r '.args.auth_ref // ""' <<<"$input")"
 config_path=""
-cleanup() { [ -z "$config_path" ] || rm -f "$config_path"; }
+cleanup() {
+  [ -z "$config_path" ] || rm -f "$config_path"
+  [ -z "${scratch:-}" ] || rm -rf "$scratch"
+  return 0
+}
 trap cleanup EXIT
 if [ -n "$auth_ref" ]; then
   [[ "$auth_ref" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || emit_error "BAD_ARGS" "args.auth_ref must be an environment-variable name"
@@ -81,10 +119,10 @@ fi
 
 set +e
 if [ "$has_body" = true ]; then
-  http_status="$(printf '%s' "$body" | curl "${curl_args[@]}" "$url")"
+  http_status="$(printf '%s' "$body" | ${sandbox_argv+"${sandbox_argv[@]}"} curl "${curl_args[@]}" "$url")"
   curl_rc=$?
 else
-  http_status="$(curl "${curl_args[@]}" "$url")"
+  http_status="$(${sandbox_argv+"${sandbox_argv[@]}"} curl "${curl_args[@]}" "$url")"
   curl_rc=$?
 fi
 set -e

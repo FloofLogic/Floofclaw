@@ -11,8 +11,10 @@
  * Related intrinsic families live in action_runtime_*.c. */
 
 #include "action_runtime_internal.h"
+#include "support/fsutil.h"
 #include "support/heap_guard.h"
 #include "support/json.h"
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -45,6 +47,48 @@ static const RuntimeActionEntry kRuntimeActions[] = {
   { "fc_affair_open()", fc_affair_open },
   { NULL, NULL }
 };
+
+/* Scan this run's committed event log for the effect `request_id`
+ * already appended. One linear pass over a log recovery has just read
+ * anyway; a local intrinsic runs once per request, so this is not a hot
+ * path. */
+int rt_action_committed_effect(const RtRun *r, const char *type,
+                               const char *request_id,
+                               char *payload_out, size_t payload_len) {
+  char path[PATH_MAX];
+  char *text = NULL;
+  char *line;
+  int found = 0;
+  if (!r || !type || !*type || !request_id || !*request_id ||
+      !payload_out || payload_len == 0)
+    return -1;
+  payload_out[0] = '\0';
+  rt_event_log_path(&r->ctx, path, sizeof(path));
+  if (fs_read_text(path, &text, FS_READ_TEXT_DEFAULT_CAP) != 0 || !text)
+    return errno == ENOENT ? 0 : -1;
+  line = text;
+  while (line && *line) {
+    char *next = strchr(line, '\n');
+    JsonRef event, payload;
+    char event_type[RT_SMALL] = "", event_rid[RT_SMALL] = "";
+    if (next) *next = '\0';
+    if (*line && json_ref_top_object(line, &event) == 0 &&
+        json_ref_object_get_string(&event, "type", event_type,
+                                   sizeof(event_type)) == 0 &&
+        strcmp(event_type, type) == 0 &&
+        json_ref_object_get_object(&event, "payload", &payload) == 0 &&
+        json_ref_object_get_string(&payload, "request_id", event_rid,
+                                   sizeof(event_rid)) == 0 &&
+        strcmp(event_rid, request_id) == 0) {
+      found = json_ref_value_copy(&payload, payload_out, payload_len) == 0
+                  ? 1 : -1;
+      break;
+    }
+    line = next ? next + 1 : NULL;
+  }
+  fc_xfree(text);
+  return found;
+}
 
 int rt_action_registry_runtime_function_known(const char *name) {
   for (int i = 0; kRuntimeActions[i].name; ++i)

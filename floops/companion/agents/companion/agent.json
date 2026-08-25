@@ -3,6 +3,7 @@
   "executor": "llm",
   "model": { "ref": "responses" },
   "actions": ["message", "note_add", "affair_close", "defer"],
+  "_note": "warning: this agent answers user messages, so every turn must close its input task or the 32-slot task store fills and the bot can chat but never act. autocomplete_message_task_on_send closes it on a successful reply; the engine closes it only when the run fails. Read docs/concepts/task-feature.md, 'Who closes an input task', before removing or copying this.",
   "autocomplete_message_task_on_send": true,
   "conversational_payload_only": true,
   "listen": ["memory", "tasks"]

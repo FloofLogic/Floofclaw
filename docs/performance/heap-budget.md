@@ -122,14 +122,16 @@ Counts that the gateway reports at startup and that you should know:
 gateway: rtrun_size=226048 max_active=16 pool_bytes=3616768
 ```
 
-Measured at 0.28.0 on arm64 macOS:
+Measured at 0.28.0 (revision `41e8790d`) on arm64 macOS. The gateway prints
+`rtrun_size` and `pool_bytes` at startup, so a drifted table is visible
+without rebuilding anything:
 
 | | size |
 |---|---:|
 | `sizeof(RtRun)` | 226,048 bytes (~221 KiB) |
 | `RT_MAX_ACTIVE_RUNS` | 16 |
 | `RtScheduler.pool` | 3,616,768 bytes (~3.45 MiB) — resident per used slot |
-| `sizeof(RtScheduler)` | 4,849,632 bytes (~4.62 MiB) |
+| `sizeof(RtScheduler)` | 4,849,888 bytes (~4.62 MiB) |
 | `sizeof(RtProfile)` | 20,760 bytes (cached once, borrowed) |
 | `RT_MAX_PENDING_ACTIONS` per run | 16 entries × 1,368 bytes each = 21,888 bytes |
 | `RT_MAX_COMPLETED_ACTIONS` per run | 32 IDs/signatures/origin IDs |

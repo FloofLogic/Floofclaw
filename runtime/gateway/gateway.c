@@ -349,6 +349,58 @@ static void print_gateway_stats(const FcReactor *reactor, const RtScheduler *sch
   fflush(stdout);
 }
 
+
+/* Channels are selected at build time (FCLAW_ADAPTERS). A config that
+ * enables one this binary does not contain would otherwise go silently
+ * unanswered — the gateway would start, look healthy, and never receive a
+ * message. Refuse instead, and name the exact rebuild. */
+int fc_channel_selection_check(void) {
+  char *text = NULL;
+  JsonRef root, channels, entry;
+  size_t cursor = 0;
+  char name[64];
+  int missing = 0;
+  if (fs_read_text("config/floofclaw_config.json", &text,
+                   FS_READ_TEXT_DEFAULT_CAP) != 0 || !text)
+    return 0;
+  if (json_ref_first_object(text, &root) != 0 ||
+      json_ref_object_get_object(&root, "channels", &channels) != 0) {
+    free(text);
+    return 0;
+  }
+  while (json_ref_object_iter(&channels, &cursor, name, sizeof(name),
+                              &entry) == 1) {
+    int enabled = 0;
+    size_t i;
+    int built = 0;
+    if (entry.type != JSON_REF_OBJECT) continue;
+    if (json_ref_object_get_bool(&entry, "enabled", &enabled) != 0 || !enabled)
+      continue;
+    for (i = 0; i < fc_adapter_count; ++i)
+      if (fc_adapters[i] && strcmp(fc_adapters[i]->name, name) == 0) built = 1;
+    if (built) continue;
+    if (!missing) {
+      fprintf(stderr,
+              "gateway: channels.%s.enabled is true but this binary was "
+              "built without the %s adapter.\n", name, name);
+      missing = 1;
+    } else {
+      fprintf(stderr, "gateway: also missing the %s adapter.\n", name);
+    }
+  }
+  if (missing) {
+    size_t i;
+    fprintf(stderr, "fix: rebuild with the channels you want, for example\n"
+                    "  make FCLAW_ADAPTERS=\"");
+    for (i = 0; i < fc_adapter_count; ++i)
+      fprintf(stderr, "%s%s", i ? " " : "", fc_adapters[i]->name);
+    fprintf(stderr, " <channel>\"\n"
+                    "or `make FCLAW_ADAPTERS=all`. `fclaw adapters -a` lists "
+                    "what this binary contains.\n");
+  }
+  free(text);
+  return missing ? -1 : 0;
+}
 static int run_gateway_reactor(const char *loop_name, int poll_ms,
                                LogoAnimState *logo_state, int verbose,
                                int human) {
@@ -419,6 +471,10 @@ static int run_gateway_reactor(const char *loop_name, int poll_ms,
    * adapters is not — each owns its own socket and its own delivery cursor —
    * so the generated registry's sorted order is free to differ from the old
    * hand-written one. */
+  if (!channels_disabled() && fc_channel_selection_check() != 0) {
+    if (runtime) fc_runtime_module_destroy(runtime);
+    return 1;
+  }
   if (!channels_disabled()) {
     size_t i;
     int startup_error = 0;

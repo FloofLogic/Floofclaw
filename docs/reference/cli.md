@@ -20,6 +20,8 @@ fclaw -i [-a|-h] [--floop <name>]
 fclaw channel cli|ws|irc [-a|-h] [--floop <name>]
 fclaw clear [-a|-h] [--yes]
 fclaw actions|adapters|floops|setup [-a|-h]
+fclaw config get|set|enable|disable [-a|-h] <key> [<value>]
+fclaw mcp sync|secret [-a|-h] [...]
 fclaw --version|-v [-a|-h]
 ```
 
@@ -560,6 +562,81 @@ Note: when the **gateway** is running, channel modules
 (`adapters/{irc,ws,discord}/`) handle real network
 I/O directly inside the reactor. The `fclaw channel` CLI publishes
 events and waits for deliveries; it does not allocate runs itself.
+
+## `fclaw mcp <sync|secret>`
+
+Regenerate the actions produced from your MCP servers, and give one server's
+credential to every action generated from it. Both wrap the scripts in
+`scripts/` — the verb exists so the entry point is discoverable and obeys the
+output contract, not because the binary speaks MCP. It does not: the protocol
+lives in `scripts/mcp_sync.sh` and `actions/mcp/_bridge.sh`.
+
+```bash
+./bin/fclaw mcp sync -h              # operator text: + added, ~ changed, - removed
+./bin/fclaw mcp sync                 # one JSON result object (default / -a)
+./bin/fclaw mcp sync --dry-run       # report the difference, change nothing
+printf %s "$TOKEN" | ./bin/fclaw mcp secret github GITHUB_TOKEN
+```
+
+Agent mode returns a single object:
+
+```json
+{"ok":true,"config":"config/mcp.json","tools":28,"applied":true,"dry_run":false,
+ "added":["github__create_issue"],"changed":[],"removed":["github__legacy_thing"],
+ "unreachable":[]}
+```
+
+`ok` is false and the exit status is nonzero when a server did not answer;
+`unreachable` names them. Those servers keep the actions they already have —
+a transient outage must not delete a deployment's tool catalog.
+
+`mcp secret` reads the value on **stdin**, never from an argument, and stores
+one copy per generated action of that server, which is the only scope the
+gateway injects. Re-run it after a sync that adds tools.
+
+Sync writes files; the gateway reads them at startup. **Restart to pick up a
+changed catalog.** Nothing syncs automatically — see
+[MCP servers](../getting-started/mcp.md).
+
+## `fclaw config get|set|enable|disable`
+
+Reads and edits `config/floofclaw_config.json` in place. Keys are dotted
+paths into that file: `bot_name`, `gateway.port`,
+`channels.discord.enabled`.
+
+```bash
+fclaw config get -a bot_name                       # "Mox"
+fclaw config get -h gateway.port                   # 41004
+fclaw config set -a gateway.port 41099
+fclaw config set -a channels.discord.guild_id '"123456789"'
+```
+
+`set` takes the value as it should appear in JSON, so a string needs its own
+quotes; anything else is written verbatim. The edit is a span splice, not a
+reserialize — sibling keys, ordering, comments-by-convention (`_notes`), and
+formatting all survive untouched. Setting a key whose parent object does not
+exist is an error naming the missing ancestor rather than an invented one:
+
+```json
+{"ok":false,"command":"config.get","error":{"code":"key_not_found","message":"no.such.key"}}
+```
+
+`enable` and `disable` take an action id and edit the `force_disable` list,
+which is the deployment's own answer to "this action needs setup before it
+can work":
+
+```bash
+fclaw config disable -a web_read   # {"type":"config.disable","key":"web_read","detail":"..."}
+fclaw config enable  -a web_read   # {"type":"config.enable","key":"web_read","detail":"..."}
+```
+
+Both are idempotent and say which they did. A disabled action stays
+registered — floop allowlists keep declaring intent and still validate — but
+it is omitted from every agent catalog and rejected at dispatch. See
+[Actions](../concepts/actions.md).
+
+The gateway reads this file at startup and on `gateway reload`; editing it
+under a running gateway does not take effect until one of those.
 
 ## `fclaw clear | actions | adapters | floops | setup | --version`
 

@@ -34,8 +34,8 @@
  * install with no config still ends up bounded. */
 #define DEFAULT_RUNS_KEEP                 500
 #define DEFAULT_RUNS_INTERVAL_MS          300000ULL   /* 5 min  */
-#define DEFAULT_CODEX_OPS_KEEP            200
-#define DEFAULT_CODEX_OPS_INTERVAL_MS     300000ULL
+#define DEFAULT_WORKER_STORE_KEEP         200
+#define DEFAULT_WORKER_STORE_INTERVAL_MS  300000ULL
 #define DEFAULT_BUS_PROCESSED_KEEP        10000
 #define DEFAULT_BUS_PROCESSED_INTERVAL_MS 300000ULL
 #define DEFAULT_TASKS_ARCHIVE_KEEP_DAYS   90
@@ -66,6 +66,10 @@ struct JanitorTask {
   char        path[256];
   int         keep;
   int         keep_days;
+  /* Managed-worker stores: the entry-name prefix to strip before
+   * "op_" reconstructs the runtime-owned operation id. Empty means
+   * the entry name is already the operation id. */
+  char        op_prefix[16];
   /* for JSONL rotation tasks */
   uint64_t    max_bytes;
   int         compress;   /* 1 = gzip subprocess, 0 = none */
@@ -80,7 +84,7 @@ struct JanitorTask {
 
 typedef struct {
   uint64_t     next_tick_ms;
-  JanitorTask  tasks[16];  /* room to grow — janitor tasks are cheap */
+  JanitorTask  tasks[20];  /* room to grow — janitor tasks are cheap */
   size_t       task_count;
 } JanitorState;
 
@@ -161,7 +165,7 @@ static long long parse_trailing_number(const char *name) {
 typedef struct { long long num; char name[256]; } DirEntry;
 
 #define JANITOR_RUNS_SCAN_CAP      2048
-#define JANITOR_CODEX_OPS_SCAN_CAP 4096
+#define JANITOR_WORKER_STORE_SCAN_CAP 4096
 #define JANITOR_BUS_SCAN_CAP      12288
 
 typedef struct {
@@ -436,16 +440,54 @@ int fc_janitor_test_list_oldest(const char *dir, const char *prefix, int cap,
 }
 
 /* ------------------------------------------------------------------
- * Task: codex_ops_prune — workspace/logs/codex_ops/codex_actionreq_...
- * Every dir is one-handle-per-invocation and never revisited after
- * the operation finishes. Count-only, no terminal check.
+ * Task: worker_store_prune — one entry per managed-worker operation
+ * under workspace/logs/<store>/. Every entry is written once when the
+ * operation starts and never revisited after it finishes, so the rule
+ * is count-only: keep the newest N by trailing number.
+ *
+ * The one exception is a running operation. Its worker still owns the
+ * entry — a Codex or Claude child writes into its directory until it
+ * terminalizes — so a live operation's entry is never removed, however
+ * old its number makes it look. `rt_operation_status` is the authority;
+ * an entry the store has forgotten is ordinary debris.
+ *
+ * Stores are directories for the process workers and single JSON files
+ * for Hermes handles. rm_rf takes both, and parse_trailing_number
+ * already ignores a .json suffix.
  * ------------------------------------------------------------------ */
 
-static int task_codex_ops_prune(JanitorTask *t) {
+/* Is the operation that owns this entry still running? Unknown ids are
+ * not protected: the operation store keeps a bounded window of finished
+ * records, so "never heard of it" is the normal state of old debris. */
+static int worker_store_entry_is_live(const JanitorTask *t, const char *name) {
+  char op_id[RT_SMALL];
+  char status[RT_SMALL];
+  const char *base = name;
+  size_t len, prefix_len;
+  if (!t || !name || !*name) return 0;
+  prefix_len = strlen(t->op_prefix);
+  if (prefix_len > 0 && strncmp(name, t->op_prefix, prefix_len) == 0)
+    base = name + prefix_len;
+  len = strlen(base);
+  if (len > 5 && strcmp(base + len - 5, ".json") == 0) len -= 5;
+  if (len == 0 || len >= sizeof(op_id)) return 0;
+  if (prefix_len > 0) {
+    if ((size_t)snprintf(op_id, sizeof(op_id), "op_%.*s", (int)len, base) >=
+        sizeof(op_id))
+      return 0;
+  } else {
+    snprintf(op_id, sizeof(op_id), "%.*s", (int)len, base);
+  }
+  if (rt_operation_status(op_id, status, sizeof(status)) != 0) return 0;
+  return strcmp(status, "running") == 0;
+}
+
+static int task_worker_store_prune(JanitorTask *t) {
   DIR *d;
   struct dirent *e;
   DirEntry *entries;
-  int n = 0, keep, to_drop, dropped = 0;
+  int n = 0, keep, to_drop, dropped = 0, kept_live = 0;
+  int any_running;
   int saved_errno;
   int i;
   int result = -1;
@@ -465,7 +507,7 @@ static int task_codex_ops_prune(JanitorTask *t) {
     if (e->d_name[0] == '.') continue;
     num = parse_trailing_number(e->d_name);
     if (num < 0) continue;
-    if (n < JANITOR_CODEX_OPS_SCAN_CAP) {
+    if (n < JANITOR_WORKER_STORE_SCAN_CAP) {
       entries[n].num = num;
       snprintf(entries[n].name, sizeof(entries[n].name), "%s", e->d_name);
       n++;
@@ -483,15 +525,23 @@ static int task_codex_ops_prune(JanitorTask *t) {
   keep = t->keep;
   if (n <= keep) { result = 0; goto cleanup; }
   to_drop = n - keep;
+  /* One store read answers the common case. Only when something is
+   * actually in flight is it worth asking per candidate. */
+  any_running = rt_operation_any_running();
   for (i = 0; i < to_drop; ++i) {
     char full[512];
+    if (any_running && worker_store_entry_is_live(t, entries[i].name)) {
+      kept_live++;
+      continue;
+    }
     if (snprintf(full, sizeof(full), "%s/%s", t->path, entries[i].name)
         >= (int)sizeof(full)) continue;
     if (rm_rf(full) == 0) dropped++;
   }
-  if (dropped > 0)
-    (void)rt_narrate("janitor: pruned %d codex_ops from %s (kept %d)",
-                     dropped, t->path, keep);
+  if (dropped > 0 || kept_live > 0)
+    (void)rt_narrate(
+        "janitor: pruned %d from %s (kept %d, %d still running)",
+        dropped, t->path, keep, kept_live);
   result = 0;
 
 cleanup:
@@ -547,6 +597,20 @@ static int task_bus_processed_prune(JanitorTask *t) {
 
 cleanup:
   return janitor_entries_release_result(result);
+}
+
+int fc_janitor_test_worker_store_prune(const char *path, const char *op_prefix,
+                                       int keep) {
+  JanitorTask task;
+  if (!path || !*path || keep <= 0) return -1;
+  memset(&task, 0, sizeof(task));
+  task.name = "worker_store_prune_test";
+  task.enabled = 1;
+  task.keep = keep;
+  snprintf(task.path, sizeof(task.path), "%s", path);
+  snprintf(task.op_prefix, sizeof(task.op_prefix), "%s",
+           op_prefix ? op_prefix : "");
+  return task_worker_store_prune(&task);
 }
 
 int fc_janitor_test_bus_processed_prune(const char *path, int keep) {
@@ -658,12 +722,12 @@ static int task_tasks_archive_prune(JanitorTask *t) {
  * Reactor module callbacks
  * ------------------------------------------------------------------ */
 
-static void add_task(JanitorState *s, const char *name, int enabled,
-                     uint64_t interval_ms, int (*run)(JanitorTask *),
-                     const char *path, int keep, int keep_days,
-                     uint64_t stagger) {
+static JanitorTask *add_task(JanitorState *s, const char *name, int enabled,
+                             uint64_t interval_ms, int (*run)(JanitorTask *),
+                             const char *path, int keep, int keep_days,
+                             uint64_t stagger) {
   JanitorTask *t;
-  if (s->task_count >= sizeof(s->tasks) / sizeof(s->tasks[0])) return;
+  if (s->task_count >= sizeof(s->tasks) / sizeof(s->tasks[0])) return NULL;
   t = &s->tasks[s->task_count++];
   memset(t, 0, sizeof(*t));
   t->name = name;
@@ -674,7 +738,23 @@ static void add_task(JanitorState *s, const char *name, int enabled,
   t->keep = keep;
   t->keep_days = keep_days;
   if (path) snprintf(t->path, sizeof(t->path), "%s", path);
+  return t;
 }
+
+/* Every managed worker that writes one entry per operation. A worker
+ * added later belongs in this table, not in a task of its own: the
+ * retention rule is the same and so is the config shape. */
+static const struct {
+  const char *task_name;    /* janitor task id */
+  const char *config_key;   /* appliance.<key>.keep / .check_interval_ms */
+  const char *path;
+  const char *op_prefix;    /* stripped before "op_" rebuilds the op id */
+  uint64_t    stagger_ms;
+} kWorkerStores[] = {
+  { "codex_ops_prune",  "codex_ops",  "workspace/logs/codex_ops",  "",        10000 },
+  { "claude_ops_prune", "claude_ops", "workspace/logs/claude_ops", "",        11000 },
+  { "hermes_ops_prune", "hermes_ops", "workspace/logs/hermes_ops", "hermes_", 12000 },
+};
 
 /* Register a JSONL rotation task. The name maps to a hardcoded engine
  * log path (bus → workspace/logs/bus.jsonl, etc.) — engine-owned
@@ -725,8 +805,7 @@ static int janitor_init(FcReactorModule *m) {
   /* Config-driven overrides. Absent block or absent task uses defaults. */
   int    runs_keep         = DEFAULT_RUNS_KEEP;
   uint64_t runs_iv         = DEFAULT_RUNS_INTERVAL_MS;
-  int    codex_keep        = DEFAULT_CODEX_OPS_KEEP;
-  uint64_t codex_iv        = DEFAULT_CODEX_OPS_INTERVAL_MS;
+  size_t  store_i;
   int    bus_keep          = DEFAULT_BUS_PROCESSED_KEEP;
   uint64_t bus_iv          = DEFAULT_BUS_PROCESSED_INTERVAL_MS;
   int    ta_keep_days      = DEFAULT_TASKS_ARCHIVE_KEEP_DAYS;
@@ -742,8 +821,6 @@ static int janitor_init(FcReactorModule *m) {
   if (have_cfg) {
     if (cfg_task_int(&appliance, "runs", "keep", &v) == 0) runs_keep = (int)v;
     if (cfg_task_int(&appliance, "runs", "check_interval_ms", &v) == 0) runs_iv = (uint64_t)v;
-    if (cfg_task_int(&appliance, "codex_ops", "keep", &v) == 0) codex_keep = (int)v;
-    if (cfg_task_int(&appliance, "codex_ops", "check_interval_ms", &v) == 0) codex_iv = (uint64_t)v;
     if (cfg_task_int(&appliance, "bus_processed", "keep", &v) == 0) bus_keep = (int)v;
     if (cfg_task_int(&appliance, "bus_processed", "check_interval_ms", &v) == 0) bus_iv = (uint64_t)v;
     if (cfg_task_int(&appliance, "tasks_archive", "keep_days", &v) == 0) ta_keep_days = (int)v;
@@ -770,9 +847,27 @@ static int janitor_init(FcReactorModule *m) {
    * tick. Interval-relative: task N runs at now + N * stagger_slot. */
   add_task(s, "runs_prune",          runs_keep > 0 && runs_iv > 0,
            runs_iv, task_runs_prune, "workspace/runs", runs_keep, 0, 5000);
-  add_task(s, "codex_ops_prune",     codex_keep > 0 && codex_iv > 0,
-           codex_iv, task_codex_ops_prune, "workspace/logs/codex_ops",
-           codex_keep, 0, 10000);
+  /* One retention task per managed-worker store. Config lives under
+   * appliance.<store>.keep / .check_interval_ms, so appliance.codex_ops
+   * keeps meaning exactly what it meant. */
+  for (store_i = 0; store_i < sizeof(kWorkerStores) / sizeof(kWorkerStores[0]);
+       ++store_i) {
+    int      keep = DEFAULT_WORKER_STORE_KEEP;
+    uint64_t iv   = DEFAULT_WORKER_STORE_INTERVAL_MS;
+    JanitorTask *t;
+    if (have_cfg) {
+      if (cfg_task_int(&appliance, kWorkerStores[store_i].config_key,
+                       "keep", &v) == 0) keep = (int)v;
+      if (cfg_task_int(&appliance, kWorkerStores[store_i].config_key,
+                       "check_interval_ms", &v) == 0) iv = (uint64_t)v;
+    }
+    t = add_task(s, kWorkerStores[store_i].task_name, keep > 0 && iv > 0,
+                 iv, task_worker_store_prune, kWorkerStores[store_i].path,
+                 keep, 0, kWorkerStores[store_i].stagger_ms);
+    if (t) snprintf(t->op_prefix, sizeof(t->op_prefix), "%s",
+                    kWorkerStores[store_i].op_prefix);
+  }
+
   add_task(s, "bus_processed_prune", bus_keep > 0 && bus_iv > 0,
            bus_iv, task_bus_processed_prune, "workspace/bus/processed",
            bus_keep, 0, 15000);

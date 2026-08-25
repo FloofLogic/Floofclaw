@@ -8,12 +8,14 @@ The current reproducible source and binary measurements are emitted by
 tables below preserve the 2026-07-20 macOS/arm64 hardening snapshot and must
 not be read as current release values.
 
-The 2026-08-23 arm64 macOS 0.28.0 measurement (Apple clang 17) reports 41,453
-runtime C/header lines, a 684,424-byte stripped executable, a 0.133-second
-isolated mock-backed `hello`, and 7,792 KiB RSS for an idle isolated gateway.
-`make metrics` includes the exact measured revision. RSS is a simple,
-naturally variable `ps` sample for this reproducible idle scenario, not the
-Mach `physical_footprint` stress metric described below.
+The 2026-08-24 arm64 macOS 0.28.0 measurement (Apple clang 17, revision
+`41e8790d`) reports 42,596 runtime C/header lines, a 667,304-byte stripped
+executable, a 0.174-second isolated mock-backed `hello`, and 8,256 KiB RSS for
+an idle isolated gateway. `make metrics` includes the exact measured revision;
+compare it to this one before trusting these numbers. RSS and wall time are
+simple, naturally variable samples for a reproducible idle scenario, not the
+Mach `physical_footprint` stress metric described below — treat single-digit
+percentage movement between revisions as noise.
 
 Idle RSS fell from ~11,840 KiB when the scheduler stopped being memset at
 startup. The struct is ~4.8 MB, nearly all of it the fixed run pool; zeroing

@@ -284,10 +284,22 @@ int rt_emit_error_artifact(RtContext *ctx, const char *source,
                                 esc, eart);
 }
 
+/* The most recent rejection, kept so a bounded repair can tell the model
+ * what was wrong instead of only showing it what it said. Single-threaded
+ * reactor: the normalize -> reject -> repair sequence for one decision is
+ * synchronous, so one slot is enough. */
+static char last_rejected_detail[RT_LARGE];
+
+const char *rt_last_rejected_agent_detail(void) { return last_rejected_detail; }
+void rt_clear_rejected_agent_detail(void) { last_rejected_detail[0] = '\0'; }
+
 void rt_log_rejected_agent_event(const char *source, const char *reason, const char *detail) {
   char ts[64], esource[RT_MED], ereason[RT_MED], edetail[RT_LARGE];
   char line[RT_XL];
   time_t now = time(NULL);
+  snprintf(last_rejected_detail, sizeof(last_rejected_detail), "%s%s%s",
+           reason ? reason : "", reason && detail && *detail ? ": " : "",
+           detail ? detail : "");
   struct tm tmv;
   gmtime_r(&now, &tmv);
   strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &tmv);

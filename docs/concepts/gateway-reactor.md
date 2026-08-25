@@ -98,15 +98,23 @@ Order matters when modules share state.
    - `next_deadline_ms` — `now + (next_tick_ms - now)` so the reactor wakes at the next 5s tick boundary
 7. **`janitor`** (`runtime/gateway/janitor_module.c`) — periodically rotates
    JSONL logs and prunes terminal runs, processed bus records, archived
-   tasks, and Codex worker directories. A run is pruned only when its
+   tasks, and every managed-worker store (`workspace/logs/codex_ops`,
+   `claude_ops`, `hermes_ops`). A run is pruned only when its
    persisted status is terminal and nothing pins it; the scan is bounded and
-   always considers the oldest entries first
+   always considers the oldest entries first. The worker stores share one
+   count-only rule and one config shape (`appliance.<store>.keep`,
+   `.check_interval_ms`), with a single exception: an entry whose operation
+   is still `running` in `workspace/memory/state/operations.json` is never
+   removed, however old its number makes it look — its worker is still
+   writing into it. A worker added later that writes one entry per operation
+   joins that table rather than getting a task of its own
 8. **`logo_anim`** when foreground output is a TTY — optional display module
 9. **`irc`** (`adapters/irc/irc_adapter.c`) — connect/PING/PRIVMSG state machine; tails `workspace/logs/deliveries.jsonl` for outbound `message` deliveries matching its `module_id`
 10. **`ws`** (`adapters/ws/ws_adapter.c`) — listens, completes RFC-6455 handshake, routes inbound text frames to bus, delivers outbound messages to the matching connection
 11. **`discord`** (`adapters/discord/discord_adapter.c`) — Discord Gateway WSS client + REST poster; publishes attended `MESSAGE_CREATE` events to the bus and consumes `message` deliveries addressed to `discord-main`
+12. **`telegram`** (`adapters/telegram/telegram_adapter.c`) — Bot API long-poll client + outbox; publishes attended private and allowlisted-group messages to the bus and consumes `message` deliveries addressed to its `module_id`
 
-Channel adapters (9-11) are not named anywhere in the gateway. Each is a
+Channel adapters (9-12) are not named anywhere in the gateway. Each is a
 self-contained source directory under `adapters/` exporting a
 `const FcAdapter` (`runtime/gateway/adapter.h`); the build generates
 `fc_adapters[]` from the directory listing and the gateway loops over it. To
@@ -231,15 +239,17 @@ RtScheduler
 Sizes printed at gateway start:
 
 ```text
-gateway: rtrun_size=210688 max_active=16 pool_bytes=3371008
+gateway: rtrun_size=226048 max_active=16 pool_bytes=3616768
 ```
 
-`sizeof(RtScheduler)` is 4,837,856 bytes, `sizeof(RtProfile)` is 20,760,
-`sizeof(RtPendingAction)` is 1,176, and `sizeof(RtJob)` is 12,216 in this
-measurement. Across a long event stream, each run goes through
-`scheduler_alloc_run` → `scheduler_free_run` (mark-used / mark-free, no
-per-run pool allocation). The 210,688-byte struct is reused; the allocation
-budget covers bounded transient work rather than persistent growth.
+`sizeof(RtScheduler)` is 4,849,888 bytes, `sizeof(RtProfile)` is 20,760,
+`sizeof(RtPendingAction)` is 1,368, and `sizeof(RtJob)` is 12,216 at 0.28.0
+(revision `41e8790d`). The gateway prints the first line at startup, so
+compare it rather than trusting this one. Across a long event stream, each run
+goes through `scheduler_alloc_run` → `scheduler_free_run` (mark-used /
+mark-free, no per-run pool allocation). The 226,048-byte struct is reused; the
+allocation budget covers bounded transient work rather than persistent
+growth.
 See [Heap budget](../performance/heap-budget.md) for the per-event
 allocation budget and measurement story.
 

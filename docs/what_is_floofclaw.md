@@ -106,8 +106,8 @@ managed-op, and configured result turns receive it through the existing path.
 
 ### One binary, one long-lived process, zero magic
 
-FloofClaw is one C binary (650,664 bytes stripped in the current macOS arm64
-source-release measurement) and one
+FloofClaw is one C binary (667,304 bytes stripped in the current macOS arm64
+source-release measurement; `make metrics` reproduces it) and one
 long-lived, single-threaded gateway process with no pthreads on the hot
 path. LLM agents and subprocess actions appear as bounded, short-lived
 child jobs while work is active. Runtime state is under `workspace/`;

@@ -8,6 +8,7 @@
 
 #include "discord_internal.h"
 
+#include "../../runtime/support/http1.h"
 #include "../../runtime/support/net.h"
 #include "../../runtime/version.h"
 
@@ -104,10 +105,24 @@ static int dc_rest_read(DcAdapter *a) {
   }
 }
 
-static int dc_rest_status(DcAdapter *a) {
-  if (a->rest_rx_len + 1U < sizeof(a->rest_rx)) a->rest_rx[a->rest_rx_len] = '\0';
-  if (strncmp(a->rest_rx, "HTTP/1.", 7) != 0) return 0;
-  return atoi(a->rest_rx + 9);
+/* Decoded response body. The reactor is single-threaded and this buffer is
+ * consumed entirely inside one dc_drive_rest call, so one module-static
+ * buffer beats a 64 KB stack frame in a poll callback. Sized to the receive
+ * buffer so a large-but-successful reply is never mistaken for a failure. */
+static char g_rest_body[DC_RX_MAX];
+
+/* Returns 1 when a complete response has been parsed, 0 when more bytes are
+ * needed, -1 when the response is malformed. */
+static int dc_rest_response(DcAdapter *a, int peer_closed,
+                            FcHttp1Response *resp) {
+  FcHttp1Status s = fc_http1_parse_response(a->rest_rx, a->rest_rx_len,
+                                            g_rest_body, sizeof(g_rest_body),
+                                            resp);
+  if (s == FC_HTTP1_BAD) return -1;
+  if (s == FC_HTTP1_DONE) return 1;
+  /* A reply with no framing header ends at connection close; the parser
+   * fills the body and reports NEED_MORE until the transport says so. */
+  return peer_closed ? (resp->status > 0 ? 1 : -1) : 0;
 }
 
 void dc_drive_rest(DcAdapter *a, int revents) {
@@ -148,11 +163,20 @@ void dc_drive_rest(DcAdapter *a, int revents) {
     }
   }
   if (a->rest_state == DC_REST_READING && (revents & POLLIN)) {
+    FcHttp1Response resp;
     int rc = dc_rest_read(a);
+    int parsed;
     if (rc < 0) { dc_close_rest(a); return; }
-    if (rc > 0) {
-      int status = dc_rest_status(a);
-      if (status < 200 || status >= 300) dc_diag(a, "REST message post failed status=%d", status);
+    parsed = dc_rest_response(a, rc > 0, &resp);
+    if (parsed < 0) {
+      dc_diag(a, "REST response was not readable HTTP: %s",
+              resp.error[0] ? resp.error : "malformed");
+      dc_close_rest(a);
+      return;
+    }
+    if (parsed > 0) {
+      if (resp.status < 200 || resp.status >= 300)
+        dc_diag(a, "REST message post failed status=%d", resp.status);
       dc_close_rest(a);
     }
   }

@@ -64,11 +64,62 @@ State changes are event-sourced through `task_created`, `task_updated`,
 capacity, and transitions before atomically rewriting
 `workspace/memory/state/tasks.json`.
 
-A run reaching `run_done` does not mutate task lifecycle. Agents that own a
-multi-event request may close it explicitly through the validated
-`task.update` call with `state: "completed"`; conversational agents that opt
-into `autocomplete_message_task_on_send` retain that separate successful-send
-behavior.
+### Who closes an input task
+
+Every `user_message` creates one durable `input` task before any agent runs:
+the record "the user asked this, and it is not yet handled". Creating it is
+the kernel's job. Closing it is deliberately not automatic, because a reply
+is not necessarily an answer — "On it, checking…" leaves the ask open on
+purpose — and a run reaching `run_done` never mutates task lifecycle. An
+input task closes in exactly three ways:
+
+1. **The agent says so.** `task.update` with `state: "completed"` for the
+   exact `task_id`. This is the rule for an agent that does the work itself
+   across several event runs (`openclaw`, `truly_openclaw`): it keeps the
+   ask open while it emits managed actions and closes it when its response
+   is final. The `task_action_or_finalize` output contract enforces the
+   choice — a message-only promise is withheld and repaired.
+
+   The repair budget is not the contract's alone. An agent under rule 2
+   declares no contract, and a structurally malformed decision from it is
+   also repaired, bounded by a top-level `repair_attempts` in its
+   `agent.json` (default 2). Either way a rejected decision is never
+   executed or delivered, so it cannot close the task by accident.
+2. **The agent's `agent.json` sets `autocomplete_message_task_on_send: true`.**
+   A successful `message` send completes the bound input task. This is the
+   rule for an agent whose reply *is* the answer and whose work, if any,
+   lives in its own `work` task with its own lifecycle (`floofclaw`'s
+   `chat_manager`, `hello`, `companion`). Review turns in `floofclaw` use
+   rule 1 instead: the review prompt ends every turn with `task.update`.
+3. **The run fails or is canceled.** The engine stamps `task_failed` /
+   `task_canceled` on the open message task the run was responsible for:
+   the one born in that run, and — for a continuation run started by a
+   runtime-owned event such as `operation_result`, which carries `task_id`
+   explicitly — the ask it was handling. When such a run dies nothing else
+   is scheduled for the ask and the human has already seen the failure
+   narration; an `open` record would claim work in flight that no longer
+   exists. Only reserved event kinds bind this way, and only within the
+   run's own context; a `task_id` key in a product-owned typed event is
+   producer data.
+
+Every LLM agent that answers user messages must do 1 or 2. **If it does
+neither, each successful turn leaves one open task behind.** The active
+store holds `TASK_MAX_ITEMS` (32) tasks and eviction reclaims only terminal
+ones — a full store of open tasks is treated as a real backlog, never as
+debris — so a floop that never closes its input tasks fills the store in
+days. From then on `task_created` is refused at intake, no task exists for
+an agent call to bind to, and every call that requires a binding is
+rejected as `invalid_agent_call: action call requires existing task_id`
+while `message`-only replies still succeed: a bot that can chat but can
+never act, with `agent_output_invalid` as the only visible symptom. Look in
+`workspace/logs/rejected_events.jsonl` first; the diagnosis is
+`workspace/memory/state/tasks.json` holding 32 `open` `input` tasks.
+
+The store is a bounded projection, not the record of truth. When every
+entry is provably debris (all `input`, `work: null`), deleting `tasks.json`
+with the gateway stopped is a valid reset. The usual cause is a fork of a
+shipped floop that lost one of these rules in a later shipped-floop change;
+the shipped floop of the same shape is the reference for which rule to use.
 
 `working_memory_append` adds one unstructured contribution through the normal
 action path. Contributions remain in event order with one plain newline

@@ -25,7 +25,7 @@ see [gateway-reactor.md](concepts/gateway-reactor.md).
 | workers | common `manage_codex`, `manage_claude`, and `manage_hermes`, driven as managed operations |
 | result flow | uniform: every data-returning action is managed-op → `operation_result` → a later configured agent turn |
 | user-visible output | `message` action → `action_succeeded.delivery` → channel adapter tail → out |
-| appliance mode | janitor module rotates JSONL logs and bounds terminal-run, processed-bus, task-archive, and Codex-worker artifacts |
+| appliance mode | janitor module rotates JSONL logs and bounds terminal-run, processed-bus, task-archive, and every managed-worker store |
 
 ## Shipped floops
 
@@ -185,8 +185,8 @@ short-lived agent/action child jobs:
 - `status` — gateway status socket
 - `affair_watcher` — fires `affair_review` envelopes for due affairs
 - `janitor` — appliance-mode log rotation and bounded cleanup for terminal
-  runs, processed bus records, task archives, and Codex worker artifacts
-- `irc` / `ws` / `discord` — channel adapters
+  runs, processed bus records, task archives, and every managed-worker store
+- `irc` / `ws` / `discord` / `telegram` — channel adapters, chosen at build time with `FCLAW_ADAPTERS`
 
 `gateway start` daemonizes. `gateway run` runs the same code path in
 the foreground so Ctrl-C stops it cleanly. Both write pid/loop state
@@ -203,8 +203,8 @@ Current test surfaces and required gates:
 
 | layer | command | purpose |
 |---|---|---|
-| unit | `make unit` | 32 fast C boundary/budget checks |
-| integration | `make integration` | 139 in-process runtime checks |
+| unit | `make unit` | 37 fast C boundary/budget checks |
+| integration | `make integration` | 177 in-process runtime checks |
 | routine gate | `make test` | unit + integration + public-contract probes + hermetic smoke in isolated workspaces; offline |
 | major/deep-engine gate | `make robustness` (currently macOS) | ASan, UBSan, small-stack, fuzz, chaos, disk-full, and thrash; about 20–23 minutes |
 | live provider | `FCLAW_LIVE_SMOKE=1 make live-smoke` | opt-in single real-provider path check |

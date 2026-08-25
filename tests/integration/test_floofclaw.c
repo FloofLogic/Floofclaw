@@ -3608,6 +3608,19 @@ int floofclaw_manager_retry_no_duplicate_effects(void) {
 
   rc |= fx_reset();
   rc |= write_fatest_floop();
+  /* The subject here is the floop-level bounded retry, so opt this one
+   * agent out of in-run decision repair. With the default budget the
+   * malformed decision is repaired inside the run and the floop retry
+   * never engages -- which is the point of that feature, and is proved
+   * by floofclaw_contract_less_agent_repairs_a_normalizer_rejection. */
+  rc |= test_write_file("floops/fatest/agents/floofclaw_manager/agent.json",
+      "{\"id\":\"floofclaw_manager\",\"executor\":\"llm\","
+      "\"model\":{\"ref\":\"floofclaw_manager\"},"
+      "\"repair_attempts\":0,"
+      "\"actions\":[\"work\",\"message\",\"affair_open\",\"note_add\",\"defer\","
+      "\"affair_close\",\"web_read\"],"
+      "\"autocomplete_message_task_on_send\":true,"
+      "\"listen\":[\"event\",\"memory\",\"affairs\",\"tasks\"]}\n");
   rc |= write_manager_mocks();
   rc |= test_write_file("workspace/fixtures/m0_malformed.json",
                         "{\"calls\":[{\"kind\":\"nonsense\"}]}\n");
@@ -4359,14 +4372,82 @@ done:
   return rc;
 }
 
-/* Observed live (truly run_121): gemini-2.5-flash emitted a perfect action
- * call but placed task_id beside args instead of inside it. The stray key
- * passes the task contract (it is a Continue with one substantive action)
- * and is only caught by the structural call validator, which used to kill
- * the run with a bare agent_output_invalid. A structural rejection must
- * spend the same repair budget as a contract rejection, with a generic
- * reason beside the rejected response. */
-static int openclaw_malformed_call_shape_repairs_and_completes(void) {
+/* Observed live (truly run_121, then run_130 three times in a row):
+ * gemini-2.5-flash emits a perfect action call but places task_id beside
+ * args instead of inside it. The binding is the same fact either way, so
+ * the normalizer now accepts that placement: the call executes bound to
+ * the task, with no rejection and no repair spent. */
+static int openclaw_call_level_task_id_binds_without_repair(void) {
+  HarnessGateway *g = NULL;
+  char *logs = NULL, *deliveries = NULL, *events = NULL;
+  int rc = 0;
+
+  rc |= fx_reset();
+  rc |= test_write_file("workspace/notes/shape.txt", "shape-alpha\n");
+  rc |= test_write_file("workspace/fixtures/openclaw_profiles.json",
+      "{\"version\":1,\"profiles\":["
+      "{\"id\":\"default_gemini_flash\",\"provider\":\"mock\",\"model\":\"mock-1\"},"
+      "{\"id\":\"responses\",\"provider\":\"mock\",\"model\":\"mock-1\"}]}\n");
+  rc |= test_write_file("workspace/fixtures/openclaw_shape_beside.json",
+      "{\"calls\":[{\"name\":\"read_file\",\"args\":{"
+      "\"op\":\"start\",\"path\":\"notes/shape.txt\"},"
+      "\"task_id\":\"task_run_001_000002\"}]}\n");
+  rc |= test_write_file("workspace/fixtures/openclaw_shape_final.json",
+      "{\"calls\":["
+      "{\"name\":\"message\",\"args\":{"
+      "\"message\":\"SHAPE_BESIDE_COMPLETE\"}},"
+      "{\"name\":\"task.update\",\"args\":{"
+      "\"task_id\":\"task_run_001_000002\",\"state\":\"completed\"}}]}\n");
+  (void)setenv("FCLAW_MODEL_PROFILES",
+               "workspace/fixtures/openclaw_profiles.json", 1);
+  (void)setenv("LLM_MOCK_RESPONSE_PATHS",
+               "workspace/fixtures/openclaw_shape_beside.json:"
+               "workspace/fixtures/openclaw_shape_final.json", 1);
+
+  g = harness_gateway_init("openclaw");
+  rc |= expect(g != NULL, "OpenClaw loads for call-level task_id");
+  if (!g) goto done;
+  rc |= expect(harness_gateway_publish(g, "tests",
+                                       "read the shape file and report") == 0,
+               "publish call-level task_id request");
+  rc |= expect(drive_until_file_contains(
+                   g, "workspace/logs/deliveries.jsonl",
+                   "SHAPE_BESIDE_COMPLETE", 12000) == 0,
+               "task_id beside args executes and the chain completes");
+  drive_for_ms(g, 200);
+done:
+  if (g) harness_gateway_close(g);
+  logs = read_all_run_logs();
+  (void)test_read_file("workspace/logs/deliveries.jsonl", &deliveries);
+  rc |= test_read_file("workspace/runs/run_001/event_log.jsonl", &events);
+  rc |= expect(access("workspace/runs/run_001/agent_outputs/001_main.json.rejected.json",
+                      F_OK) != 0,
+               "nothing was rejected");
+  rc |= expect(access("workspace/runs/run_001/provider_calls/002_request.json",
+                      F_OK) != 0,
+               "no repair attempt was spent");
+  rc |= expect_substr(events ? events : "",
+                      "\"action\":\"read_file\"",
+                      "the call was executed");
+  rc |= expect_substr(events ? events : "",
+                      "\"task_id\":\"task_run_001_000002\"",
+                      "and it was bound to the task the model named");
+  rc |= expect(count_substr(logs ? logs : "",
+                            "\"type\":\"run_failed\"") == 0,
+               "no run failed");
+  rc |= expect_substr(deliveries ? deliveries : "", "SHAPE_BESIDE_COMPLETE",
+                      "the conversation reaches the user");
+  free(events);
+  free(deliveries);
+  free(logs);
+  return rc;
+}
+
+/* A genuinely stray key is still rejected, and the repair prompt names it:
+ * "not the correct output format" beside the rejected response was not
+ * enough for Truly's main_claw, which repeated the identical shape through
+ * every repair attempt (run_130). */
+static int openclaw_stray_call_key_repair_names_the_key(void) {
   HarnessGateway *g = NULL;
   char *logs = NULL, *deliveries = NULL;
   char *repair_request = NULL, *rejection = NULL;
@@ -4378,10 +4459,10 @@ static int openclaw_malformed_call_shape_repairs_and_completes(void) {
       "{\"version\":1,\"profiles\":["
       "{\"id\":\"default_gemini_flash\",\"provider\":\"mock\",\"model\":\"mock-1\"},"
       "{\"id\":\"responses\",\"provider\":\"mock\",\"model\":\"mock-1\"}]}\n");
-  rc |= test_write_file("workspace/fixtures/openclaw_shape_invalid.json",
+  rc |= test_write_file("workspace/fixtures/openclaw_shape_stray.json",
       "{\"calls\":[{\"name\":\"read_file\",\"args\":{"
       "\"op\":\"start\",\"path\":\"notes/shape.txt\"},"
-      "\"task_id\":\"task_run_001_000002\"}]}\n");
+      "\"rationale\":\"the user asked for the file\"}]}\n");
   rc |= test_write_file("workspace/fixtures/openclaw_shape_clean.json",
       "{\"calls\":[{\"name\":\"read_file\",\"args\":{"
       "\"op\":\"start\",\"path\":\"notes/shape.txt\"}}]}\n");
@@ -4394,16 +4475,16 @@ static int openclaw_malformed_call_shape_repairs_and_completes(void) {
   (void)setenv("FCLAW_MODEL_PROFILES",
                "workspace/fixtures/openclaw_profiles.json", 1);
   (void)setenv("LLM_MOCK_RESPONSE_PATHS",
-               "workspace/fixtures/openclaw_shape_invalid.json:"
+               "workspace/fixtures/openclaw_shape_stray.json:"
                "workspace/fixtures/openclaw_shape_clean.json:"
                "workspace/fixtures/openclaw_shape_final.json", 1);
 
   g = harness_gateway_init("openclaw");
-  rc |= expect(g != NULL, "OpenClaw loads for malformed call-shape repair");
+  rc |= expect(g != NULL, "OpenClaw loads for stray-key repair");
   if (!g) goto done;
   rc |= expect(harness_gateway_publish(g, "tests",
                                        "read the shape file and report") == 0,
-               "publish malformed call-shape request");
+               "publish stray-key request");
   rc |= expect(drive_until_file_contains(
                    g, "workspace/logs/deliveries.jsonl",
                    "SHAPE_REPAIR_COMPLETE", 12000) == 0,
@@ -4420,14 +4501,15 @@ done:
       "workspace/runs/run_001/agent_outputs/001_main.json.rejected.json",
       &rejection);
   rc |= expect_substr(repair_request ? repair_request : "",
-                      "response was not the correct output format, please "
-                      "follow your prompt exactly",
-                      "repair call receives the generic format reason");
+                      "response was not the correct output format: "
+                      "invalid_agent_call: call has non-intent key "
+                      "\"rationale\"",
+                      "repair call names the stray key");
   rc |= expect_substr(rejection ? rejection : "", "\"executed\":false",
                       "structurally rejected decision is preserved unexecuted");
   rc |= expect(count_substr(logs ? logs : "",
                             "\"type\":\"run_failed\"") == 0,
-               "one structural slip no longer fails the run");
+               "one structural slip does not fail the run");
   rc |= expect_substr(deliveries ? deliveries : "", "SHAPE_REPAIR_COMPLETE",
                       "repaired conversation still reaches the user");
   free(rejection);
@@ -4564,7 +4646,172 @@ done:
   free(memory);
   free(logs);
   rc |= openclaw_decision_contract_exhaustion_proof();
-  rc |= openclaw_malformed_call_shape_repairs_and_completes();
+  rc |= openclaw_call_level_task_id_binds_without_repair();
+  rc |= openclaw_stray_call_key_repair_names_the_key();
+  fx_restore_env("LLM_MOCK_RESPONSE_PATHS", saved_paths);
+  fx_restore_env("FCLAW_MODEL_PROFILES", saved_profiles);
+  return rc;
+}
+
+/* Until this landed, a contract-less agent failed terminally as
+ * agent_output_invalid on its first normalizer rejection, and floop
+ * retry_attempts then re-ran the identical turn at full model price with
+ * nothing said about what was wrong -- Scraps run_781 spent three clean
+ * envelopes on three identical rejections and zero repair prompts. The
+ * shipped floofclaw chat_manager declares no contract, so the default
+ * floop could not repair a single slip. */
+int floofclaw_contract_less_agent_repairs_a_normalizer_rejection(void) {
+  char *saved_profiles = fx_capture_env("FCLAW_MODEL_PROFILES");
+  char *saved_paths = fx_capture_env("LLM_MOCK_RESPONSE_PATHS");
+  HarnessGateway *g = NULL;
+  char *logs = NULL, *deliveries = NULL;
+  char *repair_request = NULL, *rejection = NULL;
+  int rc = 0;
+
+  rc |= fx_reset();
+  /* A stray non-intent key beside args: a perfect call otherwise, and
+   * exactly the shape gemini-2.5-flash produces intermittently. */
+  rc |= test_write_file("workspace/fc_chat_stray.json",
+      "{\"calls\":[{\"name\":\"message\",\"args\":{"
+      "\"message\":\"CONTRACTLESS_REPAIRED_REPLY\"},"
+      "\"rationale\":\"the user said hello\"}]}\n");
+  rc |= test_write_file("workspace/fc_chat_clean.json",
+      "{\"calls\":[{\"name\":\"message\",\"args\":{"
+      "\"message\":\"CONTRACTLESS_REPAIRED_REPLY\"}}]}\n");
+  (void)setenv("FCLAW_MODEL_PROFILES",
+               "tests/fixtures/smoke/model_profiles_mock.json", 1);
+  (void)setenv("LLM_MOCK_RESPONSE_PATHS",
+               "workspace/fc_chat_stray.json:"
+               "workspace/fc_chat_clean.json", 1);
+
+  g = harness_gateway_init("floofclaw");
+  rc |= expect(g != NULL, "default floofclaw floop loads");
+  if (!g) goto done;
+  rc |= expect(harness_gateway_publish(g, "tests", "hello there") == 0,
+               "publish a message the agent answers with a stray key");
+  rc |= expect(drive_until_file_contains(
+                   g, "workspace/logs/deliveries.jsonl",
+                   "CONTRACTLESS_REPAIRED_REPLY", 12000) == 0,
+               "a contract-less agent repairs its slip and still replies");
+  drive_for_ms(g, 200);
+done:
+  if (g) harness_gateway_close(g);
+  logs = read_all_run_logs();
+  (void)test_read_file("workspace/logs/deliveries.jsonl", &deliveries);
+  (void)test_read_file("workspace/runs/run_001/provider_calls/002_request.json",
+                       &repair_request);
+  (void)test_read_file(
+      "workspace/runs/run_001/agent_outputs/001_chat.json.rejected.json",
+      &rejection);
+  rc |= expect(repair_request != NULL,
+               "a second provider call is the repair, not a retried turn");
+  rc |= expect_substr(repair_request ? repair_request : "",
+                      "call has non-intent key",
+                      "the repair prompt names the normalizer's rejection");
+  rc |= expect_substr(repair_request ? repair_request : "",
+                      "rejected decision; repair attempt 1",
+                      "the repair prompt says which attempt this is");
+  rc |= expect_no_substr(repair_request ? repair_request : "",
+                         "CONTINUE = one substantive action",
+                         "no contract shape is prescribed to an agent "
+                         "that declares none");
+  rc |= expect_substr(rejection ? rejection : "", "\"contract\":null",
+                      "the rejection artifact names no contract");
+  rc |= expect_substr(rejection ? rejection : "", "\"executed\":false",
+                      "the rejected decision is preserved unexecuted");
+  rc |= expect(count_substr(logs ? logs : "", "\"type\":\"run_failed\"") == 0,
+               "one slip does not fail the run");
+  rc |= expect(count_substr(deliveries ? deliveries : "",
+                            "CONTRACTLESS_REPAIRED_REPLY") == 1,
+               "the repaired reply is delivered exactly once");
+  free(rejection);
+  free(repair_request);
+  free(deliveries);
+  free(logs);
+  fx_restore_env("LLM_MOCK_RESPONSE_PATHS", saved_paths);
+  fx_restore_env("FCLAW_MODEL_PROFILES", saved_profiles);
+  return rc;
+}
+
+/* The budget is bounded, and exhausting it is still terminal. A
+ * contract-less agent has no contract to exhaust, so it keeps the
+ * agent_output_invalid code operators already read for that shape. */
+int floofclaw_contract_less_repair_budget_is_bounded(void) {
+  char *saved_profiles = fx_capture_env("FCLAW_MODEL_PROFILES");
+  char *saved_paths = fx_capture_env("LLM_MOCK_RESPONSE_PATHS");
+  HarnessGateway *g = NULL;
+  char *logs = NULL, *agent_json = NULL;
+  char *runstate = NULL, *second_rejection = NULL;
+  int rc = 0;
+
+  rc |= fx_reset();
+  rc |= test_read_file("floops/floofclaw/agents/chat_manager/agent.json",
+                       &agent_json);
+  rc |= expect(agent_json != NULL, "chat_manager agent.json is readable");
+  if (agent_json) {
+    /* One repair, then terminal: two identical slips exhaust it. */
+    char *patched = (char *)malloc(strlen(agent_json) + 64);
+    if (patched) {
+      const char *at = strstr(agent_json, "\"executor\": \"llm\",");
+      if (at) {
+        size_t head = (size_t)(at - agent_json) +
+                      strlen("\"executor\": \"llm\",");
+        memcpy(patched, agent_json, head);
+        patched[head] = '\0';
+        strcat(patched, "\n  \"repair_attempts\": 1,");
+        strcat(patched, agent_json + head);
+        rc |= test_write_file("floops/floofclaw/agents/chat_manager/agent.json",
+                              patched);
+      } else {
+        rc |= expect(0, "chat_manager agent.json has the expected executor key");
+      }
+      free(patched);
+    }
+  }
+  rc |= test_write_file("workspace/fc_chat_stray.json",
+      "{\"calls\":[{\"name\":\"message\",\"args\":{"
+      "\"message\":\"NEVER_DELIVERED\"},"
+      "\"rationale\":\"the user said hello\"}]}\n");
+  (void)setenv("FCLAW_MODEL_PROFILES",
+               "tests/fixtures/smoke/model_profiles_mock.json", 1);
+  (void)setenv("LLM_MOCK_RESPONSE_PATHS",
+               "workspace/fc_chat_stray.json:"
+               "workspace/fc_chat_stray.json", 1);
+
+  g = harness_gateway_init("floofclaw");
+  rc |= expect(g != NULL, "floofclaw loads with a one-repair budget");
+  if (!g) goto done;
+  rc |= expect(harness_gateway_publish(g, "tests", "hello there") == 0,
+               "publish a message the agent answers wrongly twice");
+  rc |= expect(drive_until_file_contains(g, "workspace/runs/run_001/event_log.jsonl",
+                                        "\"type\":\"run_failed\"", 12000) == 0,
+               "a second identical slip inside the budget is terminal");
+  drive_for_ms(g, 200);
+done:
+  if (g) harness_gateway_close(g);
+  (void)test_read_file("workspace/runs/run_001/runstate.json", &runstate);
+  (void)test_read_file(
+      "workspace/runs/run_001/agent_outputs/002_chat.json.rejected.json",
+      &second_rejection);
+  logs = read_all_run_logs();
+  rc |= expect(second_rejection != NULL,
+               "the budget bought exactly one repair before terminal");
+  rc |= expect_substr(runstate ? runstate : "", "\"code\":\"agent_output_invalid\"",
+                      "a contract-less agent exhausts as agent_output_invalid");
+  rc |= expect_substr(runstate ? runstate : "", "call has non-intent key",
+                      "the terminal error still names the rejection");
+  rc |= expect_no_substr(runstate ? runstate : "",
+                         "agent_decision_contract_exhausted",
+                         "no contract is claimed to have been exhausted");
+  rc |= expect_no_substr(logs ? logs : "", "NEVER_DELIVERED",
+                         "nothing from a rejected decision is delivered");
+  free(second_rejection);
+  free(runstate);
+  if (agent_json)
+    (void)test_write_file("floops/floofclaw/agents/chat_manager/agent.json",
+                          agent_json);
+  free(agent_json);
+  free(logs);
   fx_restore_env("LLM_MOCK_RESPONSE_PATHS", saved_paths);
   fx_restore_env("FCLAW_MODEL_PROFILES", saved_profiles);
   return rc;

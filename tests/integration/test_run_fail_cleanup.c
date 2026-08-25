@@ -2641,6 +2641,145 @@ int memory_compaction_request_appears_above_threshold_and_keeps_newest_20(void) 
   return rc;
 }
 
+/* The compactor's shipped prompt names no {{json}}. Until this was fixed the
+ * *_context_only branch of the agent-input builder emitted the rendered
+ * prompt alone, so the model was handed a 421-byte instruction and nothing
+ * to summarize; it invented a cutoff, and the runtime rejected it once per
+ * turn. Assert the projected request is in the input the child is given. */
+int memory_compaction_input_carries_the_request_when_the_prompt_omits_json(void) {
+  RtContext ctx;
+  RtAgentMeta meta, compactor_meta;
+  RtStep step;
+  RtAgentInvocation inv;
+  RtActionRegistry empty_registry;
+  char *written = NULL;
+  int rc = 0;
+  memset(&empty_registry, 0, sizeof(empty_registry));
+  rc |= test_reset_workspace();
+  rc |= init_memory_test_ctx(&ctx);
+  rc |= seed_memory_messages(&ctx, 50);
+  memory_test_meta(&meta);
+  rc |= expect(rt_memory_maybe_request_compaction(&ctx, &meta) == 0,
+               "compaction request is created");
+  rc |= expect(ctx.memory_compaction_due, "compaction is due");
+
+  memset(&step, 0, sizeof(step));
+  snprintf(step.id, sizeof(step.id), "memory.compact");
+  snprintf(step.type, sizeof(step.type), "agent");
+  snprintf(step.target, sizeof(step.target), "memory_compactor");
+  memset(&compactor_meta, 0, sizeof(compactor_meta));
+  snprintf(compactor_meta.id, sizeof(compactor_meta.id), "memory_compactor");
+  compactor_meta.can_write_memory = 1;
+  compactor_meta.memory_compaction_context_only = 1;
+  rc |= expect(rt_agent_prepare_invocation(&ctx, "floofclaw", &step, "llm",
+                                           &empty_registry, &compactor_meta,
+                                           NULL, 0, &inv) == 0,
+               "compactor invocation prepares");
+  rc |= expect_substr(inv.input, "compact_through_message_id",
+                      "input carries the runtime-selected cutoff");
+  rc |= expect_substr(inv.input, "\"compact_through_message_id\":\"msg_000030\"",
+                      "input carries the exact cutoff, not a placeholder");
+  rc |= expect_substr(inv.input, "\"message_id\":\"msg_000001\"",
+                      "input carries the first selected message");
+  rc |= expect_substr(inv.input, "\"message_id\":\"msg_000030\"",
+                      "input carries the last selected message");
+  rc |= expect_no_substr(inv.input, "\"message_id\":\"msg_000031\"",
+                         "input excludes the messages kept raw");
+  rc |= expect(strlen(inv.input) > 1024,
+               "input is the prompt plus the request, not the prompt alone");
+  rc |= test_read_file(inv.in_path, &written);
+  rc |= expect_substr(written, "compact_through_message_id",
+                      "the file handed to the child carries the request too");
+  free(written);
+  return rc;
+}
+
+/* The kept-raw tail and the summary cursor make compaction incremental, so a
+ * window too large for one request is narrowed rather than refused. Refusing
+ * wedged the context: nothing compacted and the store kept growing. */
+int memory_compaction_request_survives_a_deployment_sized_store(void) {
+  RtContext ctx;
+  RtAgentMeta meta;
+  char payload[RT_LARGE];
+  char *event_log = NULL;
+  size_t line_len = 0;
+  int rc = 0;
+  rc |= test_reset_workspace();
+  rc |= init_memory_test_ctx(&ctx);
+  /* ~600 bytes of text per message x 300 messages is far past RT_XL. */
+  for (int i = 1; i <= 300; ++i) {
+    char text[640];
+    memset(text, 'x', sizeof(text) - 1);
+    text[sizeof(text) - 1] = '\0';
+    snprintf(payload, sizeof(payload), "{\"text\":\"m%03d %s\"}", i, text);
+    rc |= expect(rt_append_event(&ctx, "user", "memory", payload) == 0,
+                 "seed deployment-sized memory message");
+  }
+  memory_test_meta(&meta);
+  rc |= expect(rt_memory_maybe_request_compaction(&ctx, &meta) == 0,
+               "oversized window still produces a request");
+  rc |= expect(ctx.memory_compaction_due,
+               "compaction is due for a deployment-sized store");
+  rc |= expect(strlen(ctx.memory_compaction_json) > 16384,
+               "the request is past the 16 KB event-payload size");
+  rc |= expect(strlen(ctx.memory_compaction_json) <
+                   (size_t)RT_MEMORY_COMPACTION_PAYLOAD_MAX,
+               "the request stays inside the payload budget");
+  rc |= test_read_run_event_log("run_001", &event_log);
+  rc |= expect_substr(event_log, "\"type\":\"memory_compaction_requested\"",
+                      "the request event is written whole");
+  rc |= expect_substr(event_log, "\"message_id\":\"msg_000001\"",
+                      "the narrowed window still starts at the oldest message");
+  if (event_log) {
+    const char *at = strstr(event_log, "\"type\":\"memory_compaction_requested\"");
+    if (at) {
+      const char *end = strchr(at, '\n');
+      line_len = end ? (size_t)(end - at) : strlen(at);
+    }
+  }
+  rc |= expect(line_len > 16384,
+               "the committed event line carries the whole request, not a prefix");
+  free(event_log);
+  return rc;
+}
+
+/* An empty slot is a runtime bug, not a prompt to guess from. The step must
+ * fail with the projection error narrated and never reach the provider. */
+int memory_compaction_with_an_empty_slot_fails_before_the_provider(void) {
+  RtContext ctx;
+  RtAgentMeta compactor_meta;
+  RtStep step;
+  RtAgentInvocation inv;
+  RtActionRegistry empty_registry;
+  char *event_log = NULL;
+  char *written = NULL;
+  int rc = 0;
+  memset(&empty_registry, 0, sizeof(empty_registry));
+  rc |= test_reset_workspace();
+  rc |= init_memory_test_ctx(&ctx);
+  memset(&step, 0, sizeof(step));
+  snprintf(step.id, sizeof(step.id), "memory.compact");
+  snprintf(step.type, sizeof(step.type), "agent");
+  snprintf(step.target, sizeof(step.target), "memory_compactor");
+  memset(&compactor_meta, 0, sizeof(compactor_meta));
+  snprintf(compactor_meta.id, sizeof(compactor_meta.id), "memory_compactor");
+  compactor_meta.memory_compaction_context_only = 1;
+  rc |= expect(ctx.memory_compaction_json[0] == '\0', "the slot starts empty");
+  rc |= expect(rt_agent_prepare_invocation(&ctx, "floofclaw", &step, "llm",
+                                           &empty_registry, &compactor_meta,
+                                           NULL, 0, &inv) != 0,
+               "an empty compaction slot fails the step");
+  rc |= test_read_run_event_log("run_001", &event_log);
+  rc |= expect_substr(event_log, "model input projection failed",
+                      "the projection failure is narrated");
+  rc |= expect(test_read_file(inv.in_path, &written) != 0 || !written ||
+                   written[0] == '\0',
+               "no agent input is written for a failed projection");
+  free(written);
+  free(event_log);
+  return rc;
+}
+
 int memory_compaction_not_requested_below_threshold_or_min_range(void) {
   RtContext ctx;
   RtAgentMeta meta;
@@ -2708,6 +2847,24 @@ int memory_compactor_matching_cutoff_commits_summary_state(void) {
   rc |= expect_substr(summary, "\"recent_count\":20",
                       "summary state records raw tail count");
   free(summary);
+  {
+    /* memory.json is the projection snapshot the next turn writes. A
+     * committed compaction has to make its conversation_summary non-null;
+     * on both live bots it stayed null for a month. */
+    char projection[RT_XL];
+    char *event_log = NULL;
+    rc |= test_read_run_event_log("run_001", &event_log);
+    rc |= expect_substr(event_log, "\"type\":\"memory_compacted\"",
+                        "an accepted reply commits memory_compacted");
+    free(event_log);
+    rc |= expect(rt_memory_projection_json("chat:tests", 20, projection,
+                                           sizeof(projection)) == 0,
+                 "projection renders after compaction commits");
+    rc |= expect_substr(projection, "\"conversation_summary\":\"older summary\"",
+                        "memory.json projection carries a non-null summary");
+    rc |= expect_no_substr(projection, "\"conversation_summary\":null",
+                           "the projection is no longer the empty default");
+  }
   return rc;
 }
 
@@ -2739,5 +2896,131 @@ int memory_compactor_mismatched_cutoff_is_rejected_without_commit(void) {
   rc |= expect_substr(normalized, "\"events\":[]",
                       "mismatched cutoff emits no committed events");
   rc |= expect_file_not_exists("workspace/memory/state/summary_state.json");
+  return rc;
+}
+
+/* ---- failed continuation runs close the ask they were handling ---- */
+
+static int seed_open_input(const char *task_id, const char *context_id,
+                           const char *text) {
+  char payload[1024];
+  snprintf(payload, sizeof(payload),
+           "{\"task_id\":\"%s\",\"context_id\":\"%s\",\"kind\":\"input\","
+           "\"input\":{\"type\":\"message\",\"text\":\"%s\"},"
+           "\"created_event_id\":\"evt_%s\",\"created_ms\":1,"
+           "\"state\":{\"status\":\"open\",\"work\":null,\"done_when\":null,"
+           "\"artifacts\":[],\"updated_ms\":1}}",
+           task_id, context_id, text, task_id);
+  return rt_task_apply_event("task_created", payload);
+}
+
+static int init_run_ctx(RtContext *ctx, const char *run_id,
+                        const char *context_id, const char *event_kind,
+                        const char *event_payload_json) {
+  if (!ctx) return -1;
+  memset(ctx, 0, sizeof(*ctx));
+  snprintf(ctx->workspace, sizeof(ctx->workspace), "workspace");
+  snprintf(ctx->run_id, sizeof(ctx->run_id), "%s", run_id);
+  snprintf(ctx->run_dir, sizeof(ctx->run_dir), "workspace/runs/%s", run_id);
+  snprintf(ctx->context_id, sizeof(ctx->context_id), "%s", context_id);
+  snprintf(ctx->event_kind, sizeof(ctx->event_kind), "%s", event_kind);
+  snprintf(ctx->event_payload_json, sizeof(ctx->event_payload_json), "%s",
+           event_payload_json);
+  ctx->next_event = 1;
+  return test_mkdir_p(ctx->run_dir);
+}
+
+static int count_substr(const char *haystack, const char *needle) {
+  int n = 0;
+  const char *p = haystack;
+  size_t len = needle ? strlen(needle) : 0;
+  if (!p || len == 0) return 0;
+  while ((p = strstr(p, needle)) != NULL) { n++; p += len; }
+  return n;
+}
+
+/* An ask born in run_001 was handed to a worker; the worker's
+ * operation_result started run_002 in the same context, carrying that
+ * task_id, and run_002 died. The ask it was handling is the task that must
+ * record the failure: nothing else is scheduled for it, and the human was
+ * already told. Matching only tasks born in the dying run (its own
+ * "task_run_002_" prefix) leaked exactly this shape three times on Truly in
+ * two weeks, and no later run ever touched those asks again.
+ *
+ * The binding is trusted only from a runtime-owned event kind and only
+ * within the run's own context: a product-owned typed event naming a
+ * task_id is producer data, and a reserved kind cannot reach into another
+ * room. The run's own ask still closes exactly as before. */
+int failed_continuation_run_fails_the_ask_it_was_handling(void) {
+  RtContext ctx;
+  char *event_log = NULL;
+  char *tasks = NULL;
+  int rc = 0;
+
+  rc |= test_reset_workspace();
+  rc |= expect(seed_open_input("task_run_001_000002", "chat:tests",
+                               "is Dreambase sponsoring?") == 0,
+               "ask A (born in run_001) is open");
+  rc |= expect(seed_open_input("task_run_003_000002", "chat:tests",
+                               "unrelated ask in the same room") == 0,
+               "ask B (born in run_003) is open");
+  rc |= expect(seed_open_input("task_run_005_000002", "chat:other",
+                               "ask in another room") == 0,
+               "ask C (another context) is open");
+
+  /* run_002: the worker result for ask A arrives, and the run dies. */
+  rc |= init_run_ctx(&ctx, "run_002", "chat:tests", "operation_result",
+                     "{\"handle\":\"actionreq_run_001_000006\","
+                     "\"action\":\"web_fetch\","
+                     "\"task_id\":\"task_run_001_000002\",\"work_rev\":0,"
+                     "\"text\":\"HTTP 200\"}");
+  rc |= expect(rt_task_terminalize_open_message_tasks_for_run(
+                   &ctx, "task_failed") == 0,
+               "terminalize on run_failed succeeds");
+  rc |= test_read_run_event_log("run_002", &event_log);
+  rc |= expect_substr(event_log, "\"type\":\"task_failed\"",
+                      "the dying continuation run stamps task_failed");
+  rc |= expect_substr(event_log, "\"task_id\":\"task_run_001_000002\"",
+                      "on the ask it was handling, not only its own prefix");
+  rc |= expect_no_substr(event_log, "task_run_003_000002",
+                         "the other open ask in the room is untouched");
+  free(event_log);
+  event_log = NULL;
+
+  /* run_004: a product-owned typed event naming ask B is producer data. */
+  rc |= init_run_ctx(&ctx, "run_004", "chat:tests", "acme.webhook",
+                     "{\"task_id\":\"task_run_003_000002\"}");
+  rc |= expect(rt_task_terminalize_open_message_tasks_for_run(
+                   &ctx, "task_failed") == 0,
+               "terminalize under a typed event succeeds");
+  /* run_006: a reserved kind cannot reach an ask in another context. */
+  rc |= init_run_ctx(&ctx, "run_006", "chat:tests", "operation_result",
+                     "{\"task_id\":\"task_run_005_000002\"}");
+  rc |= expect(rt_task_terminalize_open_message_tasks_for_run(
+                   &ctx, "task_canceled") == 0,
+               "terminalize across contexts succeeds");
+
+  rc |= test_read_file("workspace/memory/state/tasks.json", &tasks);
+  rc |= expect(count_substr(tasks, "\"status\":\"failed\"") == 1,
+               "exactly one ask recorded the failure");
+  rc |= expect(count_substr(tasks, "\"status\":\"canceled\"") == 0,
+               "a reserved kind cannot cancel an ask in another room");
+  rc |= expect(count_substr(tasks, "\"status\":\"open\"") == 2,
+               "the typed-event ask and the other room's ask stay open");
+  free(tasks);
+  tasks = NULL;
+
+  /* run_003 dying still closes the ask born in it, exactly as before. */
+  rc |= init_run_ctx(&ctx, "run_003", "chat:tests", "user_message",
+                     "{\"text\":\"unrelated ask in the same room\"}");
+  rc |= expect(rt_task_terminalize_open_message_tasks_for_run(
+                   &ctx, "task_canceled") == 0,
+               "terminalize on run_canceled succeeds");
+  rc |= test_read_file("workspace/memory/state/tasks.json", &tasks);
+  rc |= expect(count_substr(tasks, "\"status\":\"canceled\"") == 1,
+               "the run's own ask is canceled");
+  rc |= expect(count_substr(tasks, "\"status\":\"open\"") == 1,
+               "only the other room's ask remains open");
+  free(tasks);
   return rc;
 }

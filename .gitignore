@@ -78,15 +78,11 @@ app/*
 !app/README.md
 !app/runtime_flow/
 !app/runtime_flow/**
-!app/runtime_flow2/
-!app/runtime_flow2/**
 !app/pulse/
 !app/pulse/**
 !app/tokenwatch/
 !app/tokenwatch/**
 app/tokenwatch/__pycache__/
-!app/chat_smoke/
-!app/chat_smoke/**
 !app/floofchatv1/
 !app/floofchatv1/sample_web_chat.html
 config/llm_profiles.json
@@ -103,6 +99,10 @@ config/user.md
 # Secret store — never commit
 secrets/
 
+# A deployment's MCP server list names local commands and paths; the shipped
+# template is config/mcp.example.json.
+config/mcp.json
+
 # Generated adapter registry (see ADAPTER_REGISTRY in the Makefile)
 build/
 
@@ -112,4 +112,10 @@ actions/*
 !actions/common/**
 !actions/core/
 !actions/core/**
+# The shared MCP bridge ships with the repo; the actions generated from a
+# deployment's own servers do not — scripts/mcp_sync.sh rewrites them from
+# that deployment's config/mcp.json.
+!actions/mcp/
+actions/mcp/*
+!actions/mcp/_bridge.sh
 actions/**/.DS_Store

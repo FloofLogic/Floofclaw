@@ -88,7 +88,7 @@ and scheduler state.
 Concrete instances landed:
 
 - `RtRun` slots: pool of `RT_MAX_ACTIVE_RUNS` embedded directly in
-  `RtScheduler`. Allocated once. Slots are reused; the 210,688-byte struct
+  `RtScheduler`. Allocated once. Slots are reused; the 226,048-byte struct
   never goes through `malloc`/`free`.
 - `RtPendingAction[RT_MAX_PENDING_ACTIONS]` array embedded in `RtRun`.
   No growable heap-backed queue.

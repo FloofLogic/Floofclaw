@@ -8,8 +8,8 @@
 - `runtime/` — the current C runtime: kernel, scheduler, gateway reactor, modules, support utilities. **One binary**: `bin/fclaw`.
 - `floops/` — shippable floop bundles. Each `floops/<name>/` contains `loop.json` plus the agents used by that loop.
 - `loops/`, `agents/` — test fixture fallback paths populated by tests, not production configuration in a fresh checkout.
-- `actions/` — outside-world capabilities. Every directory holding an `action.json` is discovered recursively at startup. Bundled shared capabilities live under `actions/common/` and runtime primitives under `actions/core/`; other top-level action areas are local installation surface and ignored by Git. Subprocess actions also have `run.sh`. There is no registration list — copying a directory in installs it, and a `_` prefix (`actions/_github`) unloads one without deleting it. `web_read/_pluck` is build source, and its leading underscore keeps the scanner out.
-- `adapters/` — channel adapters, one self-contained source directory each (`adapters/discord/`, `adapters/irc/`, `adapters/ws/`). Each exports a `const FcAdapter fc_adapter_<name>` (`runtime/gateway/adapter.h`); the build discovers the directories and generates the registry, so adding one is: copy the directory, `make`, restart. Statically linked into the same single binary — nothing is dynamically loaded.
+- `actions/` — outside-world capabilities. Every directory holding an `action.json` is discovered recursively at startup. Bundled shared capabilities live under `actions/common/` and runtime primitives under `actions/core/`; other top-level action areas are local installation surface and ignored by Git. Subprocess actions also have `run.sh`. There is no registration list — copying a directory in installs it, and a `_` prefix (`actions/_github`) unloads one without deleting it. `web_read/_pluck` is build source, and its leading underscore keeps the scanner out. `actions/mcp/` is generated: `scripts/mcp_sync.sh` writes one action per tool from the servers in `config/mcp.json`, and only the shared `_bridge.sh` is tracked.
+- `adapters/` — channel adapters, one self-contained source directory each (`adapters/discord/`, `adapters/irc/`, `adapters/telegram/`, `adapters/ws/`). Each exports a `const FcAdapter fc_adapter_<name>` (`runtime/gateway/adapter.h`); the build discovers the directories and generates the registry, so adding one is: copy the directory, `make`, restart. Statically linked into the same single binary — nothing is dynamically loaded.
 - `tests/` — fast C invariant tests plus bash-driven smokes. `make unit` runs the C suite; `make test` runs the full suite.
 - `workspace/` — runtime artifacts (event logs, runs, bus, deliveries). Gitignored.
 - `docs/` — documentation for the current runtime (this tree).
@@ -32,6 +32,10 @@ adapters/
 │   ├── discord_outbox.c         — outbound message queue
 │   └── discord_internal.h       — adapter-local shared types
 ├── irc/irc_adapter.c            — nonblocking IRC client adapter
+├── telegram/
+│   ├── telegram_adapter.c       — Bot API long-poll client + reactor callbacks
+│   ├── telegram_outbox.c        — outbound message queue
+│   └── telegram_internal.h      — adapter-local shared types
 └── ws/ws_adapter.c              — nonblocking WS server adapter
 ```
 
@@ -146,8 +150,7 @@ runtime/
     ├── net.c / net_tls.c        — nonblocking socket + OpenSSL helpers
     ├── heap_guard.c             — per-event allocation counter for budget tests
     ├── duration.c / log_rotation.c / reconnect_backoff.c / scratch_guard.c
-    ├── color.c / logo.c / timing.c
-    └── stringhelp.h
+    └── color.c / logo.c / timing.c
 ```
 
 ## Runtime paths
@@ -187,6 +190,10 @@ runtime/
 - `workspace/memory/state/summary_state.json` — memory compaction state
 - `workspace/logs/codex_ops/<op_id>/` — managed Codex operation state, stdout, stderr, final.txt
 - `workspace/logs/claude_ops/<op_id>/` — same shape for managed Claude Code operations
+- `workspace/logs/hermes_ops/<handle>.json` — managed Hermes operation handles
+
+  All three are bounded by the janitor's `appliance.<store>.keep` retention;
+  an entry whose operation is still running is never removed.
 - `config/floofclaw_config.json` — gateway + channel config
 - `config/llm_registry.json`, `config/model_profiles.json` — LLM config
 
@@ -240,7 +247,7 @@ registry leaves Git status unchanged.
 
 ## Key properties
 
-- `make test` runs 32 unit cases, 139 integration cases, fixture-isolation and
+- `make test` runs 37 unit cases, 177 integration cases, fixture-isolation and
   public-interface contract probes, and one hermetic, mock-provider-backed
   smoke using local fixtures only.
 - `FCLAW_LIVE_SMOKE=1 make live-smoke` checks the opt-in real-provider path

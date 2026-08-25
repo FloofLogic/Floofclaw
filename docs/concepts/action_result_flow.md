@@ -83,6 +83,11 @@ decides its response is final. The legacy
 `autocomplete_message_task_on_send` behavior remains an opt-in feature for
 other conversational floops.
 
+The failure half belongs to the engine: if an `operation_result` run dies
+before Main Claw can decide, the task it was bound to — the `task_id` the
+event carries — is stamped `task_failed`, exactly as the originating run's
+own task would be. See `task-feature.md`, "Who closes an input task".
+
 OpenClaw also configures a pre-commit output contract around that choice. A
 task-bearing Main Claw response must contain either the next substantive action
 or the final message/completed-task pair. A message-only promise is withheld,
@@ -233,6 +238,14 @@ outside-world action has `action_started` but no provable terminal event,
 recovery does not replay it or invent success; it terminates the bound
 revision with `work_blocked.reason = "ambiguous_completion"`. This prevents a
 cold restart from repeating an unprovable side effect.
+
+A local (`outside_world: false`) action is replayed instead, under that same
+stable request id, so its effect must be idempotent on that id. Each mutating
+intrinsic stamps the request id into the event it appends and checks the run
+log for it before appending again; a replay whose effect is already committed
+appends nothing and returns the committed values with `"recovered": true`.
+See [Actions — local actions are replayed, so their effects are
+keyed](actions.md#local-actions-are-replayed-so-their-effects-are-keyed).
 
 If a proposed change needs data to flow from an action to an agent
 without going through `operation_result`, stop and confirm with the

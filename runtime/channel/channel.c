@@ -611,9 +611,12 @@ int channel_run_ws(const char *loop_name, int human) {
 }
 
 int channel_run_irc(const char *loop_name, int human) {
-  /* Simple line-oriented IRC stub: each input line is a chat message; each
-   * response goes back as a single output line. Real IRC transport (server
-   * connection, PRIVMSG framing, channels) is intentionally deferred. */
+  /* Local line-oriented IRC channel: each input line is a chat message and
+   * each response goes back as a single output line, for driving a floop
+   * from a terminal without a server. This is deliberately not a transport.
+   * The real one — connection state machine, PING, PRIVMSG framing,
+   * channels — is the adapter in adapters/irc/, selected at build time with
+   * FCLAW_ADAPTERS and run by the gateway, not by this command. */
   char line[CHANNEL_LINE_MAX];
   char response[RT_LARGE];
   char run_id[RT_SMALL];

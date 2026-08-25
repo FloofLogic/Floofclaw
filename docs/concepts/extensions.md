@@ -14,6 +14,7 @@ floofclaw/
 └── runtime/      # does not know their names
 
 fclaw bus publish --type   # typed ingress: nothing to install
+scripts/mcp_sync.sh        # generation: a foreign catalog becomes actions
 ```
 
 The invariant: **installing an extension never requires editing a registration
@@ -82,6 +83,37 @@ reads `RtScheduler.actions`.
 
 See [Actions](actions.md) for the `action.json` contract and
 [adding an action](../getting-started/adding-an-action.md) for the walkthrough.
+
+### Generation: foreign tool catalogs
+
+An action directory is plain data, so a directory of them can be *written* as
+easily as installed by hand. That is the whole of FloofClaw's MCP support:
+`scripts/mcp_sync.sh` asks each configured server for its `tools/list` and
+writes one action per tool. See [MCP servers](../getting-started/mcp.md).
+
+The point is what it avoids. The alternative — a real MCP client in the
+binary — means a new executor, a protocol implementation, a connection
+lifecycle, and a second gating surface parallel to the one actions already
+have. Generation costs a script, and every guarantee is inherited rather than
+rebuilt: allowlists, `force_disable`, `outside_world`, timeouts, artifacts,
+and the managed-operation result path all apply because the output *is* an
+action. The binary gains one wrapper verb, `fclaw mcp sync`, and no protocol:
+a regression test fails if a JSON-RPC method name, transport, or tool handling
+appears anywhere in `runtime/`, or if MCP leaks past that one wrapper file.
+
+The pattern generalises to any foreign catalog you can enumerate — an OpenAPI
+document, a plugin manifest, an internal tool registry. What makes it work is
+the rule the whole surface is built on:
+
+- **Generation is explicit.** Sync runs when an operator runs it, never at
+  startup. Between syncs the on-disk catalog is the truth, so a deployment
+  cannot change shape because a remote server did.
+- **Generated output is not source.** It is git-ignored and rewritten from
+  scratch; the shared call-time bridge is the only committed piece.
+- **What comes back is untrusted text.** A foreign description or schema ends
+  up in a prompt catalog. Names are validated against a grammar before they
+  reach the filesystem, and the ordinary gates still stand between a
+  generated action and anything it can do.
 
 ## Adapters
 

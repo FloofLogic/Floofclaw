@@ -3,6 +3,310 @@
 FloofClaw follows semantic versioning for public source releases. The public
 release tag and `runtime/version.h` carry the same plain `X.Y.Z` version.
 
+## 0.29.0 — 2026-08-24
+
+### Added
+
+- **MCP servers, as generated actions.** `scripts/mcp_sync.sh` asks each
+  server in `config/mcp.json` for its `tools/list` and writes one ordinary
+  action per tool to `actions/mcp/<server>__<tool>/`, carrying the tool's own
+  `inputSchema` through as `args_schema`. The kernel never learns the
+  protocol: there is no MCP executor, no `dlopen`, and no JSON-RPC method,
+  transport, or tool handling in the binary — a regression test fails if any
+  appears in `runtime/`, or if MCP leaks past the one CLI wrapper file.
+  Everything downstream applies because the output *is* an action:
+  agent allowlists, deployment `force_disable`, `outside_world`, the action
+  deadline, per-call artifacts, and the `managed_operation` result path.
+  Config uses the same `mcpServers` shape as Claude Desktop and Claude Code,
+  so an existing one can be pasted in. Both transports are supported: stdio
+  (spawned per call, cold start accepted for v1) and HTTP via `curl`.
+  See `docs/getting-started/mcp.md`.
+- **`actions/mcp/_bridge.sh`** — the only piece that speaks MCP, and only at
+  call time. Sends `initialize`, `notifications/initialized`, and
+  `tools/call`, matches the reply by JSON-RPC id, strips FloofClaw's own `op`
+  field so a tool never sees an argument it did not declare, writes the
+  complete reply to the call's artifact, and returns a bounded 8 KiB text
+  excerpt as the operation result. `isError`, a JSON-RPC error, a dead
+  command, or a server that answers nonsense fails that one call with a
+  coded error object; a hung server is killed with its whole process group
+  after `FCLAW_MCP_CALL_TIMEOUT_S` (default 55s, inside the action's 60s
+  deadline). No failure mode reaches the gateway.
+- **`fclaw mcp sync|secret`** — the operator entry point, so MCP is
+  discoverable from `fclaw` with no arguments and obeys the deployment-wide
+  output contract like every other command: `-h` is the scripts' operator
+  text, and agent mode (the default) returns one JSON object carrying
+  `added`/`changed`/`removed`/`unreachable` and the applied/dry-run state.
+  `runtime/mcp_cli.c` parses the output mode and `exec`s the script; it holds
+  no protocol. `--dry-run` passes through, an unreachable server is a nonzero
+  exit naming it in `unreachable`, and `fclaw mcp secret` reads the value on
+  stdin so it never enters argv.
+- **`scripts/mcp_secret.sh`** — stores one server credential across every
+  action generated from that server, reading the value on stdin so it never
+  enters argv. Action secrets are scoped to a single action id by design, so
+  a server with eight tools needs eight copies; this is the one command that
+  does it. `config/mcp.json` references them as `${NAME}` and never holds a
+  value.
+- **Sync is explicit and idempotent.** It rewrites `actions/mcp/` from the
+  servers' current catalogs, prints added/changed/removed ids, supports
+  `--dry-run`, and **never runs at gateway startup** — between syncs the
+  on-disk catalog is the truth, exactly like every other action. A server
+  that fails to answer keeps the actions it already has and the run exits
+  nonzero naming it, so a transient outage cannot delete a deployment's tool
+  catalog. Server and tool names are validated against
+  `[A-Za-z0-9_.-]{1,48}` before they can reach the filesystem.
+- **`tests/test_mcp_generation.sh`** — hermetic fixture servers (stdio and
+  loopback HTTP) proving manifest generation, re-sync idempotence and stale
+  removal, the bridge round-trip, every server failure mode failing loudly
+  inside its bound, an end-to-end run through `openclaw` returning an
+  `operation_result`, `force_disable` masking a generated action, the tool's
+  own required fields enforced from the copied schema, credential injection
+  reaching the server but not the artifacts, and the runtime staying free of
+  the protocol.
+
+- **Telegram channel adapter.** `adapters/telegram/` connects a BotFather
+  bot over the plain-HTTPS Bot API: long-poll `getUpdates` inbound,
+  `sendMessage` outbound. No websocket, no heartbeat, no reconnect state
+  machine, and self-echo runaways are structurally absent — `getUpdates`
+  never returns the bot's own messages. Each conversation gets its own
+  context (`chat:telegram:<chat_id>`, `chat:telegram:dm:<user_id>`), group
+  traffic requires an explicit `allowed_chat_ids` entry, and the poll offset
+  is persisted only after a publish so a crash replays an update rather than
+  losing it. v1 is text only: no media, editing, inline keyboards, or
+  webhooks. See `docs/getting-started/telegram.md`.
+- **Telegram live-transport gate.** `channels.telegram.api_base` is a
+  hermetic test seam: refused entirely unless
+  `FCLAW_TELEGRAM_TEST_ALLOW_LOOPBACK=1`, and then it accepts exactly
+  `http://127.0.0.1:<port>` — the same posture as the media loopback
+  switch. `tests/test_telegram_transport.sh` drives the production conn
+  state machine, http1 parser, bus publish, hello reply, sendMessage, and
+  the offset-acks-after-publish rule against a local fixture playing the
+  Bot API; the routine gate runs it via `bin/fclaw_test_all`, a gateway
+  binary that always contains every adapter, so coverage never depends on
+  `FCLAW_ADAPTERS`.
+- **`runtime/support/http1.{c,h}`** — a shared HTTP/1.1 request builder and
+  response reader with real status-line and header parsing, `Content-Length`
+  and chunked framing, keep-alive detection, and bounds that refuse rather
+  than truncate. Discord's REST path is ported onto it, replacing
+  `atoi(rx + 9)` for the status, no header parsing, and no chunked support.
+- **`FCLAW_ADAPTERS` picks the channels compiled into `bin/fclaw`.** The
+  WebSocket adapter is always linked because `fclaw -i` and the local client
+  API ride on it; the outward channels are chosen —
+  `make FCLAW_ADAPTERS="ws telegram"`, or `all` for everything. Test
+  binaries always link every adapter, so `make test` proves the same thing
+  on every machine. `fclaw adapters -a` is the authority for what a binary
+  contains.
+
+### Changed
+
+- **The default build now contains only the WebSocket adapter.** A
+  deployment that wants Discord, IRC, or Telegram rebuilds with
+  `make FCLAW_ADAPTERS="ws discord"` (or `all`). A config enabling a channel
+  the binary does not contain refuses startup and names the rebuild, rather
+  than starting, looking healthy, and answering nothing on that channel.
+  **Upgrade note:** existing deployments keep working by adding their
+  channels to the build command — `make FCLAW_ADAPTERS="ws discord"` for a
+  Discord bot — and changing nothing else. The refusal message contains the
+  exact command.
+- **`make FCLAW_ADAPTERS="ws discord" test` works as one command, and the
+  Makefile says when it relinks.** The selection reached the
+  adapter-selection test's deliberate default build through `MAKEFLAGS`;
+  that test and the mock-only build contract now sever themselves from the
+  parent make. The android build contract runs in an isolated copy so its
+  own `make` cannot flip the working tree's selection mid-suite. When the
+  selection changes the Makefile prints one line on stderr before it
+  removes and relinks `bin/fclaw`. The shipped tests read `bot_name`,
+  `default_floop`, and the channel set from the config under test instead
+  of assuming the shipped one, so `make test` passes on a deployment branch.
+
+### Added
+
+- **Every managed-worker store is under retention.** `codex_ops` had a
+  janitor task; Claude Code directories under
+  `workspace/logs/claude_ops/<op_id>` and Hermes handles under
+  `workspace/logs/hermes_ops/` had none and grew unbounded (jet's `codex_ops`
+  is 7.2 MB across 22 directories today; the other two only grow). All three
+  now share one task, one count-only rule, and one config shape —
+  `appliance.<store>.keep` and `.check_interval_ms`, so `appliance.codex_ops`
+  keeps meaning exactly what it meant. A worker added later that writes one
+  entry per operation joins that table rather than getting a task of its own.
+  New in the rule for all three, `codex_ops` included: an entry whose
+  operation is still `running` in `workspace/memory/state/operations.json` is
+  never removed, however old its number makes it look — its worker is still
+  writing into it. An operation the bounded store has since forgotten is
+  ordinary debris and stays prunable.
+
+- **Bounded decision repair without an output contract.** A structurally
+  malformed decision — a stray key beside `args`, a missing `name` — is now
+  repaired for any LLM agent, not only one that declares
+  `output_contract`. The budget is a top-level `repair_attempts` in
+  `agent.json`, default `2`, `0` through `4` accepted; `0` restores the old
+  behavior. Before this, a contract-less agent failed terminally as
+  `agent_output_invalid` on the first rejection, and floop `retry_attempts`
+  then re-ran the identical turn at full model price with nothing said about
+  what was wrong (Scraps run_781: three clean envelopes, three identical
+  rejections, zero repair prompts). The shipped `floofclaw` `chat_manager`
+  declares no contract either, so the default floop could not repair a single
+  slip. Contract agents are untouched: same budget key, same correction text,
+  same `agent_decision_contract_exhausted` on exhaustion. A contract-less
+  agent is pointed back at its own prompt with the rejection named rather
+  than shown two forms it was never asked for, and exhausts as
+  `agent_output_invalid`. Script and native agents are never re-run — their
+  output is deterministic, so a second identical turn buys nothing.
+
+### Added
+
+- **Write confinement for every executing action.** `bash`, `apply_patch`,
+  `web_fetch`, and `http_call` ran unconfined as the gateway user —
+  `actions/core/bash/run.sh` was `subprocess.run(cmd, shell=True)` with the
+  whole filesystem writable. They now run under `sandbox-exec` on macOS or
+  `bwrap` on Linux, with writes permitted to the workspace root and nowhere
+  else; reads, execution, and the network are untouched, and scratch space is
+  a per-invocation directory inside the workspace that `TMPDIR` points at. It
+  fails closed: on a host with neither mechanism the action refuses rather
+  than running unconfined, and names the way past it. The opt-out is declared
+  action config (`actions.<id>.sandbox: "off"`), so it comes from the
+  deployment's own file and a model cannot reach it through arguments. The
+  whole mechanism is in `actions/common/_lib/sandbox.sh`; the kernel learns
+  nothing. One documented cost: macOS `mktemp(1)` with no template ignores
+  `TMPDIR` and targets the per-user Darwin temp directory, which is denied —
+  permitting that directory would void the confinement for any deployment
+  installed under it. `SECURITY.md` states what this does and does not
+  protect against.
+
+### Changed
+
+- **Shipped docs re-measured and de-contradicted.** Every published number was
+  stale, including the ones a previous sweep had "corrected": the test counts
+  said 32/139 or 33/156 against an actual 37/177, the binary size said 684,424
+  or 650,664 bytes against 667,304, `sizeof(RtRun)` said 210,688 against
+  226,048, and `sizeof(RtScheduler)` appeared as two different wrong numbers.
+  All re-measured with `make metrics` and struct probes rather than copied
+  forward, and the current-value sites now name the revision they were
+  measured at so drift is visible without rebuilding. Contradictions fixed:
+  the install guide expected `fclaw 0.26.2`; the floop table gave `openclaw`
+  and `floofclaw` the wrong model profiles; the provider guide said
+  `thinkingLevel` is sent only for Gemini 3 when the transport sends it for
+  any Gemini profile with `effort` (the shipped `floofclaw_manager` is
+  gemini-2.5-flash); `DEVELOPMENT_PROCESS.md` described a squash-based
+  `release` branch that `RELEASING.md` replaced with an assembled public
+  history, and used the retired `gateway status --json` spelling; the IRC
+  channel comment called the real transport "intentionally deferred" when it
+  ships in `adapters/irc/`; `project-layout.md` and `gateway-reactor.md` had
+  never listed the Telegram adapter. `fclaw config` had no CLI reference
+  section and was missing, with `-i`, from the `-a` usage `commands` array —
+  both fixed. `docs/index.md` now links every doc that ships; six were
+  unreachable, including the MCP guide. The one remaining omission is
+  deliberate and now recorded in `release_manifest.txt`:
+  `docs/testing/baseline_v0.18.0.md` is an internal baseline that does not
+  ship, so linking it dangles in the assembled public tree. Dead files removed:
+  `runtime/support/stringhelp.h` (no includers), the two `run.sh` scripts for
+  actions that are runtime intrinsics, and two `.gitignore` entries
+  un-ignoring directories that do not exist.
+
+- **One deadline per action instead of three.** `actions/core/bash` declared
+  `timeout_ms: 30000` while its script enforced its own `timeout=30` and its
+  manifest also claimed a 300s/600s managed-operation window — ten times the
+  deadline the kernel actually kills the job at. Same shape in `apply_patch`,
+  `web_fetch`, and `http_call`. The kernel now exports the manifest's
+  `timeout_ms` to every subprocess action as `FCLAW_ACTION_TIMEOUT_MS`, and
+  each script derives its command budget from it with a small reserve, so a
+  command that runs long reports a clean timeout instead of being SIGKILLed
+  mid-write. The managed-operation window on those four is now a backstop
+  just above the job deadline (60s/120s and 90s/180s) rather than an
+  unrelated order of magnitude.
+
+### Fixed
+
+- **Linux sandbox: no tmpfs over `/tmp`.** The `bwrap` argv mounted a
+  private tmpfs over `/tmp` after binding the workspace, so anything the
+  host keeps there vanished inside the sandbox — including a deployment or
+  test copy that lives under `/tmp`, whose own workspace bind the tmpfs then
+  shadowed (on jet, `web_fetch` could not see the test's fake `curl` and ran
+  the real one). Scratch already lives inside the workspace via `TMPDIR`;
+  `/tmp` is now the same read-only view of the host it is on macOS.
+- **A crash could duplicate any local mutation.** `outside_world: false`
+  makes a started request without a terminal eligible for replay, and
+  recovery dispatches it again under the same request id — but the mutating
+  intrinsics ignored that id entirely (`(void)rid;`), so a crash in the
+  window between `action_started` and the terminal repeated whatever the
+  first dispatch had already committed. The audit found every one of them
+  affected: `note_add` added the note twice, `counter_bump` applied its delta
+  twice (a number quietly wrong rather than visibly duplicated),
+  `affair_close` closed twice, `defer` recomputed its deadline from the
+  restart clock and silently pushed the review out by however long the
+  gateway was down, `affair_open` minted a second concern under a different
+  id because the id comes from the run's event counter, and `work` created a
+  second work task — after which `rt_task_select_unique_revisable_work` saw
+  two revisable tasks in the context and refused every later `work` call as
+  ambiguous. `work_complete` and `work_blocked` did not duplicate, but failed
+  the replay as a stale binding, stamping a failed terminal on work that had
+  completed.
+  Each now stamps its request id into the event it appends and consults the
+  shared `rt_action_committed_effect` first, returning the committed values
+  with `"recovered": true` instead of appending a second time — generalizing
+  the guard `working_memory_append` already had, which now uses the same
+  helper. Both halves of the crash window are covered per mutation class in
+  `tests/integration/test_local_action_replay.c`.
+
+- **Memory compaction never once succeeded in deployment.** Both live bots
+  held `conversation_summary: null` with 172 and 218 uncompacted messages,
+  and 489 of one bot's 492 `rejected_events.jsonl` lines since 07-24 were the
+  same compaction-cutoff rejection — burying every real rejection in the file
+  the debug flow names as its first stop. The rejection was a symptom. The
+  compactor was called with *no input*: the agent-input builder's
+  `conversational_payload_only` / `affair_extraction_context_only` /
+  `memory_compaction_context_only` branch emitted the rendered prompt alone,
+  so a template that does not name `{{json}}` — which all three shipped
+  `memory_compactor` prompts do not — silently dropped the projected request.
+  The provider request was the 421-byte template and nothing else; given no
+  messages, the model invented a cutoff and summarized its own instructions,
+  and the runtime rejected the invention once per turn, forever. Those three
+  shapes now get the same appended `=== model input ===` section every other
+  templateless agent gets, which repairs the shipped floops and every
+  `fclaw_*` fork of them without touching a prompt.
+- **A deployment-sized message store no longer wedges compaction.** The
+  compaction request is built into a fixed buffer, travels as an event
+  payload, replays into the run context, and is rendered into the compactor's
+  input — and 147 messages already build ~50 KB. A window that overflowed
+  failed the run and left the store to grow, so every later turn overflowed
+  harder and nothing ever compacted. The window is now narrowed to fit the
+  payload budget instead: compaction is incremental, so a narrowed round
+  still advances the summary cursor and the next round takes the rest. Only
+  a window that cannot fit even its configured minimum fails, and it names
+  `memory_min_compact_messages` as the fix.
+
+- **A call-level `task_id` binds instead of failing the turn.** gemini-2.5-flash
+  intermittently writes `task_id` beside `args` rather than inside it — a
+  perfect call otherwise. The normalizer rejected that shape as a stray key,
+  and because the repair prompt said only "not the correct output format"
+  beside the rejected response, the model repeated the identical shape
+  through every repair attempt and the turn died as
+  `agent_decision_contract_exhausted` (Truly run_130, three in a row; the
+  same rejection had hit three earlier turns). The binding is the same fact
+  either way, so the placement is now accepted (two disagreeing values are
+  still refused). Genuinely stray keys are still rejected, and the repair
+  reason now carries the normalizer's own detail, naming the key.
+  Regressions: `openclaw_call_level_task_id_binds_without_repair`,
+  `openclaw_stray_call_key_repair_names_the_key`.
+- **A failed continuation run now closes the ask it was handling.** A run
+  that fails or is canceled has always stamped `task_failed` /
+  `task_canceled` on the input task born in it; a run started by a
+  runtime-owned event such as `operation_result` — which carries the
+  `task_id` of an older ask — left that ask `open` forever when it died,
+  since nothing else was ever scheduled for it. Truly leaked three open
+  input tasks this way in two weeks. The engine now also terminalizes the
+  task the dying run was bound to, trusting the binding only from a
+  reserved event kind and only within the run's own context. Regression:
+  `failed_continuation_run_fails_the_ask_it_was_handling`.
+- **Docs: who closes an input task.** `docs/concepts/task-feature.md` names
+  the three ways an input task closes and the failure mode when an agent
+  uses none of them: the 32-slot store fills and the bot degrades to
+  chat-only with `invalid_agent_call: action call requires existing
+  task_id` in `rejected_events.jsonl`. Shipped agents carry a `_note` next
+  to `autocomplete_message_task_on_send` pointing there, and
+  `DEVELOPMENT_PROCESS.md` records that engine merges do not migrate bot
+  floops.
+
 ## 0.28.0 — 2026-08-23
 
 A minor bump, not a patch: giving each conversation its own context changes

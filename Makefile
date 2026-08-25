@@ -106,6 +106,7 @@ SUPPORT_SRC = \
 	runtime/support/scratch_guard.c \
 	runtime/support/reconnect_backoff.c \
 	runtime/support/log_rotation.c \
+	runtime/support/http1.c \
 	runtime/support/sha256.c
 
 SECURE_SRC = \
@@ -154,9 +155,53 @@ CHANNEL_SRC = \
 # fc_adapters[] array from the directory names, sorted for a deterministic
 # build. A directory that does not export its descriptor fails the link
 # naming the missing symbol, which is the contract enforcing itself.
-ADAPTER_SRC := $(sort $(wildcard adapters/*/*.c))
-ADAPTER_NAMES := $(sort $(notdir $(patsubst %/,%,$(dir $(ADAPTER_SRC)))))
+ADAPTER_ALL_SRC := $(sort $(wildcard adapters/*/*.c))
+ADAPTER_ALL_NAMES := $(sort $(notdir $(patsubst %/,%,$(dir $(ADAPTER_ALL_SRC)))))
+
+# Build-time channel selection. `fclaw -i` and the local client API are
+# backed by the WebSocket adapter, so ws is always linked; the outward
+# channels are chosen. `all` takes every directory.
+#
+#   make FCLAW_ADAPTERS="ws telegram"    ws + Telegram only
+#   make FCLAW_ADAPTERS=all              everything (dev convenience)
+#
+# A config that enables an adapter this binary does not contain fails
+# startup naming the rebuild, rather than going quietly unanswered.
+FCLAW_ADAPTERS ?= ws
+ifeq ($(strip $(FCLAW_ADAPTERS)),all)
+  ADAPTER_NAMES := $(ADAPTER_ALL_NAMES)
+else
+  ADAPTER_UNKNOWN := $(filter-out $(ADAPTER_ALL_NAMES),$(FCLAW_ADAPTERS))
+  ifneq ($(strip $(ADAPTER_UNKNOWN)),)
+    $(error FCLAW_ADAPTERS names no such adapter: $(ADAPTER_UNKNOWN) — available: $(ADAPTER_ALL_NAMES) all)
+  endif
+  ADAPTER_NAMES := $(sort ws $(FCLAW_ADAPTERS))
+endif
+ADAPTER_SRC := $(sort $(foreach n,$(ADAPTER_NAMES),$(wildcard adapters/$(n)/*.c)))
 ADAPTER_REGISTRY := build/adapter_registry.gen.c
+# Test binaries link every adapter regardless of the selection, so the
+# suite proves the same thing on every machine.
+ADAPTER_REGISTRY_ALL := build/adapter_registry_all.gen.c
+
+# Generated while this file is parsed, before make evaluates a single target.
+# It has to be this early: swapping the selection rewrites the registry in
+# the same filesystem second as the previous link, so a recipe-time
+# regeneration leaves make believing the old binary — with the old channels
+# compiled into it — is still current. Deleting the stale artifact here,
+# before anything is stat'd, is the only ordering that always holds.
+ADAPTER_REGISTRY_CHANGED := \
+  $(shell ./scripts/gen_adapter_registry.sh $(ADAPTER_REGISTRY) $(ADAPTER_NAMES))
+ADAPTER_REGISTRY_ALL_CHANGED := \
+  $(shell ./scripts/gen_adapter_registry.sh $(ADAPTER_REGISTRY_ALL) $(ADAPTER_ALL_NAMES))
+ifneq ($(strip $(ADAPTER_REGISTRY_CHANGED)),)
+  # Say so: a plain `make test` after `make FCLAW_ADAPTERS="ws discord"`
+  # lands here and quietly produces a ws-only bin/fclaw otherwise.
+  $(shell printf '%s\n' 'adapters: registry regenerated for "$(ADAPTER_NAMES)"; bin/fclaw relinks with exactly those channels' >&2)
+  $(shell rm -f bin/fclaw)
+endif
+ifneq ($(strip $(ADAPTER_REGISTRY_ALL_CHANGED)),)
+  $(shell rm -f bin/fclaw_unit_tests bin/fclaw_integration_tests bin/fclaw_test_all)
+endif
 
 RUNTIME_SRC = \
 	runtime/main.c \
@@ -217,6 +262,7 @@ RUNTIME_SRC = \
 	runtime/affair_cli.c \
 	runtime/gateway_cli.c \
 	runtime/channel_cli.c \
+	runtime/mcp_cli.c \
 	runtime/json.c \
 	$(SUPPORT_SRC) \
 	$(SECURE_SRC) \
@@ -244,7 +290,6 @@ RUNTIME_HDRS = \
 	runtime/agents.h \
 	runtime/support/fsutil.h \
 	runtime/support/json.h \
-	runtime/support/stringhelp.h \
 	runtime/support/color.h \
 	runtime/support/cli_output.h \
 	runtime/support/timing.h \
@@ -289,6 +334,7 @@ UNIT_TEST_SRC = \
 	tests/unit/test_tls.c \
 	tests/unit/test_fsutil.c \
 	tests/unit/test_fjson_repair.c \
+	tests/unit/test_http1.c \
 	tests/unit/test_json_escape.c \
 	tests/unit/test_llm_request.c \
 	tests/unit/test_llm_stream.c \
@@ -306,12 +352,14 @@ INTEGRATION_TEST_SRC = \
 	tests/integration/test_adapter_tailers.c \
 	tests/integration/test_reactor_pollset.c \
 	tests/integration/test_channel_contexts.c \
+	tests/integration/test_telegram_adapter.c \
 	tests/integration/test_work_ledger_rebuild.c \
 	tests/integration/test_media_handoff.c \
 	tests/integration/test_llm_media_download.c \
 	tests/integration/test_provider_limits.c \
 	tests/integration/test_action_catalog.c \
 	tests/integration/test_work_controller.c \
+	tests/integration/test_local_action_replay.c \
 	tests/integration/test_run_fail_cleanup.c \
 	tests/integration/test_floofclaw.c \
 	tests/harness.c \
@@ -321,7 +369,7 @@ INTEGRATION_TEST_SRC = \
 # can call rt_scheduler_*, channel_synchronous, rt_view_main etc.
 # directly instead of forking ./bin/fclaw. Same set as RUNTIME_SRC
 # minus runtime/main.c (which has its own main() entry point).
-INTEGRATION_RUNTIME_SRC = $(filter-out runtime/main.c,$(RUNTIME_SRC))
+INTEGRATION_RUNTIME_SRC = $(filter-out runtime/main.c $(ADAPTER_SRC) $(ADAPTER_REGISTRY),$(RUNTIME_SRC)) $(ADAPTER_ALL_SRC) $(ADAPTER_REGISTRY_ALL)
 
 all: build
 
@@ -346,35 +394,28 @@ _print-runtime-src: $(ADAPTER_REGISTRY)
 # printfs, so it runs every build and swaps the result in only when the
 # adapter set actually changed — which keeps the relink rare while making
 # add, remove, and rename all correct.
-$(ADAPTER_REGISTRY): FORCE
-	@mkdir -p build
-	@{ \
-		printf '/* Generated from the adapters/ directory listing. Do not edit. */\n'; \
-		printf '#include "../runtime/gateway/adapter.h"\n\n'; \
-		for name in $(ADAPTER_NAMES); do \
-			printf 'extern const FcAdapter fc_adapter_%s;\n' "$$name"; \
-		done; \
-		printf '\nconst FcAdapter *const fc_adapters[] = {\n'; \
-		for name in $(ADAPTER_NAMES); do \
-			printf '  &fc_adapter_%s,\n' "$$name"; \
-		done; \
-		test -n "$(ADAPTER_NAMES)" || printf '  (const FcAdapter *)0,\n'; \
-		printf '};\nconst size_t fc_adapter_count = %d;\n' $(words $(ADAPTER_NAMES)); \
-	} > $@.tmp
-	@if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv -f $@.tmp $@; fi
-
 FORCE:
+
 
 bin/fclaw: $(RUNTIME_SRC) $(RUNTIME_HDRS)
 	@mkdir -p bin
 	$(CC) $(CFLAGS) $(LDFLAGS) $(RUNTIME_SRC) -o $@
 
-bin/fclaw_unit_tests: $(UNIT_TEST_SRC) runtime/fjson_repair/repair.c runtime/support/json.c runtime/support/fsutil.c runtime/support/duration.c runtime/support/heap_guard.c runtime/support/reconnect_backoff.c runtime/support/net_tls.c runtime/llm/normalize.c runtime/llm/profile.c runtime/llm/request.c runtime/llm/stream.c runtime/llm/provider_limit.c runtime/llm/usage.c runtime/secure/auth.c runtime/secure/auth_targets.c runtime/secure/secret_store.c runtime/secure/action_secret_broker.c
+# The gateway binary the shell gates drive when they need every channel
+# compiled in, whatever FCLAW_ADAPTERS selected for bin/fclaw. Same rule as
+# the unit/integration binaries: the suite proves the same thing on every
+# machine.
+RUNTIME_ALL_SRC := $(filter-out $(ADAPTER_SRC) $(ADAPTER_REGISTRY),$(RUNTIME_SRC)) $(ADAPTER_ALL_SRC) $(ADAPTER_REGISTRY_ALL)
+bin/fclaw_test_all: $(RUNTIME_ALL_SRC) $(RUNTIME_HDRS)
+	@mkdir -p bin
+	$(CC) $(CFLAGS) $(LDFLAGS) $(RUNTIME_ALL_SRC) -o $@
+
+bin/fclaw_unit_tests: $(UNIT_TEST_SRC) runtime/fjson_repair/repair.c runtime/support/json.c runtime/support/fsutil.c runtime/support/duration.c runtime/support/heap_guard.c runtime/support/reconnect_backoff.c runtime/support/http1.c runtime/support/net_tls.c runtime/llm/normalize.c runtime/llm/profile.c runtime/llm/request.c runtime/llm/stream.c runtime/llm/provider_limit.c runtime/llm/usage.c runtime/secure/auth.c runtime/secure/auth_targets.c runtime/secure/secret_store.c runtime/secure/action_secret_broker.c
 	@mkdir -p bin
 	$(CC) $(CFLAGS) $(LDFLAGS) -Itests \
 		-DTEST_REGISTRY_INC='"test_registry_unit.inc"' \
 		-DDEFAULT_BUDGET_MS=100 \
-		$(UNIT_TEST_SRC) runtime/fjson_repair/repair.c runtime/support/json.c runtime/support/fsutil.c runtime/support/duration.c runtime/support/heap_guard.c runtime/support/reconnect_backoff.c runtime/support/net_tls.c runtime/llm/normalize.c runtime/llm/profile.c runtime/llm/request.c runtime/llm/stream.c runtime/llm/provider_limit.c runtime/llm/usage.c runtime/secure/auth.c runtime/secure/auth_targets.c runtime/secure/secret_store.c runtime/secure/action_secret_broker.c runtime/action_coerce.c -o $@
+		$(UNIT_TEST_SRC) runtime/fjson_repair/repair.c runtime/support/json.c runtime/support/fsutil.c runtime/support/duration.c runtime/support/heap_guard.c runtime/support/reconnect_backoff.c runtime/support/http1.c runtime/support/net_tls.c runtime/llm/normalize.c runtime/llm/profile.c runtime/llm/request.c runtime/llm/stream.c runtime/llm/provider_limit.c runtime/llm/usage.c runtime/secure/auth.c runtime/secure/auth_targets.c runtime/secure/secret_store.c runtime/secure/action_secret_broker.c runtime/action_coerce.c -o $@
 
 bin/fclaw_integration_tests: $(INTEGRATION_TEST_SRC) $(INTEGRATION_RUNTIME_SRC) $(RUNTIME_HDRS)
 	@mkdir -p bin
@@ -404,7 +445,7 @@ integration: build bin/fclaw_integration_tests
 	./tests/run_in_isolated_copy.sh ./bin/fclaw_integration_tests
 	./tests/test_fixture_isolation.sh
 
-test: unit integration bin/fclaw_local_client_probe
+test: unit integration bin/fclaw_local_client_probe bin/fclaw_test_all
 	./tests/run_in_isolated_copy.sh bash ./tests/test_cli_output_modes.sh
 	./tests/run_in_isolated_copy.sh bash ./tests/test_version_contract.sh
 	./tests/run_in_isolated_copy.sh ./tests/test_local_client_api.sh
@@ -412,11 +453,15 @@ test: unit integration bin/fclaw_local_client_probe
 	./tests/run_in_isolated_copy.sh bash ./tests/test_config_cli.sh
 	./tests/run_in_isolated_copy.sh bash ./tests/test_bus_typed_ingress.sh
 	./tests/run_in_isolated_copy.sh bash ./tests/test_mock_only_build_contract.sh
+	./tests/run_in_isolated_copy.sh bash ./tests/test_adapter_selection.sh
 	./tests/run_in_isolated_copy.sh bash ./tests/test_web_read_action.sh
 	./tests/run_in_isolated_copy.sh bash ./tests/test_tokenwatch_app.sh
 	./tests/run_in_isolated_copy.sh bash ./tests/test_managed_handle_restart.sh
 	./tests/run_in_isolated_copy.sh bash ./tests/test_manage_hermes_completion.sh
-	./tests/test_android_arm64_build_contract.sh
+	./tests/run_in_isolated_copy.sh bash ./tests/test_telegram_transport.sh
+	./tests/run_in_isolated_copy.sh bash ./tests/test_mcp_generation.sh
+	./tests/run_in_isolated_copy.sh bash ./tests/test_action_sandbox.sh
+	./tests/run_in_isolated_copy.sh ./tests/test_android_arm64_build_contract.sh
 	./tests/smoke_lookup_and_poem.sh
 
 test-small-stack:
@@ -521,7 +566,7 @@ live-smoke: build
 	./tests/live_provider_smoke.sh
 
 clean:
-	rm -f bin/fclaw bin/fclaw_unit_tests bin/fclaw_integration_tests bin/fclaw_chaos_check bin/fclaw_thrash_driver bin/fclaw_local_client_probe
+	rm -f bin/fclaw bin/fclaw_test_all bin/fclaw_unit_tests bin/fclaw_integration_tests bin/fclaw_chaos_check bin/fclaw_thrash_driver bin/fclaw_local_client_probe
 	rm -f $(FUZZ_BINS)
 	rm -f bin/actioncore bin/llm-call bin/jf bin/fclaw_setup bin/fclaw_auth
 	rm -f bin/.DS_Store

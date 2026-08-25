@@ -14,6 +14,14 @@ the runtime owns event IDs, requests, jobs, lifecycle transitions, and event
 append order. LLM and script agents must declare `listen`; native agents may
 construct their input internally.
 
+Only an `llm` agent gets a rejected decision back. When the normalizer refuses
+its output, the phase re-runs as another provider call carrying the rejected
+response and the reason, bounded by `repair_attempts` (default 2, or the
+`output_contract`'s own value when one is declared). A `script` or `native`
+agent is deterministic, so a second identical turn buys nothing and the
+rejection is terminal. See
+[Floops — repair without a contract](floops.md#repair-without-a-contract).
+
 ## Processor input
 
 Ordinary agents receive only their declared blocks:
@@ -28,6 +36,11 @@ The normal output is `{"calls":[]}`. `conversational_payload_only`,
 `affair_extraction_context_only`, and `memory_compaction_context_only` are
 narrow input/output shapes retained for the companion and memory flows. They
 do not grant authority over runtime-owned fields.
+
+These three shapes get no action catalog, but they get the same projected
+input every other agent gets: a prompt template that names `{{json}}` places
+it, and one that does not gets an appended `=== model input ===` section.
+Neither form can send the model an instruction with nothing to act on.
 
 ## Model profiles
 

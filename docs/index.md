@@ -23,7 +23,12 @@ For the pitch, read [what_is_floofclaw.md](what_is_floofclaw.md).
 - [Choosing a floop](getting-started/floops.md)
 - [Providers](getting-started/providers.md)
 - [Discord](getting-started/discord.md)
+- [Telegram](getting-started/telegram.md)
 - [IRC](getting-started/irc.md)
+- [MCP servers](getting-started/mcp.md) — point FloofClaw at an MCP server and
+  its tools become ordinary actions
+- [Android arm64](getting-started/android-arm64.md) — building and running
+  under Termux
 
 ## Core concepts
 
@@ -56,6 +61,12 @@ For the pitch, read [what_is_floofclaw.md](what_is_floofclaw.md).
 - [Heap budget](performance/heap-budget.md) — per-event allocation discipline
 - [RSS baseline](performance/rss_baseline.md) — ad-hoc RSS sampling reference,
   not a release gate
+- [Durability](performance/durability.md) — what survives a crash, and what is
+  deliberately refused instead of guessed
+- [TLS verification](performance/tls-verification.md) — how certificates are
+  checked and what that costs
+- [Testing investment](performance/testing_investment.md) — what the suite
+  cost to build and what each campaign actually caught
 
 ## Cross-cutting
 

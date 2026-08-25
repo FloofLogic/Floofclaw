@@ -141,7 +141,8 @@ int rt_action_subprocess_launch(RtRun *r, const char *rid, const RtActionDef *de
      * envelope, or model-authored args. */
     char cfg_buf[RT_ACTION_CONFIG_MAX][RT_MED];
     char op_env_buf[4][RT_MED];
-    char *cfg_env[RT_ACTION_CONFIG_MAX + 5];
+    char timeout_env[RT_MED];
+    char *cfg_env[RT_ACTION_CONFIG_MAX + 6];
     int cfg_n = rt_action_resolve_config(def, cfg_buf, sizeof(cfg_buf[0]));
     int ci, env_n = 0;
     if (cfg_n < 0) {
@@ -155,6 +156,17 @@ int rt_action_subprocess_launch(RtRun *r, const char *rid, const RtActionDef *de
           "config_missing", "{}", error);
     }
     for (ci = 0; ci < cfg_n; ++ci) cfg_env[env_n++] = cfg_buf[ci];
+    /* The manifest's timeout_ms is the one deadline: the kernel kills the
+     * job at it, so a script that enforces its own separate constant can
+     * only disagree. Hand the child the same number it is being judged
+     * by, and let it bound its own work slightly inside it — a script
+     * that reports a clean timeout beats one that is SIGKILLed. */
+    if (snprintf(timeout_env, sizeof(timeout_env),
+                 "FCLAW_ACTION_TIMEOUT_MS=%d",
+                 def->timeout_ms > 0 ? def->timeout_ms
+                                     : (int)RT_ACTION_TIMEOUT_MS_DEFAULT) <
+        (int)sizeof(timeout_env))
+      cfg_env[env_n++] = timeout_env;
     if (def->managed_operation) {
       int pidx = rt_action_runner_pending_index(r, rid);
       char runtime_root[PATH_MAX] = "";

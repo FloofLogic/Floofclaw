@@ -121,16 +121,17 @@ and traced without treating an opaque “agent turn” as truth.
 
 ## 📏 Small enough to audit
 
-Measurements from 0.28.0 on arm64 macOS with Apple clang 17. Run
-`make metrics` to reproduce them at the exact measured revision.
+Measurements from 0.28.0 at revision `41e8790d` on arm64 macOS with Apple
+clang 17. Run `make metrics` to reproduce them; it prints the revision it
+measured, so you can tell at a glance whether this table has drifted.
 
 | What | Measured result |
 | --- | ---: |
-| Stripped executable | **684,424 bytes (~668 KiB)** |
-| Runtime C/header source | **41,453 lines** |
+| Stripped executable | **667,304 bytes (~652 KiB)** |
+| Runtime C/header source | **42,596 lines** |
 | Full provider/TLS build libraries | **2** — libcurl and OpenSSL 3; `make MOCK_ONLY=1` omits both |
-| Mock-backed `hello` run | **0.133 s** |
-| Idle isolated gateway RSS | **~7.6 MiB** |
+| Mock-backed `hello` run | **0.174 s** |
+| Idle isolated gateway RSS | **~8.1 MiB** |
 | Quiet supervision review | **exactly 1 model call** |
 
 ## 🧭 How it works
@@ -207,6 +208,20 @@ floop           copy into floops/    → select and run   → fclaw floops -h
 Only a native adapter requires a rebuild because it is C and links into the
 same executable. Start with the [extension guide](docs/concepts/extensions.md).
 
+### Works with your MCP servers
+
+Paste the `mcpServers` map you already have for Claude Desktop or Claude Code
+into `config/mcp.json` and run the sync:
+
+```bash
+./bin/fclaw mcp sync -h    # tools/list → one action per tool → restart
+```
+
+FloofClaw *generates* actions from a server's catalog rather than embedding an
+MCP client, so each tool arrives as an ordinary action — agent allowlists,
+`force_disable`, timeouts, and per-call artifacts all apply, and the binary
+contains no protocol code. See [MCP servers](docs/getting-started/mcp.md).
+
 ## 🌍 Build targets
 
 FloofClaw builds for macOS, Linux, and Android ARM64. Android produces the same
@@ -227,7 +242,7 @@ the dependency layout, API selection, and device smoke command.
 make test
 ```
 
-The routine offline gate runs 32 unit tests, 139 integration tests, fixture
+The routine offline gate runs 37 unit tests, 177 integration tests, fixture
 isolation, the local-client lifecycle probe, and a hermetic smoke with mock
 provider responses. Major-version release preparation adds ASan, UBSan,
 small-stack, fuzz, chaos, disk-full/read-only, and thrash campaigns through
@@ -243,6 +258,8 @@ Read the reproducible history behind those claims in
 - [CLI output contract](docs/reference/cli.md#output-contract)
 - [Providers](docs/getting-started/providers.md)
 - [Discord](docs/getting-started/discord.md)
+- [Telegram](docs/getting-started/telegram.md)
+- [MCP servers](docs/getting-started/mcp.md)
 - [Floops](docs/getting-started/floops.md)
 - [Actions](docs/concepts/actions.md)
 - [Constitution](docs/concepts/constitution.md)

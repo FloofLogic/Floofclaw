@@ -574,7 +574,7 @@ static int build_request_payload(const char *context_id,
 int rt_memory_maybe_request_compaction(RtContext *ctx, const RtAgentMeta *meta) {
   MemorySummaryState st;
   MemoryMessages msgs;
-  char payload[RT_XL];
+  char payload[RT_MEMORY_COMPACTION_PAYLOAD_MAX];
   const char *context_id;
   int compact_after_messages;
   int compact_after_tokens;
@@ -607,12 +607,27 @@ int rt_memory_maybe_request_compaction(RtContext *ctx, const RtAgentMeta *meta) 
     free_messages(&msgs);
     return 0;
   }
-  if (build_request_payload(context_id, &st, &msgs, start, end, keep_recent,
-                            meta->memory_summary_max_tokens,
-                            meta->memory_recent_summary_max_tokens,
-                            payload, sizeof(payload)) != 0) {
-    free_messages(&msgs);
-    return -1;
+  /* Deployment sizes overflow the payload buffer long before the message
+   * store stops growing: 147 messages already build ~50 KB. Compaction is
+   * incremental -- covers_through advances every round -- so a window that
+   * does not fit is narrowed rather than refused. Refusing wedges the
+   * context permanently: nothing compacts, the store keeps growing, and
+   * every following turn overflows harder. */
+  while (build_request_payload(context_id, &st, &msgs, start, end, keep_recent,
+                               meta->memory_summary_max_tokens,
+                               meta->memory_recent_summary_max_tokens,
+                               payload, RT_MEMORY_COMPACTION_PAYLOAD_MAX) != 0) {
+    if (end <= start || end - start < (size_t)min_compact) {
+      free_messages(&msgs);
+      (void)rt_emit_error(
+          ctx, "kernel",
+          "memory compaction request for %s exceeds the %d-byte payload "
+          "budget at its %d-message minimum; fix: lower that context's "
+          "memory_min_compact_messages",
+          context_id, RT_MEMORY_COMPACTION_PAYLOAD_MAX - 1, min_compact);
+      return -1;
+    }
+    end--;
   }
   free_messages(&msgs);
   return rt_append_event(ctx, "memory_compaction_requested", "kernel", payload);
