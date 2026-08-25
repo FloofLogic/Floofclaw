@@ -19,7 +19,8 @@ see [gateway-reactor.md](concepts/gateway-reactor.md).
 | durable state | materialized from events into JSON under `workspace/memory/state/` |
 | bus | file-backed inbox → processed under `workspace/bus/` |
 | gateway | one long-lived, single-thread reactor process with pluggable modules and short-lived job children |
-| channels | reactor modules: IRC, WS, Discord; CLI publishes via bus events |
+| channels | reactor modules: IRC, WS, Discord, Telegram, chosen at build time with `FCLAW_ADAPTERS`; CLI publishes via bus events |
+| media | Discord attachments (10 × 25 MiB, 50 MiB per message) ride `user_message` behind a private content-addressed manifest; the bounded LLM child downloads from the channel's CDN only; Gemini receives images, PDF, audio, video, OpenAI-style profiles images; Telegram is text-only |
 | affairs | durable concerns reduced from `affair_*` events; affair watcher module fires review envelopes |
 | tasks | durable task state reduced from task-specific events |
 | workers | common `manage_codex`, `manage_claude`, and `manage_hermes`, driven as managed operations |
@@ -187,6 +188,9 @@ short-lived agent/action child jobs:
 - `janitor` — appliance-mode log rotation and bounded cleanup for terminal
   runs, processed bus records, task archives, and every managed-worker store
 - `irc` / `ws` / `discord` / `telegram` — channel adapters, chosen at build time with `FCLAW_ADAPTERS`
+- attachments never touch the reactor: an adapter parses them into a media
+  manifest at publish time, and the LLM child fetches within its own bound
+  (`runtime/bus/media_manifest.c`, `runtime/llm/media.c`)
 
 `gateway start` daemonizes. `gateway run` runs the same code path in
 the foreground so Ctrl-C stops it cleanly. Both write pid/loop state

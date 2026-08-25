@@ -222,6 +222,18 @@ MCP client, so each tool arrives as an ordinary action — agent allowlists,
 `force_disable`, timeouts, and per-call artifacts all apply, and the binary
 contains no protocol code. See [MCP servers](docs/getting-started/mcp.md).
 
+### Sees what you send it
+
+Drop an image, a PDF, or a file into a Discord channel and it reaches the
+model on the same `user_message` path as text: up to 10 attachments, 25 MiB
+each, 50 MiB per message. The bytes are fetched only inside the bounded
+model child, never in the gateway, from Discord's own CDN and nowhere else,
+and the signed URLs live in a private content-addressed manifest that no log
+or artifact repeats. What the model can do with them is the provider's call
+— Gemini profiles take images, PDFs, audio, and video; OpenAI-style profiles
+take images. Telegram is text-only today. See
+[Discord — attachments and model media](docs/getting-started/discord.md#attachments-and-model-media).
+
 ## 🌍 Build targets
 
 FloofClaw builds for macOS, Linux, and Android ARM64. Android produces the same
