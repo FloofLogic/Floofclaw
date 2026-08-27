@@ -713,7 +713,8 @@ int rt_ports_inbound_commit_state(const RtRun *r) {
                "evt_%s_%06d", r->ctx.run_id, 1) >=
           (int)sizeof(expected_event_id))
     return INBOUND_COMMIT_CONFLICT;
-  rt_event_log_path(&r->ctx, path, sizeof(path));
+  if (rt_event_log_path(&r->ctx, path, sizeof(path)) != 0)
+    return INBOUND_COMMIT_CONFLICT;
   if (fs_read_text(path, &text, FS_READ_TEXT_DEFAULT_CAP) != 0 || !text)
     return errno == ENOENT ? INBOUND_COMMIT_ABSENT
                           : INBOUND_COMMIT_IO;
@@ -775,7 +776,8 @@ static void retry_waiting_inbound_claims(RtScheduler *s) {
       rt_run_fail(r, "inbound_claim_conflict");
       continue;
     }
-    rt_event_log_path(&r->ctx, event_path, sizeof(event_path));
+    if (rt_event_log_path(&r->ctx, event_path, sizeof(event_path)) != 0)
+      continue;
     if (fs_truncate_incomplete_line(event_path) != 0 ||
         snprintf(envelope_path, sizeof(envelope_path),
                  "workspace/bus/processed/%s.json",

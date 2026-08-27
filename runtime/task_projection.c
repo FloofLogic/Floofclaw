@@ -347,7 +347,7 @@ static int current_run_work_consequences(const RtContext *ctx,
   if (out_count) *out_count = 0;
   if (!ctx || !ctx->run_id[0] || !items || items_cap == 0 || !out_count)
     return -1;
-  rt_event_log_path(ctx, path, sizeof(path));
+  if (rt_event_log_path(ctx, path, sizeof(path)) != 0) return -1;
   if (fs_read_text(path, &text, FS_READ_TEXT_DEFAULT_CAP) != 0 || !text)
     return -1;
   line = text;
@@ -418,7 +418,7 @@ static int current_run_trigger_consumed(const RtContext *ctx,
   if (!ctx || !task_id || !*task_id || work_rev <= 0 ||
       !trigger_event_id || !*trigger_event_id)
     return -1;
-  rt_event_log_path(ctx, path, sizeof(path));
+  if (rt_event_log_path(ctx, path, sizeof(path)) != 0) return -1;
   if (fs_read_text(path, &text, FS_READ_TEXT_DEFAULT_CAP) != 0 || !text)
     return -1;
   line = text;

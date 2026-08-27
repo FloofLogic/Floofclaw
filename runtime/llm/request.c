@@ -17,21 +17,61 @@ _Static_assert(LLM_MEDIA_MAX_COUNT == FC_MEDIA_MAX_ITEMS,
 
 #define GEMINI_INLINE_REQUEST_MAX_BYTES 20000000U
 
+static int profile_max_output_tokens(const LlmProfile *profile) {
+  return profile && profile->max_output_tokens > 0
+             ? profile->max_output_tokens
+             : LLM_DEFAULT_MAX_OUTPUT_TOKENS;
+}
+
+static int gemini_25_effort_budget(const char *effort) {
+  if (!effort) return -1;
+  if (strcmp(effort, "low") == 0) return 512;
+  if (strcmp(effort, "medium") == 0) return 1024;
+  if (strcmp(effort, "high") == 0) return 4096;
+  return -1;
+}
+
+/* Gemini 2.5 Flash and Flash-Lite accept thinkingBudget 0 (thinking off);
+ * 2.5 Pro rejects it, and newer models use thinkingLevel. A profile with no
+ * effort keeps the pre-0.30.0 default for these two models -- no thinking --
+ * because the provider default for 2.5 Flash is dynamic thinking, which
+ * made every Truly turn 3-5x slower and billed thinking tokens the ledger
+ * cannot price. */
+static int is_gemini_25_flash(const char *model) {
+  return model && strncmp(model, "gemini-2.5-flash", 16U) == 0;
+}
+
+static int is_gemini_25(const char *model) {
+  return model && strncmp(model, "gemini-2.5-", 11U) == 0;
+}
+
 int llm_build_gemini_body(const LlmProfile *profile,
                           const char *escaped_prompt,
                           char *body, size_t body_len) {
-  char thinking[LLM_ID_MAX + 48];
+  char thinking[LLM_ID_MAX + 64];
+  int max_output_tokens;
   int n;
 
   if (!profile || !escaped_prompt || !body || body_len == 0) return -1;
 
-  if (profile->effort[0]) {
+  max_output_tokens = profile_max_output_tokens(profile);
+  if (max_output_tokens < 1 || max_output_tokens > LLM_MAX_OUTPUT_TOKENS)
+    return -1;
+  if (profile->effort[0] && is_gemini_25(profile->model)) {
+    int budget = gemini_25_effort_budget(profile->effort);
+    if (budget < 0) return -1;
     n = snprintf(thinking, sizeof(thinking),
-                 "\"thinkingConfig\":{\"thinkingLevel\":\"%s\"}",
+                 ",\"thinkingConfig\":{\"thinkingBudget\":%d}", budget);
+  } else if (profile->effort[0]) {
+    n = snprintf(thinking, sizeof(thinking),
+                 ",\"thinkingConfig\":{\"thinkingLevel\":\"%s\"}",
                  profile->effort);
-  } else {
+  } else if (is_gemini_25_flash(profile->model)) {
     n = snprintf(thinking, sizeof(thinking),
-                 "\"thinkingConfig\":{\"thinkingBudget\":0}");
+                 ",\"thinkingConfig\":{\"thinkingBudget\":0}");
+  } else {
+    thinking[0] = '\0';
+    n = 0;
   }
   if (n < 0 || n >= (int)sizeof(thinking)) return -1;
 
@@ -44,10 +84,11 @@ int llm_build_gemini_body(const LlmProfile *profile,
                   "\"generationConfig\":{"
                   "\"temperature\":0,"
                   "\"responseMimeType\":\"application/json\","
-                  "%s"
+                  "\"maxOutputTokens\":%d%s"
                   "}"
                   "}",
-                  escaped_prompt, thinking) < (int)body_len ? 0 : -1;
+                  escaped_prompt, max_output_tokens, thinking) <
+         (int)body_len ? 0 : -1;
 }
 
 typedef struct {
@@ -86,6 +127,14 @@ static int writer_bytes(BodyWriter *w, const char *data, size_t len) {
 
 static int writer_text(BodyWriter *w, const char *text) {
   return writer_bytes(w, text ? text : "", strlen(text ? text : ""));
+}
+
+static int writer_int(BodyWriter *w, int value) {
+  char text[32];
+  int n = snprintf(text, sizeof(text), "%d", value);
+  return n > 0 && n < (int)sizeof(text)
+             ? writer_bytes(w, text, (size_t)n)
+             : -1;
 }
 
 /* Keep byte-for-byte parity with runtime/support/json.c:json_escape(). */
@@ -319,7 +368,8 @@ static int provider_accepts_media(const char *kind, const char *media_type) {
   if (strcmp(kind, "openai_responses") == 0)
     return is_openai_image(media_type) ||
            is_openai_document(media_type);
-  if (strcmp(kind, "openai_compat") == 0)
+  if (strcmp(kind, "openai_chat") == 0 ||
+      strcmp(kind, "openai_compat") == 0)
     return is_openai_image(media_type);
   return strcmp(kind, "mock") == 0;
 }
@@ -341,6 +391,7 @@ int llm_request_validate(const char *provider_kind, const LlmRequest *request,
     return request_error(err, err_len, "media descriptor array is missing");
   if (strcmp(provider_kind, "mock") != 0 &&
       strcmp(provider_kind, "http") != 0 &&
+      strcmp(provider_kind, "openai_chat") != 0 &&
       strcmp(provider_kind, "openai_compat") != 0 &&
       strcmp(provider_kind, "openai_responses") != 0 &&
       strcmp(provider_kind, "gemini_key") != 0)
@@ -390,8 +441,15 @@ static int serialize_anthropic(const LlmProfile *profile,
                                const LlmRequest *request, BodyWriter *w) {
   if (writer_text(w, "{\"model\":\"") != 0 ||
       writer_text(w, profile->model) != 0 ||
-      writer_text(w, "\",\"max_tokens\":1024,\"messages\":[{\"role\":\"user\","
-                     "\"content\":") != 0)
+      writer_text(w, "\",\"max_tokens\":") != 0 ||
+      writer_int(w, profile_max_output_tokens(profile)) != 0)
+    return -1;
+  if (profile->effort[0] &&
+      (writer_text(w, ",\"output_config\":{\"effort\":") != 0 ||
+       writer_json_string(w, profile->effort) != 0 ||
+       writer_text(w, "}") != 0))
+    return -1;
+  if (writer_text(w, ",\"messages\":[{\"role\":\"user\",\"content\":") != 0)
     return -1;
   if (request->media_count == 0U) {
     if (writer_json_string(w, request->text) != 0) return -1;
@@ -422,7 +480,48 @@ static int serialize_openai_compat(const LlmProfile *profile,
                                    const LlmRequest *request, BodyWriter *w) {
   if (writer_text(w, "{\"model\":\"") != 0 ||
       writer_text(w, profile->model) != 0 ||
-      writer_text(w, "\",\"temperature\":0,\"stream\":false,"
+      writer_text(w, "\",\"max_tokens\":") != 0 ||
+      writer_int(w, profile_max_output_tokens(profile)) != 0)
+    return -1;
+  if (profile->effort[0] &&
+      (writer_text(w, ",\"reasoning_effort\":") != 0 ||
+       writer_json_string(w, profile->effort) != 0))
+    return -1;
+  if (writer_text(w, ",\"temperature\":0,\"stream\":false,"
+                     "\"messages\":[{\"role\":\"user\",\"content\":") != 0)
+    return -1;
+  if (request->media_count == 0U) {
+    if (writer_json_string(w, request->text) != 0) return -1;
+  } else {
+    if (writer_text(w, "[{\"type\":\"text\",\"text\":") != 0 ||
+        writer_json_string(w, request->text) != 0 ||
+        writer_text(w, "}") != 0)
+      return -1;
+    for (size_t i = 0; i < request->media_count; ++i) {
+      if (writer_text(w, ",{\"type\":\"image_url\",\"image_url\":{\"url\":\"") != 0 ||
+          write_data_uri(w, &request->media[i]) != 0 ||
+          writer_text(w, "\"}}") != 0)
+        return -1;
+    }
+    if (writer_text(w, "]") != 0) return -1;
+  }
+  return writer_text(w, "}]}");
+}
+
+static int serialize_openai_chat(const LlmProfile *profile,
+                                 const LlmRequest *request, BodyWriter *w) {
+  if (writer_text(w, "{\"model\":\"") != 0 ||
+      writer_text(w, profile->model) != 0 ||
+      writer_text(w, "\",\"max_completion_tokens\":") != 0 ||
+      writer_int(w, profile_max_output_tokens(profile)) != 0)
+    return -1;
+  if (profile->effort[0] &&
+      (writer_text(w, ",\"reasoning_effort\":") != 0 ||
+       writer_json_string(w, profile->effort) != 0))
+    return -1;
+  /* OpenAI reasoning models reject non-default sampling controls. Omitting
+   * temperature works for both reasoning and non-reasoning chat models. */
+  if (writer_text(w, ",\"stream\":false,"
                      "\"messages\":[{\"role\":\"user\",\"content\":") != 0)
     return -1;
   if (request->media_count == 0U) {
@@ -484,8 +583,10 @@ static int serialize_openai_responses(const LlmProfile *profile,
         writer_text(w, "}") != 0)
       return -1;
   }
-  return writer_text(w,
-                     ",\"temperature\":0,\"store\":false,\"stream\":false}");
+  if (writer_text(w, ",\"max_output_tokens\":") != 0 ||
+      writer_int(w, profile_max_output_tokens(profile)) != 0)
+    return -1;
+  return writer_text(w, ",\"temperature\":0,\"store\":false,\"stream\":false}");
 }
 
 static int serialize_gemini(const LlmProfile *profile,
@@ -504,16 +605,24 @@ static int serialize_gemini(const LlmProfile *profile,
       return -1;
   }
   if (writer_text(w, "]}],\"generationConfig\":{\"temperature\":0,"
-                     "\"responseMimeType\":\"application/json\",") != 0)
+                     "\"responseMimeType\":\"application/json\","
+                     "\"maxOutputTokens\":") != 0 ||
+      writer_int(w, profile_max_output_tokens(profile)) != 0)
     return -1;
-  if (profile->effort[0]) {
-    if (writer_text(w, "\"thinkingConfig\":{\"thinkingLevel\":\"") != 0 ||
-        writer_text(w, profile->effort) != 0 ||
-        writer_text(w, "\"}") != 0)
+  if (profile->effort[0] && is_gemini_25(profile->model)) {
+    int budget = gemini_25_effort_budget(profile->effort);
+    if (budget < 0 ||
+        writer_text(w, ",\"thinkingConfig\":{\"thinkingBudget\":") != 0 ||
+        writer_int(w, budget) != 0 || writer_text(w, "}") != 0)
       return -1;
-  } else if (writer_text(w,
-                         "\"thinkingConfig\":{\"thinkingBudget\":0}") != 0) {
-    return -1;
+  } else if (profile->effort[0]) {
+    if (writer_text(w, ",\"thinkingConfig\":{\"thinkingLevel\":") != 0 ||
+        writer_json_string(w, profile->effort) != 0 ||
+        writer_text(w, "}") != 0)
+      return -1;
+  } else if (is_gemini_25_flash(profile->model)) {
+    if (writer_text(w, ",\"thinkingConfig\":{\"thinkingBudget\":0}") != 0)
+      return -1;
   }
   return writer_text(w, "}}");
 }
@@ -524,6 +633,8 @@ static int serialize_request(const LlmProfile *profile,
                              BodyWriter *writer) {
   if (strcmp(provider_kind, "http") == 0)
     return serialize_anthropic(profile, request, writer);
+  if (strcmp(provider_kind, "openai_chat") == 0)
+    return serialize_openai_chat(profile, request, writer);
   if (strcmp(provider_kind, "openai_compat") == 0)
     return serialize_openai_compat(profile, request, writer);
   if (strcmp(provider_kind, "openai_responses") == 0)
@@ -550,6 +661,20 @@ int llm_request_body_build(const LlmProfile *profile,
   }
   if (!profile || !provider_kind || !request || !out)
     return request_error(err, err_len, "invalid request body arguments");
+  if (profile_max_output_tokens(profile) < 1 ||
+      profile_max_output_tokens(profile) > LLM_MAX_OUTPUT_TOKENS)
+    return request_error(err, err_len,
+                         "max_output_tokens must be between 1 and %d",
+                         LLM_MAX_OUTPUT_TOKENS);
+  if (strcmp(provider_kind, "http") == 0 && profile->effort[0] &&
+      strcmp(profile->effort, "low") != 0 &&
+      strcmp(profile->effort, "medium") != 0 &&
+      strcmp(profile->effort, "high") != 0 &&
+      strcmp(profile->effort, "xhigh") != 0 &&
+      strcmp(profile->effort, "max") != 0)
+    return request_error(
+        err, err_len,
+        "Anthropic effort must be low, medium, high, xhigh, or max");
   if (llm_request_validate(provider_kind, request, err, err_len) != 0)
     return -1;
   if (strcmp(provider_kind, "mock") == 0)

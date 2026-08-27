@@ -152,7 +152,7 @@ static int memo_read_outcome_by_rid(const RtContext *ctx, const char *prior_rid,
   int found = 0;
   if (!ctx || !prior_rid || !*prior_rid || !type_out || !result_out || !error_out)
     return -1;
-  rt_event_log_path(ctx, path, sizeof(path));
+  if (rt_event_log_path(ctx, path, sizeof(path)) != 0) return -1;
   if (fs_read_text(path, &text, FS_READ_TEXT_DEFAULT_CAP) != 0 || !text) return -1;
   for (char *line = text; line && *line;) {
     char *next = strchr(line, '\n');
@@ -402,6 +402,39 @@ int rt_action_runner_recover_started(RtRun *r) {
 
 /* ===== validation ================================================ */
 
+static int permission_mode_exceeds_ceiling(const RtRun *r,
+                                           const RtActionDef *def,
+                                           const char *args_json) {
+  const char *ceiling = "safe";
+  JsonRef root;
+  char requested[RT_SMALL] = "safe";
+  int declares_ceiling = 0;
+  if (!r || !r->scheduler || !def) return 0;
+  for (int i = 0; i < def->config_count; ++i) {
+    if ((RtActionConfigKind)def->config_kinds[i] !=
+        RT_ACTION_CONFIG_PERMISSION_MODE_CEILING)
+      continue;
+    declares_ceiling = 1;
+    {
+      const char *key = def->config_keys[i][0]
+                            ? def->config_keys[i]
+                            : def->config_names[i];
+      const char *configured = rt_action_cached_config(
+          &r->scheduler->actions, def->id, key);
+      if (configured && configured[0]) ceiling = configured;
+    }
+    break;
+  }
+  if (!declares_ceiling || !args_json ||
+      json_ref_first_object(args_json, &root) != 0)
+    return 0;
+  (void)json_ref_object_get_string(&root, "permission_mode", requested,
+                                   sizeof(requested));
+  if (!requested[0]) snprintf(requested, sizeof(requested), "safe");
+  return strcmp(requested, "dangerous") == 0 &&
+         strcmp(ceiling, "dangerous") != 0;
+}
+
 static int validate_pending_action(RtRun *r, RtPendingAction *p,
                                   const RtActionDef **out_def) {
   const RtActionDef *def = rt_action_registry_find(&r->scheduler->actions, p->action);
@@ -475,6 +508,14 @@ static int validate_pending_action(RtRun *r, RtPendingAction *p,
                r, p->request_id, p->action, p->task_id, "invalid_args",
                message[0] ? message : "Invalid args for action.", errors,
                p->sig) == 0 ? -1 : -2;
+  }
+  if (permission_mode_exceeds_ceiling(
+          r, def, p->args_json && p->args_json[0] ? p->args_json : "{}")) {
+    return rt_action_emit_rejected(
+               r, p->request_id, p->action, p->task_id,
+               "permission_ceiling",
+               "Requested permission_mode exceeds the action's deployment ceiling.",
+               "[]", p->sig) == 0 ? -1 : -2;
   }
   *out_def = def;
   return 0;

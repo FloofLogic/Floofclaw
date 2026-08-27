@@ -874,6 +874,41 @@ int rt_task_work_rev_of(const char *task_id, long long *out_rev) {
   return task_store_release_result(0);
 }
 
+int rt_task_cancel_operator(const char *task_id,
+                            char *current_status, size_t status_len) {
+  TaskStore *st;
+  char etask[RT_MED];
+  char payload[RT_MED];
+  int idx;
+  int n;
+  if (current_status && status_len) current_status[0] = '\0';
+  if (!task_id || !*task_id) return RT_TASK_CANCEL_FAILED;
+  st = task_store_borrow();
+  if (!st) return RT_TASK_CANCEL_FAILED;
+  if (load_store(st) != 0)
+    return task_store_release_result(RT_TASK_CANCEL_FAILED);
+  idx = task_index_of(st, task_id);
+  if (idx < 0)
+    return task_store_release_result(RT_TASK_CANCEL_NOT_FOUND);
+  if (current_status && status_len)
+    snprintf(current_status, status_len, "%s", st->items[idx].state);
+  if (strcmp(st->items[idx].state, "open") != 0)
+    return task_store_release_result(RT_TASK_CANCEL_NOT_OPEN);
+  task_store_release_result(0);
+
+  if (json_escape(task_id, etask, sizeof(etask)) != 0)
+    return RT_TASK_CANCEL_FAILED;
+  n = snprintf(payload, sizeof(payload),
+               "{\"task_id\":\"%s\",\"state\":{\"status\":\"canceled\","
+               "\"updated_ms\":%lld}}",
+               etask, timing_system_wall_ms());
+  if (n < 0 || (size_t)n >= sizeof(payload) ||
+      rt_task_apply_event("task_canceled", payload) != 0)
+    return RT_TASK_CANCEL_FAILED;
+  (void)rt_narrate("task canceled by operator: %s", task_id);
+  return RT_TASK_CANCEL_OK;
+}
+
 /* Snapshot of the context's single open work task for attempt
  * scheduling: id, latest work + completion intent, the reducer-owned
  * work_rev, and the opaque external attempt record. Returns 0 when a
@@ -983,6 +1018,14 @@ int rt_task_apply_event(const char *type, const char *payload_json) {
   idx = task_index_of(st, task_id);
   if (idx < 0) return task_store_release_result(-1);
   TaskItem *t = &st->items[idx];
+  if (strcmp(type, "task_canceled") == 0) {
+    char requested_state[RT_SMALL] = "";
+    if (strcmp(t->state, "open") != 0 ||
+        rt_task_json_status(&payload, requested_state,
+                            sizeof(requested_state)) != 0 ||
+        strcmp(requested_state, "canceled") != 0)
+      return task_store_release_result(-1);
+  }
   if (strcmp(type, "task_working_memory_appended") == 0) {
     char incoming[TASK_WORKING_MEMORY_MAX] = "";
     size_t current_len, incoming_len, needed;

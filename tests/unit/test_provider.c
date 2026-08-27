@@ -1,6 +1,7 @@
 #include "test_support.h"
 
 #include "../../runtime/llm/llm.h"
+#include "../../runtime/llm/pricing.h"
 #include "../../runtime/llm/provider_limit.h"
 #include "../../runtime/secure/auth.h"
 #include "../../runtime/secure/action_secret_broker.h"
@@ -63,6 +64,146 @@ int provider_registry_parses_openrouter_auth_env_and_limits(void) {
                "gemini auth env parsed");
   rc |= expect(provider.rpm_limit == 15, "gemini rpm limit parsed");
   rc |= expect(provider.daily_limit == 500, "gemini daily limit parsed");
+  rc |= expect(provider.daily_usd_limit < 0.0,
+               "providers without a dollar guard remain unlimited");
+  rc |= expect(llm_load_provider("openai_key", &provider) == 0,
+               "official OpenAI provider loads");
+  rc |= expect(strcmp(provider.kind, "openai_chat") == 0,
+               "official OpenAI chat has its current wire kind");
+  return rc;
+}
+
+int provider_pricing_and_daily_usd_budget_are_conservative(void) {
+  char *saved_pricing = capture_env_value("FCLAW_PRICING");
+  char *saved_registry = capture_env_value("FCLAW_LLM_REGISTRY");
+  LlmPricingCatalog catalog;
+  LlmProvider provider;
+  LlmProfile profile;
+  LlmRequest request = {"hello", NULL, 0U};
+  LlmUsage usage;
+  char raw[512];
+  char *state = NULL;
+  double usd = 0.0;
+  long long micros = 0;
+  time_t day1 = local_midday(2026, 5, 19);
+  time_t day2 = local_midday(2026, 5, 20);
+  int rc = 0;
+
+  rc |= test_reset_workspace();
+  rc |= expect(test_write_file(
+                   "workspace/pricing.json",
+                   "{\"models\":[{\"provider\":\"priced_provider\","
+                   "\"model\":\"priced-model\",\"input\":0.1,"
+                   "\"cached_input\":0.01,\"output\":0.2}]}\n") == 0,
+               "write pricing fixture");
+  rc |= expect(test_write_file(
+                   "workspace/registry.json",
+                   "{\"providers\":[{\"id\":\"priced_provider\","
+                   "\"kind\":\"openai_compat\",\"url\":\"http://127.0.0.1:1\","
+                   "\"limits\":{\"daily_usd\":0.00015}}]}\n") == 0,
+               "write daily USD provider fixture");
+  (void)setenv("FCLAW_PRICING", "workspace/pricing.json", 1);
+  (void)setenv("FCLAW_LLM_REGISTRY", "workspace/registry.json", 1);
+
+  rc |= expect(llm_load_provider("priced_provider", &provider) == 0,
+               "provider with daily USD cap loads");
+  rc |= expect(provider.daily_usd_limit == 0.00015,
+               "daily USD cap preserves its decimal value");
+  rc |= expect(llm_pricing_catalog_load(&catalog) == 0,
+               "bounded pricing catalog loads");
+  rc |= expect(llm_pricing_usage_usd(&catalog, "priced_provider",
+                                     "priced-model", 100, 10, 40, 1,
+                                     &usd) == 0,
+               "usage pricing finds exact provider and model");
+  rc |= expect(usd > 0.00000839 && usd < 0.00000841,
+               "cached and uncached tokens receive separate prices");
+  rc |= expect(llm_pricing_max_cost_micros(&catalog, "priced_provider",
+                                           "priced-model", 100, 10,
+                                           &micros) == 0 && micros == 12,
+               "pre-dispatch price rounds upward in micro-USD");
+
+  memset(&profile, 0, sizeof(profile));
+  snprintf(profile.provider, sizeof(profile.provider), "%s", provider.id);
+  snprintf(profile.model, sizeof(profile.model), "%s", "priced-model");
+  profile.max_output_tokens = 10;
+  memset(&usage, 0, sizeof(usage));
+  rc |= expect(llm_provider_limit_reserve_request_at(
+                   &provider, &profile, &request, "workspace/logs", day1,
+                   &usage, raw, sizeof(raw)) == LLM_PROVIDER_LIMIT_OK,
+               "first conservative request reservation fits the daily cap");
+  memset(&usage, 0, sizeof(usage));
+  rc |= expect(llm_provider_limit_reserve_request_at(
+                   &provider, &profile, &request, "workspace/logs", day1 + 1,
+                   &usage, raw, sizeof(raw)) ==
+                   LLM_PROVIDER_LIMIT_BLOCKED_USD,
+               "second request is blocked before exceeding the daily cap");
+  rc |= expect(strcmp(usage.local_limit_reason, "daily_usd") == 0,
+               "cost block reason is durable artifact metadata");
+  rc |= expect_substr(raw, "\"error\":\"provider_budget_exceeded\"",
+                      "cost block is loud and machine-readable");
+  rc |= test_read_file(
+      "workspace/logs/provider_limits/priced_provider.json", &state);
+  rc |= expect_substr(state, "\"day_usd_reserved_micros\":105",
+                      "state keeps the crash-safe maximum reservation");
+  free(state);
+  state = NULL;
+  memset(&usage, 0, sizeof(usage));
+  rc |= expect(llm_provider_limit_reserve_request_at(
+                   &provider, &profile, &request, "workspace/logs", day2,
+                   &usage, raw, sizeof(raw)) == LLM_PROVIDER_LIMIT_OK,
+               "the next local day resets the dollar budget");
+
+  snprintf(profile.model, sizeof(profile.model), "%s", "unpriced-model");
+  memset(&usage, 0, sizeof(usage));
+  rc |= expect(llm_provider_limit_reserve_request_at(
+                   &provider, &profile, &request, "workspace/logs", day2 + 1,
+                   &usage, raw, sizeof(raw)) ==
+                   LLM_PROVIDER_LIMIT_BLOCKED_USD,
+               "an active cost cap fails closed for an unpriced model");
+  rc |= expect_substr(raw, "\"reason\":\"daily_usd_unpriced\"",
+                      "unpriced-model rejection names the fix boundary");
+
+  restore_env_value("FCLAW_LLM_REGISTRY", saved_registry);
+  restore_env_value("FCLAW_PRICING", saved_pricing);
+  return rc;
+}
+
+int model_profile_output_tokens_default_override_and_bound(void) {
+  char *saved = capture_env_value("FCLAW_MODEL_PROFILES");
+  LlmProfile profile;
+  char err[256];
+  const char *path = "workspace/test-model-output-profiles.json";
+  int rc = 0;
+
+  rc |= test_reset_workspace();
+  rc |= expect(test_write_file(
+                   path,
+                   "{\"profiles\":["
+                   "{\"id\":\"default\",\"provider\":\"mock\",\"model\":\"m\"},"
+                   "{\"id\":\"override\",\"provider\":\"mock\",\"model\":\"m\","
+                   "\"max_output_tokens\":8192},"
+                   "{\"id\":\"too_large\",\"provider\":\"mock\",\"model\":\"m\","
+                   "\"max_output_tokens\":16385}]}\n") == 0,
+               "write model-profile output-token fixture");
+  (void)setenv("FCLAW_MODEL_PROFILES", path, 1);
+  rc |= expect(llm_load_profile("default", &profile) == 0,
+               "profile without output cap loads");
+  rc |= expect(profile.max_output_tokens == LLM_DEFAULT_MAX_OUTPUT_TOKENS,
+               "profile output cap defaults to 4096");
+  rc |= expect(llm_load_profile("override", &profile) == 0,
+               "explicit bounded output cap loads");
+  rc |= expect(profile.max_output_tokens == 8192,
+               "explicit output cap is retained");
+  rc |= expect(llm_load_profile("too_large", &profile) != 0,
+               "profile beyond the response bound is rejected");
+  rc |= expect(llm_load_profile_with_error("too_large", &profile, err,
+                                           sizeof(err)) != 0,
+               "detailed profile loader rejects the same bound");
+  rc |= expect_substr(err, "max_output_tokens",
+                      "profile failure names max_output_tokens");
+  rc |= expect_substr(err, "between 1 and 16384",
+                      "profile failure names the accepted bound");
+  restore_env_value("FCLAW_MODEL_PROFILES", saved);
   return rc;
 }
 
@@ -80,6 +221,10 @@ int provider_usage_extracts_reported_cache_tokens(void) {
      "{\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":5,"
      "\"prompt_tokens_details\":{\"cached_tokens\":70}}}",
      70},
+    {"openai_chat",
+     "{\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":5,"
+     "\"prompt_tokens_details\":{\"cached_tokens\":65}}}",
+     65},
     {"openai_responses",
      "{\"usage\":{\"input_tokens\":100,\"output_tokens\":5,"
      "\"input_tokens_details\":{\"cached_tokens\":60}}}",

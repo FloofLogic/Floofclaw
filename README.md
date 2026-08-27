@@ -4,7 +4,7 @@
 
 <p>
   <img height="20" alt="C11" src="https://img.shields.io/badge/C-C11-A8B9CC?style=flat&amp;logo=c&amp;logoColor=white">
-  <img height="20" alt="Binary size: under 1 MB" src="https://img.shields.io/badge/binary-%3C%201%20MB-16A34A?style=flat">
+  <img height="20" alt="Source build: about 544 KiB" src="https://img.shields.io/badge/source%20build-~544%20KiB-16A34A?style=flat">
   <img height="20" alt="Platforms: macOS, Linux, Android ARM64" src="https://img.shields.io/badge/macOS%20%7C%20Linux%20%7C%20Android-2563EB?style=flat">
   <a href="LICENSE"><img height="20" alt="Apache 2.0 license" src="https://img.shields.io/badge/license-Apache%202.0-D22128?style=flat&amp;logo=apache&amp;logoColor=white"></a>
 </p>
@@ -22,7 +22,7 @@
 timers, API calls, and worker results into inspectable event-driven runs that
 survive restarts and continue until no work remains.
 
-**~668 KiB single binary · C11 · durable filesystem state · JSON/JSONL by
+**~544 KiB all-adapter optimized core · C11 · durable filesystem state · JSON/JSONL by
 default · macOS, Linux, and Android ARM64**
 
 ## 🚀 Quickstart
@@ -37,6 +37,10 @@ cd Floofclaw
 make -j4
 ./bin/fclaw run -h --text "hello"
 ```
+
+Beginning with v0.30.0, tagged releases include a native macOS arm64 archive;
+Linux builds from source in seconds. See
+[Prebuilt binaries](docs/getting-started/prebuilt-binaries.md).
 
 Start the always-on local runtime and talk to it from another terminal:
 
@@ -91,9 +95,11 @@ bash actions/common/web_read/build.sh
 ### 🐜 Native C, all the way down
 
 **The engine is written entirely in C from scratch.** No Node, Python, JVM,
-framework, or language runtime sits underneath it—just a **~668 KiB C
-binary**. The full provider/TLS build links libcurl and OpenSSL 3; the
-mock-only build (`make MOCK_ONLY=1`) can omit both.
+framework, or language runtime sits underneath it. A package-manager-linked
+`make release-small` source build is about **544 KiB**; the downloadable macOS
+archive is about **4.34 MiB** because it embeds OpenSSL. Both use the macOS
+system libcurl. The mock-only build (`make MOCK_ONLY=1`) can omit both
+libraries.
 
 ### 📂 The filesystem is the database
 
@@ -121,17 +127,21 @@ and traced without treating an opaque “agent turn” as truth.
 
 ## 📏 Small enough to audit
 
-Measurements from 0.28.0 at revision `41e8790d` on arm64 macOS with Apple
-clang 17. Run `make metrics` to reproduce them; it prints the revision it
-measured, so you can tell at a glance whether this table has drifted.
+Measurements from 2026-08-25 on arm64 macOS with Apple clang 17. The binary is
+the stripped `release-small` artifact produced by
+`scripts/build_binary_archive.sh`, with static OpenSSL, system libcurl, and
+**all four adapters** (`discord irc telegram ws`), not the default `-O2`
+developer build. Run `./scripts/metrics.sh` immediately after the archive
+build to reproduce the table; the output names its build profile, adapter set,
+and revision.
 
 | What | Measured result |
 | --- | ---: |
-| Stripped executable | **667,304 bytes (~652 KiB)** |
-| Runtime C/header source | **42,596 lines** |
+| Downloadable macOS arm64 all-adapter executable (static OpenSSL) | **4,545,944 bytes (~4.34 MiB)** |
+| Runtime C/header source | **42,665 lines** |
 | Full provider/TLS build libraries | **2** — libcurl and OpenSSL 3; `make MOCK_ONLY=1` omits both |
-| Mock-backed `hello` run | **0.174 s** |
-| Idle isolated gateway RSS | **~8.1 MiB** |
+| Mock-backed `hello` run | **~0.2 s** |
+| Idle isolated gateway RSS | **~8–10 MiB** |
 | Quiet supervision review | **exactly 1 model call** |
 
 ## 🧭 How it works
@@ -176,8 +186,10 @@ The command line exposes the same evidence directly:
 ```
 
 A run may contain retries, multiple LLM-backed phases, or compaction. Count
-`provider_calls/*_meta.json` or the usage ledger for exact model-call cost—not
-run directories.
+`provider_calls/*_meta.json` or the usage ledger for exact model-call usage—not
+run directories. `fclaw usage -a` prices the current ledger segment from the
+dated assumptions in `config/pricing.json` and marks incomplete estimates
+when a provider/model pair is unlisted.
 
 ## 🧠 Pick a floop
 
@@ -224,15 +236,18 @@ contains no protocol code. See [MCP servers](docs/getting-started/mcp.md).
 
 ### Sees what you send it
 
-Drop an image, a PDF, or a file into a Discord channel and it reaches the
-model on the same `user_message` path as text: up to 10 attachments, 25 MiB
-each, 50 MiB per message. The bytes are fetched only inside the bounded
-model child, never in the gateway, from Discord's own CDN and nowhere else,
-and the signed URLs live in a private content-addressed manifest that no log
-or artifact repeats. What the model can do with them is the provider's call
-— Gemini profiles take images, PDFs, audio, and video; OpenAI-style profiles
-take images. Telegram is text-only today. See
-[Discord — attachments and model media](docs/getting-started/discord.md#attachments-and-model-media).
+Drop an image, a PDF, or a file into Discord—or send a photo or document with
+an optional caption on Telegram—and it reaches the model on the same
+`user_message` path as text. Discord accepts up to 10 attachments, 25 MiB
+each and 50 MiB per message; Telegram's Bot API download path is capped at
+20 MiB per file. Bytes are fetched only inside the bounded model child, never
+in the gateway, from the authenticated channel's own file host and nowhere
+else. Signed or token-bearing URLs live in a private content-addressed
+manifest that no bus, gateway log, or run artifact repeats. What the model can
+do with them is the provider's call—Gemini profiles take images, PDFs, audio,
+and video; OpenAI-style profiles take images. See
+[Discord media](docs/getting-started/discord.md#attachments-and-model-media)
+and [Telegram media](docs/getting-started/telegram.md#attachments-and-model-media).
 
 ## 🌍 Build targets
 
@@ -254,9 +269,11 @@ the dependency layout, API selection, and device smoke command.
 make test
 ```
 
-The routine offline gate runs 37 unit tests, 177 integration tests, fixture
+The routine offline gate runs 41 unit tests, 192 integration tests, fixture
 isolation, the local-client lifecycle probe, and a hermetic smoke with mock
-provider responses. Major-version release preparation adds ASan, UBSan,
+provider responses in under a minute. `make test-full` adds rebuild and
+feature-selection contracts; release checks run it automatically.
+Major-version release preparation adds ASan, UBSan,
 small-stack, fuzz, chaos, disk-full/read-only, and thrash campaigns through
 `make robustness`.
 

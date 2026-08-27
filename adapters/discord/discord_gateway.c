@@ -220,7 +220,8 @@ static int dc_transport_allowed(DcAdapter *a, const char *guild_id, const char *
   return 0;
 }
 
-static void dc_schedule_reconnect(DcAdapter *a, uint64_t now_ms) {
+static void dc_schedule_reconnect(DcAdapter *a, uint64_t now_ms,
+                                  const char *cause) {
   FcReconnectDelay delay;
   if (!a || !a->enabled) {
     if (a) a->next_reconnect_ms = 0;
@@ -228,7 +229,8 @@ static void dc_schedule_reconnect(DcAdapter *a, uint64_t now_ms) {
   }
   delay = fc_reconnect_backoff_next(&a->reconnect_backoff, now_ms);
   a->next_reconnect_ms = now_ms + delay.delay_ms;
-  (void)rt_narrate("discord: reconnect in %llus (attempt %u)",
+  (void)rt_narrate("discord: reconnect cause=%s in %llus (attempt %u)",
+                   cause && *cause ? cause : "connection closed",
                    (unsigned long long)((delay.delay_ms + 999U) / 1000U),
                    delay.attempt);
 }
@@ -245,7 +247,7 @@ static void dc_schedule_dns_reconnect(DcAdapter *a, uint64_t now_ms,
       delay.attempt);
 }
 
-void dc_close_gateway(DcAdapter *a) {
+void dc_close_gateway_with_cause(DcAdapter *a, const char *cause) {
   if (!a) return;
   if (a->gw_tls) { fc_tls_free(a->gw_tls); a->gw_tls = NULL; }
   if (a->gw_fd >= 0) { net_close(a->gw_fd); a->gw_fd = -1; }
@@ -253,8 +255,13 @@ void dc_close_gateway(DcAdapter *a) {
   a->gw_rx_len = 0;
   a->gw_parse_progress_ms = 0;
   a->gw_want = 0;
+  a->heartbeat_ack_pending = 0;
   a->gw_state = DC_DISCONNECTED;
-  dc_schedule_reconnect(a, fc_now_ms());
+  dc_schedule_reconnect(a, fc_now_ms(), cause);
+}
+
+void dc_close_gateway(DcAdapter *a) {
+  dc_close_gateway_with_cause(a, "connection closed");
 }
 
 int dc_gateway_start_connect(DcAdapter *a, uint64_t now_ms) {
@@ -266,7 +273,7 @@ int dc_gateway_start_connect(DcAdapter *a, uint64_t now_ms) {
     if (connect_rc == NET_CONNECT_DNS_FAILED)
       dc_schedule_dns_reconnect(a, now_ms, DC_GATEWAY_HOST);
     else
-      dc_schedule_reconnect(a, now_ms);
+      dc_schedule_reconnect(a, now_ms, "tcp connect failed");
     return -1;
   }
   a->gw_fd = fd;
@@ -361,7 +368,9 @@ static int dc_parse_ws_handshake(DcAdapter *a) {
   return 1;
 }
 
-static int dc_extract_frame(DcAdapter *a, unsigned char *opcode_out, char *payload, size_t payload_len) {
+static int dc_extract_frame(DcAdapter *a, unsigned char *opcode_out,
+                            char *payload, size_t payload_len,
+                            size_t *decoded_len_out) {
   unsigned char *p = (unsigned char *)a->gw_rx;
   uint64_t len;
   size_t header = 2;
@@ -386,13 +395,14 @@ static int dc_extract_frame(DcAdapter *a, unsigned char *opcode_out, char *paylo
     memcpy(mask, p + header, 4);
     header += 4;
   }
-  if (len + 1U > payload_len) return -1;
-  if (a->gw_rx_len < header + (size_t)len) return 0;
-  for (uint64_t i = 0; i < len; ++i) {
-    char ch = (char)p[header + (size_t)i];
+  if (payload_len == 0U || len > (uint64_t)(payload_len - 1U)) return -1;
+  if (len > (uint64_t)(a->gw_rx_len - header)) return 0;
+  for (size_t i = 0; i < (size_t)len; ++i) {
+    char ch = (char)p[header + i];
     payload[i] = masked ? (char)(ch ^ (char)mask[i & 3U]) : ch;
   }
   payload[len] = '\0';
+  if (decoded_len_out) *decoded_len_out = (size_t)len;
   {
     size_t consumed = header + (size_t)len;
     memmove(a->gw_rx, a->gw_rx + consumed, a->gw_rx_len - consumed);
@@ -484,11 +494,16 @@ static void dc_mark_ready(DcAdapter *a, const JsonRef *data) {
     (void)json_ref_object_get_string(&user, "id", a->bot_user_id, sizeof(a->bot_user_id));
   a->resume_eligible = 1;
   dc_diag(a, "READY session=%s user=%s", a->session_id, a->bot_user_id);
+  (void)rt_narrate("discord: session ready via IDENTIFY");
 }
 
 static int dc_handle_dispatch(DcAdapter *a, const char *event_name, const JsonRef *data, const char *raw_json) {
   if (strcmp(event_name, "READY") == 0) { dc_mark_ready(a, data); return 0; }
-  if (strcmp(event_name, "RESUMED") == 0) { a->resume_eligible = 1; return 0; }
+  if (strcmp(event_name, "RESUMED") == 0) {
+    a->resume_eligible = 1;
+    (void)rt_narrate("discord: session ready via RESUME");
+    return 0;
+  }
   if (strcmp(event_name, "MESSAGE_CREATE") == 0) {
     DcInboundMessage msg = {0};
     int attend;
@@ -536,22 +551,28 @@ static int dc_handle_gateway_json(DcAdapter *a, const char *json) {
     if (json_ref_object_get_object(&root, "d", &data) == 0) return dc_handle_dispatch(a, c.event_name, &data, json);
     return 0;
   case 7:
+    dc_close_gateway_with_cause(a, "server RECONNECT (op 7)");
     return -1;
   case 9:
     a->resume_eligible = c.invalid_session_resumable > 0;
     if (!a->resume_eligible) { a->session_id[0] = '\0'; a->sequence = 0; }
-    a->invalid_session = 1;
+    {
+      char cause[96];
+      snprintf(cause, sizeof(cause), "invalid session resumable=%s",
+               a->resume_eligible ? "true" : "false");
+      dc_close_gateway_with_cause(a, cause);
+    }
     return -1;
   case 10: {
     char token[8192];
     char payload[12000];
     memset(token, 0, sizeof(token));
     a->heartbeat_interval_ms = c.heartbeat_interval_ms;
+    a->heartbeat_ack_pending = 0;
     a->next_heartbeat_ms = fc_now_ms() + (uint64_t)(a->heartbeat_interval_ms > 0 ? a->heartbeat_interval_ms : 45000);
     if (dc_resolve_token(a, token, sizeof(token)) != 0) return -1;
-    if (a->invalid_session || !a->resume_eligible || !a->session_id[0]) {
+    if (!a->resume_eligible || !a->session_id[0]) {
       if (dc_build_identify_json(token, payload, sizeof(payload)) != 0) { dc_secure_zero(token, sizeof(token)); return -1; }
-      a->invalid_session = 0;
     } else if (dc_build_resume_json(token, a->session_id, a->sequence, payload, sizeof(payload)) != 0) {
       dc_secure_zero(token, sizeof(token));
       return -1;
@@ -562,6 +583,7 @@ static int dc_handle_gateway_json(DcAdapter *a, const char *json) {
     return 0;
   }
   case 11:
+    a->heartbeat_ack_pending = 0;
     return 0;
   default:
     return 0;
@@ -595,13 +617,39 @@ static int dc_gw_process_rx(DcAdapter *a, uint64_t now_ms) {
   while (a->gw_state == DC_GATEWAY_OPEN) {
     char payload[DC_RX_MAX];
     unsigned char opcode = 0;
-    int rc = dc_extract_frame(a, &opcode, payload, sizeof(payload));
-    if (rc < 0) return -1;
+    size_t payload_len = 0;
+    int rc = dc_extract_frame(a, &opcode, payload, sizeof(payload),
+                              &payload_len);
+    if (rc < 0) {
+      dc_close_gateway_with_cause(a, "malformed websocket frame");
+      return -1;
+    }
     if (rc == 0) break;
     a->gw_parse_progress_ms = a->gw_rx_len > 0 ? now_ms : 0;
-    if (opcode == 0x8U) return -1;
+    if (opcode == 0x8U) {
+      unsigned int code = 0;
+      char clean[192] = "";
+      char cause[256];
+      if (payload_len >= 2U) {
+        code = ((unsigned int)(unsigned char)payload[0] << 8) |
+               (unsigned int)(unsigned char)payload[1];
+        if (payload_len > 2U) {
+          dc_sanitize_text(payload + 2U, clean, sizeof(clean));
+          for (char *p = clean; *p; ++p)
+            if (*p == '\n' || *p == '\t') *p = ' ';
+        }
+      }
+      snprintf(cause, sizeof(cause), "close code=%u reason=%s", code,
+               clean[0] ? clean : "(none)");
+      dc_close_gateway_with_cause(a, cause);
+      return -1;
+    }
     if (opcode == 0x9U) { (void)dc_queue_ws_frame(a, 0xAU, payload, strlen(payload)); continue; }
-    if (opcode == 0x1U && dc_handle_gateway_json(a, payload) != 0) return -1;
+    if (opcode == 0x1U && dc_handle_gateway_json(a, payload) != 0) {
+      if (a->gw_state != DC_DISCONNECTED)
+        dc_close_gateway_with_cause(a, "gateway payload rejected");
+      return -1;
+    }
   }
   return 0;
 }
@@ -615,10 +663,32 @@ int dc_gateway_progress_expired(DcAdapter *a, uint64_t now_ms) {
       !net_progress_timed_out(a->gw_parse_progress_ms, now_ms,
                               DC_PARSE_PROGRESS_TIMEOUT_MS))
     return 0;
-  (void)rt_narrate(
-      "discord: gateway input made no parse progress for %llus; reconnecting",
-      (unsigned long long)(DC_PARSE_PROGRESS_TIMEOUT_MS / 1000U));
-  dc_close_gateway(a);
+  {
+    char cause[128];
+    snprintf(cause, sizeof(cause),
+             "gateway input made no parse progress for %llus",
+             (unsigned long long)(DC_PARSE_PROGRESS_TIMEOUT_MS / 1000U));
+    dc_close_gateway_with_cause(a, cause);
+  }
+  return 1;
+}
+
+static int dc_heartbeat_due(DcAdapter *a, uint64_t now_ms) {
+  char hb[128];
+  if (!a || a->gw_state != DC_GATEWAY_OPEN ||
+      a->heartbeat_interval_ms <= 0 || now_ms < a->next_heartbeat_ms)
+    return 0;
+  if (a->heartbeat_ack_pending) {
+    dc_close_gateway_with_cause(a, "heartbeat ACK missed");
+    return -1;
+  }
+  if (dc_build_heartbeat_json(a->sequence, hb, sizeof(hb)) != 0 ||
+      dc_queue_ws_json(a, hb) != 0) {
+    dc_close_gateway_with_cause(a, "heartbeat send failed");
+    return -1;
+  }
+  a->heartbeat_ack_pending = 1;
+  a->next_heartbeat_ms = now_ms + (uint64_t)a->heartbeat_interval_ms;
   return 1;
 }
 
@@ -626,12 +696,15 @@ void dc_drive_gateway(DcAdapter *a, int revents) {
   uint64_t now = fc_now_ms();
   if (!a || !a->enabled) return;
   if (a->gw_state == DC_TCP_CONNECTING && (revents & (POLLOUT | POLLERR | POLLHUP))) {
-    if (net_check_connected(a->gw_fd) != 1) { dc_close_gateway(a); return; }
+    if (net_check_connected(a->gw_fd) != 1) {
+      dc_close_gateway_with_cause(a, "tcp connect failed");
+      return;
+    }
     a->gw_tls = dc_tls_client_new(a, a->gw_fd, DC_GATEWAY_HOST);
     if (!a->gw_tls) {
       (void)rt_narrate("discord: TLS client setup failed for %s",
                        DC_GATEWAY_HOST);
-      dc_close_gateway(a);
+      dc_close_gateway_with_cause(a, "TLS client setup failed");
       return;
     }
     a->gw_state = DC_TLS_HANDSHAKE;
@@ -640,7 +713,10 @@ void dc_drive_gateway(DcAdapter *a, int revents) {
   if (a->gw_state == DC_TLS_HANDSHAKE && (revents & (POLLIN | POLLOUT))) {
     FcTlsResult tr = fc_tls_handshake(a->gw_tls);
     if (tr == FC_TLS_OK) {
-      if (dc_queue_ws_handshake(a) != 0) { dc_close_gateway(a); return; }
+      if (dc_queue_ws_handshake(a) != 0) {
+        dc_close_gateway_with_cause(a, "websocket handshake request failed");
+        return;
+      }
       a->gw_state = DC_WS_HANDSHAKE;
       a->gw_want = POLLOUT;
       a->gw_parse_progress_ms = now;
@@ -648,23 +724,59 @@ void dc_drive_gateway(DcAdapter *a, int revents) {
       a->gw_want = dc_tls_want_events(tr);
     } else {
       dc_narrate_tls_failure(a, a->gw_tls, DC_GATEWAY_HOST);
-      dc_close_gateway(a);
+      dc_close_gateway_with_cause(a, "TLS handshake failed");
       return;
     }
   }
   if ((a->gw_state == DC_WS_HANDSHAKE || a->gw_state == DC_GATEWAY_OPEN) && a->gw_tx_len > 0 && (revents & POLLOUT)) {
-    if (dc_gw_flush(a) != 0) { dc_close_gateway(a); return; }
+    if (dc_gw_flush(a) != 0) {
+      dc_close_gateway_with_cause(a, "gateway write failed");
+      return;
+    }
   }
   if ((a->gw_state == DC_WS_HANDSHAKE || a->gw_state == DC_GATEWAY_OPEN) && (revents & POLLIN)) {
     if (dc_gw_read_available(a, now) != 0 ||
         dc_gw_process_rx(a, now) != 0) {
-      dc_close_gateway(a);
+      if (a->gw_state != DC_DISCONNECTED)
+        dc_close_gateway_with_cause(a, "gateway read failed");
       return;
     }
   }
-  if (a->gw_state == DC_GATEWAY_OPEN && a->heartbeat_interval_ms > 0 && now >= a->next_heartbeat_ms) {
-    char hb[128];
-    if (dc_build_heartbeat_json(a->sequence, hb, sizeof(hb)) != 0 || dc_queue_ws_json(a, hb) != 0) { dc_close_gateway(a); return; }
-    a->next_heartbeat_ms = now + (uint64_t)a->heartbeat_interval_ms;
-  }
+  (void)dc_heartbeat_due(a, now);
+}
+
+int dc_test_gateway_json(DcAdapter *a, const char *json) {
+  int rc = dc_handle_gateway_json(a, json);
+  if (rc != 0 && a && a->gw_state != DC_DISCONNECTED)
+    dc_close_gateway_with_cause(a, "gateway payload rejected");
+  return rc;
+}
+
+int dc_test_gateway_close_frame(DcAdapter *a, unsigned int code,
+                                const char *reason) {
+  size_t reason_len = reason ? strlen(reason) : 0U;
+  size_t payload_len = 2U + reason_len;
+  if (!a || payload_len > 125U || payload_len + 2U > sizeof(a->gw_rx))
+    return -1;
+  a->gw_state = DC_GATEWAY_OPEN;
+  a->gw_rx[0] = (char)0x88U;
+  a->gw_rx[1] = (char)payload_len;
+  a->gw_rx[2] = (char)((code >> 8) & 0xffU);
+  a->gw_rx[3] = (char)(code & 0xffU);
+  if (reason_len > 0U) memcpy(a->gw_rx + 4U, reason, reason_len);
+  a->gw_rx_len = payload_len + 2U;
+  return dc_gw_process_rx(a, fc_now_ms());
+}
+
+int dc_test_gateway_raw_frame(DcAdapter *a, const unsigned char *frame,
+                              size_t frame_len) {
+  if (!a || !frame || frame_len > sizeof(a->gw_rx)) return -1;
+  a->gw_state = DC_GATEWAY_OPEN;
+  memcpy(a->gw_rx, frame, frame_len);
+  a->gw_rx_len = frame_len;
+  return dc_gw_process_rx(a, fc_now_ms());
+}
+
+int dc_test_heartbeat_due(DcAdapter *a, uint64_t now_ms) {
+  return dc_heartbeat_due(a, now_ms);
 }

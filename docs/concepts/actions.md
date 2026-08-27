@@ -912,6 +912,28 @@ When `model` is omitted, FloofClaw passes no model flag and Codex uses its own
 configured default. The model is deployment config, not an action argument, so
 the calling floop or model cannot change it per request.
 
+Both managed coding workers let the calling model choose `permission_mode` for
+each `op:"start"`, but deployment config sets the upper bound:
+
+```json
+{
+  "actions": {
+    "manage_codex": { "max_permission_mode": "safe" },
+    "manage_claude": { "max_permission_mode": "safe" }
+  }
+}
+```
+
+The modes are ordered `safe`, then `dangerous`. The ceiling defaults to
+`safe` when omitted. A `dangerous` request under a `safe` ceiling becomes a
+durable `action_rejected` event with `reason:"permission_ceiling"`; validation
+happens before `action_started`, the operation directory, or the external
+process. Raising a ceiling to `dangerous` permits either request but never
+promotes a `safe` request: Codex still receives its workspace-write sandbox,
+and Claude still runs without its permission-bypass flag. Set the ceiling to
+`dangerous` only for a deployment where that specific worker is trusted to
+bypass its normal protections.
+
 **Prefer this over engine surgery.** If a feature is tempting you
 to add a periodic tick that stashes data into the LLM's input
 projection, or to hard-code a lookup table into a C reducer — stop

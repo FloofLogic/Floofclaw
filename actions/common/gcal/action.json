@@ -1,6 +1,6 @@
 {
   "id": "gcal",
-  "description": "Call this to create, list, search, inspect, update, and delete Google Calendar events; list calendars; check free/busy; or diagnose configured calendar accounts.",
+  "description": "Use only for Google Calendar itself: create, list, search, inspect, update, or delete its events; list calendars; check a Google Calendar's free/busy intervals; or diagnose accounts. Never use freebusy to check availability of campsites, reservations, products, venues, appointments, or other third-party inventory.",
   "outside_world": true,
   "private_credentials": true,
   "args_schema": {
@@ -31,7 +31,7 @@
           "delete",
           "freebusy"
         ],
-        "description": "Required with op:start. diagnose checks one selected/default account; accounts lists safe configured metadata; calendars lists calendars; list lists events; get needs calendar_id+event_id; search needs query; create needs event.summary/start/end; update needs event_id and at least one event field; delete needs event_id+confirm:true; freebusy needs time_min+time_max. Fields for other kinds are rejected."
+        "description": "Required with op:start. diagnose checks one selected/default account; accounts lists safe configured metadata; calendars lists calendars; list lists events; get needs calendar_id+event_id; search needs query; create needs event.summary/start/end; update needs event_id and at least one event field; delete needs event_id+confirm:true; freebusy reads busy intervals from a configured Google Calendar only and needs time_min+time_max. Fields for other kinds are rejected."
       },
       "account": {
         "type": "string",

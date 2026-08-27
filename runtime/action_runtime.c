@@ -63,7 +63,7 @@ int rt_action_committed_effect(const RtRun *r, const char *type,
       !payload_out || payload_len == 0)
     return -1;
   payload_out[0] = '\0';
-  rt_event_log_path(&r->ctx, path, sizeof(path));
+  if (rt_event_log_path(&r->ctx, path, sizeof(path)) != 0) return -1;
   if (fs_read_text(path, &text, FS_READ_TEXT_DEFAULT_CAP) != 0 || !text)
     return errno == ENOENT ? 0 : -1;
   line = text;

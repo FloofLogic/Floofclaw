@@ -16,6 +16,7 @@ For the pitch, read [what_is_floofclaw.md](what_is_floofclaw.md).
 - [What is FloofClaw](what_is_floofclaw.md) — the positioning
 - [Overview](getting-started/overview.md) — the operational shape
 - [Installation and Build](getting-started/installation-and-build.md)
+- [Prebuilt binaries](getting-started/prebuilt-binaries.md)
 - [First Run](getting-started/first-run.md)
 - [Project Layout](getting-started/project-layout.md)
 - [Adding an action](getting-started/adding-an-action.md) — copy a directory, restart

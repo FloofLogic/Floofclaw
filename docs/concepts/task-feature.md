@@ -58,11 +58,14 @@ Stored statuses are `open`, `working`, `blocked`, `completed`, `failed`, and
 runtime does not model task dependency graphs; readiness is based on the task's
 own lifecycle and operation state.
 
-State changes are event-sourced through `task_created`, `task_updated`,
-`task_working_memory_appended`, `task_completed`, `task_failed`, and
-`task_canceled`. The reducer validates task identity, accepted fields,
-capacity, and transitions before atomically rewriting
-`workspace/memory/state/tasks.json`.
+Run-owned state changes are event-sourced through `task_created`,
+`task_updated`, `task_working_memory_appended`, `task_completed`,
+`task_failed`, and `task_canceled`. The operator-only
+`fclaw task cancel <task_id>` control path applies the same canonical
+`task_canceled` transition directly through the reducer because no run owns
+that command; it also writes a narration record. The reducer validates task
+identity, accepted fields, capacity, and transitions before atomically
+rewriting `workspace/memory/state/tasks.json`.
 
 ### Who closes an input task
 
@@ -71,20 +74,19 @@ the record "the user asked this, and it is not yet handled". Creating it is
 the kernel's job. Closing it is deliberately not automatic, because a reply
 is not necessarily an answer — "On it, checking…" leaves the ask open on
 purpose — and a run reaching `run_done` never mutates task lifecycle. An
-input task closes in exactly three ways:
+input task closes in exactly four ways:
 
 1. **The agent says so.** `task.update` with `state: "completed"` for the
    exact `task_id`. This is the rule for an agent that does the work itself
    across several event runs (`openclaw`, `truly_openclaw`): it keeps the
    ask open while it emits managed actions and closes it when its response
-   is final. The `task_action_or_finalize` output contract enforces the
-   choice — a message-only promise is withheld and repaired.
+   is final. The agent's prompt owns that decision; the kernel does not judge
+   whether a valid set of calls looks like a continuation or a final answer.
 
-   The repair budget is not the contract's alone. An agent under rule 2
-   declares no contract, and a structurally malformed decision from it is
-   also repaired, bounded by a top-level `repair_attempts` in its
-   `agent.json` (default 2). Either way a rejected decision is never
-   executed or delivered, so it cannot close the task by accident.
+   A structurally malformed LLM decision is repaired, bounded by the
+   top-level `repair_attempts` in its `agent.json` (default 2). A response the
+   normalizer rejects is never executed or delivered, so it cannot close the
+   task by accident.
 2. **The agent's `agent.json` sets `autocomplete_message_task_on_send: true`.**
    A successful `message` send completes the bound input task. This is the
    rule for an agent whose reply *is* the answer and whose work, if any,
@@ -101,6 +103,10 @@ input task closes in exactly three ways:
    exists. Only reserved event kinds bind this way, and only within the
    run's own context; a `task_id` key in a product-owned typed event is
    producer data.
+4. **The operator cancels the exact open task.**
+   `fclaw task cancel <task_id>` applies `task_canceled` through the task
+   reducer and narrates the control action. It refuses non-open tasks and is
+   intended for inert records; it does not stop a live run or external worker.
 
 Every LLM agent that answers user messages must do 1 or 2. **If it does
 neither, each successful turn leaves one open task behind.** The active

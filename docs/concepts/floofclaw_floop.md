@@ -174,10 +174,27 @@ The three managers each declare `listen: ["event", "memory", "affairs",
 "tasks", "usage"]`:
 
 - `event` — the triggering envelope: kind, text, opaque payload.
-- `usage` — LLM calls/tokens per agent plus worker-operation counts,
-  so cost questions are answered with real numbers.
+- `usage` — LLM calls/tokens and dated USD estimates per agent plus
+  worker-operation counts, so cost questions use measured usage and state
+  clearly when a provider/model has no configured price.
 - `memory` recall is byte-bounded (clipped texts, oldest dropped) so a
   chatty tail can never blow the event budget.
+
+## Conversation memory and legacy contexts
+
+Current channel memory is keyed by the complete conversation route: adapter,
+channel or DM, and thread where the adapter supplies one. Compaction only
+selects contexts reached through that current route key.
+
+Installations upgraded from before v0.28 may still contain the old shared
+context key (for example `chat:discord:discord-main`). It is inert historical
+data: no current conversation selects it, it is never sent to a model, and it
+cannot compact automatically. Its bytes still appear in aggregate
+`memory_bytes` until an operator deliberately archives or removes that legacy
+record during an installation-specific migration. FloofClaw leaves it intact
+by default rather than guessing which newer conversation should inherit a
+formerly shared history. New and active per-conversation contexts compact
+normally.
 
 ## Watching it run
 

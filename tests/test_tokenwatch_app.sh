@@ -4,6 +4,8 @@ set -euo pipefail
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
+cmp config/pricing.json app/tokenwatch/pricing.json
+
 python3 app/tokenwatch/generate.py --repo-root . \
   --fixture tests/fixtures/tokenwatch/mixed.json \
   --recent 10 \

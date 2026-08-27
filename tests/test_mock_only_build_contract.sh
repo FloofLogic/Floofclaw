@@ -42,7 +42,7 @@ if ! make MOCK_ONLY=1 -j4 >/tmp/fclaw_mockonly_build.$$ 2>&1; then
   fail "the mock-only build did not compile"
 fi
 if grep -Eq 'warning:' /tmp/fclaw_mockonly_build.$$; then
-  grep -E 'warning:' /tmp/fclaw_mockonly_build.$$ | head -5 >&2
+  grep -Em 5 'warning:' /tmp/fclaw_mockonly_build.$$ >&2
   fail "the mock-only build is not warning-clean"
 fi
 rm -f /tmp/fclaw_mockonly_build.$$

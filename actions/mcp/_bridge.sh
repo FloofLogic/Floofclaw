@@ -94,7 +94,7 @@ resolve_env() {
 # Returns 124 when it had to kill the child.
 run_bounded() {
   local secs="$1" infile="$2" outfile="$3"; shift 3
-  local pid waited monitor=0
+  local pid waited max_polls monitor=0
   # Job control gives the child its own process group, so the bound can kill
   # the server AND anything it spawned. Without that an orphaned grandchild
   # keeps inherited descriptors open and the caller blocks anyway.
@@ -106,15 +106,16 @@ run_bounded() {
   pid=$!
   [ "$monitor" = 1 ] || set +m
   waited=0
+  max_polls=$((secs * 50))
   while kill -0 "$pid" 2>/dev/null; do
-    if [ "$waited" -ge "$secs" ]; then
+    if [ "$waited" -ge "$max_polls" ]; then
       kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
-      sleep 1
+      sleep 0.1
       kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
       wait "$pid" 2>/dev/null
       return 124
     fi
-    sleep 1
+    sleep 0.02
     waited=$((waited + 1))
   done
   wait "$pid"

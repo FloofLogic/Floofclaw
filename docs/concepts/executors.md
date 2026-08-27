@@ -16,11 +16,10 @@ construct their input internally.
 
 Only an `llm` agent gets a rejected decision back. When the normalizer refuses
 its output, the phase re-runs as another provider call carrying the rejected
-response and the reason, bounded by `repair_attempts` (default 2, or the
-`output_contract`'s own value when one is declared). A `script` or `native`
-agent is deterministic, so a second identical turn buys nothing and the
-rejection is terminal. See
-[Floops — repair without a contract](floops.md#repair-without-a-contract).
+response and the reason, bounded by `repair_attempts` (default 2). A `script`
+or `native` agent is deterministic, so a second identical turn buys nothing
+and the rejection is terminal. See
+[Floops — LLM output repair](floops.md#llm-output-repair).
 
 ## Processor input
 
@@ -45,7 +44,10 @@ Neither form can send the model an instruction with nothing to act on.
 ## Model profiles
 
 LLM agents reference an entry in `config/model_profiles.json`. The profile
-loader currently consumes `id`, `provider`, `model`, and optional `effort`.
+loader consumes `id`, `provider`, `model`, optional `effort`, and optional
+`max_output_tokens`. The output limit defaults to 4096 and is bounded at
+16384 so the requested token budget cannot outrun the fixed 64 KiB response
+buffer (the transport separately enforces the actual byte cap).
 The referenced provider-registry entry supplies transport kind, endpoint,
 authentication, and request limits. Profile fields such as `protocol`,
 `context_size`, and `prefer` are currently documentary and unread by the
@@ -80,14 +82,17 @@ correlated intermediate result and distinguishes it from terminal
 ## Model effort
 
 Model profiles live in `config/model_profiles.json`. A profile may set
-`"effort"` (for example `"low"`, `"medium"`, `"high"`). The Gemini
-transport renders it as `generationConfig.thinkingConfig.thinkingLevel`,
-and the OpenAI Responses transport renders it as
-`"reasoning": {"effort": ...}`; the other current transports load the
-field but do not put it on the wire. The engine does not whitelist
-values: the provider is the authority, and an invalid value or
-unsupported model fails loudly at the API with request artifacts on
-disk. A Gemini profile without `effort` uses `thinkingBudget: 0`; an
-OpenAI Responses profile without `effort` omits `reasoning` entirely.
-Only set `effort` when the selected provider/model transport actually
-supports it.
+`"effort"` (for example `"low"`, `"medium"`, `"high"`). Anthropic Messages
+sends it as `output_config.effort`; OpenAI chat as `reasoning_effort`; OpenAI
+Responses as `reasoning.effort`. Anthropic accepts low/medium/high/xhigh/max
+and rejects another value locally. Gemini 2.5 maps low/medium/high to numeric
+thinking budgets of 512/1024/4096, while newer Gemini models receive
+`thinkingLevel`. A Gemini 2.5 Flash/Flash-Lite profile without `effort`
+sends `thinkingBudget: 0` (thinking off); other Gemini profiles without
+`effort` omit `thinkingConfig` and use the model default. Other than the Gemini 2.5 mapping, the provider is the
+authority on supported values and models; an invalid combination fails at the
+API with request artifacts on disk. Official OpenAI chat maps the profile's
+`max_output_tokens` to `max_completion_tokens` and omits `temperature`; the
+generic `openai_compat` transport keeps `max_tokens` and `temperature: 0` for
+local servers and OpenRouter. Only set `effort` when that selected
+provider/model supports it.

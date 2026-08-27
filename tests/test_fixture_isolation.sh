@@ -24,6 +24,11 @@ control_dir="$(mktemp -d "$tmp_parent/fclaw-fixture-control.XXXXXX")"
 before="$control_dir/status.before"
 after="$control_dir/status.after"
 direct_log="$control_dir/direct.log"
+budget_log="$control_dir/budget.log"
+shard_log="$control_dir/shard.log"
+sanitizer_input="$control_dir/sanitizer.input"
+sanitizer_log="$control_dir/sanitizer.log"
+registry_log="$control_dir/registry.log"
 probe_log="$control_dir/probe.log"
 ready="$control_dir/ready"
 child_pid_file="$control_dir/child.pid"
@@ -62,6 +67,66 @@ if [[ "$direct_rc" -ne 2 ]] ||
    ! grep -q 'refusing to run outside an isolated copy' "$direct_log"; then
   printf 'fixture isolation: direct test binary did not refuse safely\n' >&2
   cat "$direct_log" >&2
+  exit 1
+fi
+
+set +e
+FCLAW_TEST_BUDGET_SCALE=not-a-number \
+  ./tests/run_in_isolated_copy.sh \
+  ./bin/fclaw_integration_tests configured_default_floop_is_loadable \
+  >"$budget_log" 2>&1
+budget_rc=$?
+set -e
+if [[ "$budget_rc" -ne 2 ]] ||
+   ! grep -q 'FCLAW_TEST_BUDGET_SCALE must be an integer from 1 to 100' \
+     "$budget_log"; then
+  printf 'fixture isolation: malformed budget scale did not fail loudly\n' >&2
+  cat "$budget_log" >&2
+  exit 1
+fi
+
+set +e
+FCLAW_TEST_SHARD=not-a-shard \
+  ./tests/run_in_isolated_copy.sh \
+  ./bin/fclaw_integration_tests configured_default_floop_is_loadable \
+  >"$shard_log" 2>&1
+shard_rc=$?
+set -e
+if [[ "$shard_rc" -ne 2 ]] ||
+   ! grep -q 'FCLAW_TEST_SHARD must be I/N with 1 <= I <= N' "$shard_log"; then
+  printf 'fixture isolation: malformed shard did not fail loudly\n' >&2
+  cat "$shard_log" >&2
+  exit 1
+fi
+
+printf '%s\n' \
+  'child: runtime error: signed integer overflow' \
+  '==1==ERROR: AddressSanitizer: heap-use-after-free' >"$sanitizer_input"
+set +e
+./tests/run_integration_parallel.sh --check-sanitizer-log "$sanitizer_input" \
+  >"$sanitizer_log" 2>&1
+sanitizer_rc=$?
+set -e
+if [[ "$sanitizer_rc" -ne 1 ]] ||
+   ! grep -q 'emitted a sanitizer diagnostic' "$sanitizer_log"; then
+  printf 'fixture isolation: child sanitizer diagnostic was not fatal\n' >&2
+  cat "$sanitizer_log" >&2
+  exit 1
+fi
+
+set +e
+./tests/run_in_isolated_copy.sh bash -c '
+  printf "#!/usr/bin/env bash\n" > tests/test_unregistered_contract.sh
+  ./tests/run_contracts_parallel.sh --check-registry
+' >"$registry_log" 2>&1
+registry_rc=$?
+set -e
+if [[ "$registry_rc" -ne 1 ]] ||
+   ! grep -q 'shell contract registry does not match tests/test_\*.sh' \
+     "$registry_log" ||
+   ! grep -q 'test_unregistered_contract.sh' "$registry_log"; then
+  printf 'fixture isolation: unregistered shell contract was not rejected\n' >&2
+  cat "$registry_log" >&2
   exit 1
 fi
 
@@ -150,4 +215,4 @@ if ! cmp -s "$before" "$after"; then
   exit 1
 fi
 
-printf 'fixture isolation: direct runner refused; SIGKILL left checkout unchanged\n'
+printf 'fixture isolation: direct runner, malformed controls, sanitizer diagnostics, and unregistered shell contracts refused; SIGKILL left checkout unchanged\n'

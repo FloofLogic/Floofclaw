@@ -12,6 +12,11 @@
       "model": "mock-1"
     },
     {
+      "id": "hello",
+      "provider": "mock",
+      "model": "mock-1"
+    },
+    {
       "id": "default_gemini_flash",
       "provider": "mock",
       "model": "mock-1"

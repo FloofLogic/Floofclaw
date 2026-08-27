@@ -300,26 +300,18 @@ stamps its own input task and, for a continuation run, the task its
 runtime-owned triggering event bound it to (`docs/concepts/task-feature.md`,
 "Who closes an input task").
 
-Main Claw declares the generic agent-boundary
-`output_contract.kind: "task_action_or_finalize"`. Before any call is
-normalized, appended, dispatched, or delivered, that contract accepts exactly
-one of two task-bearing decisions: one substantive action with optional
-progress message/working-memory sidecar, or one final message plus the exact
-completed `task.update`. A rejected decision remains only in provider and
-agent-output artifacts. The same phase is re-run as another ordinary LLM child
-job with the exact rejected response and a specific correction; Main Claw
-configures two such repairs. Exhaustion fails with
-`agent_decision_contract_exhausted`. The scheduler still only walks the floop;
-it does not infer whether prose sounds finished.
+Main Claw's prompt owns the continue-or-finish behavior. The kernel does not
+classify an otherwise valid response as one of those product-shaped choices or
+withhold valid calls because of their combination. It normalizes each proposed
+call against the action boundary, while `task.update` and the task reducer
+validate the requested lifecycle transition.
 
-The bounded repair itself is not contract machinery. A normalizer rejection —
-structural, not semantic — engages it for any LLM agent, whether or not a
-contract is declared; an agent without one carries a top-level
-`repair_attempts` budget instead (default 2) and exhausts as
-`agent_output_invalid`. The correction text differs accordingly: a contract
-agent is shown the two forms its contract accepts, and a contract-less agent
-is pointed back at its own prompt with the rejection named. Script and native
-agents are never re-run.
+A structural normalizer rejection — a malformed call, an unknown action, or
+invalid arguments — engages bounded feedback for any LLM agent. The rejected
+response remains only in provider and agent-output artifacts, and the same
+phase is re-run as another ordinary LLM child job with the normalizer's reason.
+The top-level `repair_attempts` budget defaults to 2; exhaustion is
+`agent_output_invalid`. Script and native agents are never re-run.
 
 `memory.before` recalls runtime-owned memory projection:
 `conversation_summary`, `recent_summary`, and the canonical `recent` raw
@@ -1123,23 +1115,12 @@ The provider response (for LLM agents) is not truth. It becomes truth only
 after the runtime validates the model call intent, assigns durable runtime ids,
 and appends normalized events to `event_log.jsonl`.
 
-An LLM agent may declare this bounded semantic output contract in
-`agent.json`:
-
-```json
-{
-  "output_contract": {
-    "kind": "task_action_or_finalize",
-    "repair_attempts": 2
-  }
-}
-```
-
-This is pre-commit agent-output validation, not floop retry and not JSON
-cleanup. Each repair is a separately recorded provider call under the same run
-and uses the normal asynchronous agent-job path and timeout. Run-local
-`.rejected.json` evidence states that the rejected response was neither
-executed nor delivered.
+When the ordinary output normalizer rejects an LLM response, each bounded
+repair is a separately recorded provider call under the same run and uses the
+normal asynchronous agent-job path and timeout. Run-local `.rejected.json`
+evidence states that the rejected response was neither executed nor delivered.
+`agent.json` may set the top-level `repair_attempts` budget from 0 through 4;
+the default is 2.
 
 Bounded syntactic repair for LLM JSON envelopes is a quarantined boundary
 cleanup step, not a parser mode and not contract repair. Raw model text first
@@ -1191,8 +1172,13 @@ opts in only by declaring an exact gate.
 
 Replies use the ordinary delivery path — one record in
 `workspace/logs/deliveries.jsonl` carrying the channel and the producer's
-opaque `ref`. A producer tails that file for its own channel exactly as
-`channels/message_deliver.sh` does; it does not need a channel adapter.
+opaque `ref`. An external integration that wants replies owns the matching
+consumer too: it filters on its exact `channel` and `adapter_id`, persists its
+own cursor and recovery state, and performs the last-mile send. The same
+integration owns inbound publication and runs under launchd, systemd, cron,
+or another OS supervisor. Core provides the ingress and delivery contracts;
+it does not ship a shared transport-specific bridge. A native channel adapter
+is optional, not required, for this external-process shape.
 
 The trust boundary is the local OS and filesystem authority already required
 to execute the correct `fclaw` binary in its configured home. `adapter_id`
@@ -1407,6 +1393,7 @@ Current CLI:
 ./bin/fclaw run -h --floop openclaw --text "hello"
 ./bin/fclaw run -h --floop floofclaw --text "hello"
 ./bin/fclaw replay -h workspace/runs/run_001/event_log.jsonl
+./bin/fclaw task cancel -h task_run_001_000008
 ./bin/fclaw gateway start -h --floop floofclaw
 ./bin/fclaw -i -h  # uses the running gateway's floop
 ```
@@ -1439,6 +1426,7 @@ Current architecture gates:
 
 ```bash
 make test
+make test-full                         # routine suite plus rebuild contracts
 make robustness                      # major/deep-engine gate; full target currently requires macOS
 FCLAW_LIVE_SMOKE=1 make live-smoke   # opt-in live provider path
 ```
@@ -1447,6 +1435,9 @@ FCLAW_LIVE_SMOKE=1 make live-smoke   # opt-in live provider path
 ASan → UBSan → small-stack → fuzz → chaos → disk-full → thrash gate used
 before a major version tag or after deep engine surgery; see
 [Testing](concepts/testing.md) for the binding two-tier policy.
+Release-candidate assembly uses `make test-full` so mock-only, adapter
+selection, and Android cross-build contracts remain release gates without
+slowing every edit.
 
 The unit and integration layers run in isolated temporary copies, and their C
 runners refuse before teardown or fixture writes unless the wrapper's
@@ -1473,7 +1464,7 @@ The tests should preserve these guarantees:
 
 Test style:
 
-- keep `make test` centered on 37 unit checks, 177 integration checks, and one
+- keep `make test` centered on 41 unit checks, 192 integration checks, and one
   representative hermetic, mock-provider-backed smoke, with focused shell
   probes for public CLI, app, recovery, and portability contracts
 - test contracts rather than implementation trivia, using unit/integration

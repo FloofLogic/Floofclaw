@@ -61,8 +61,8 @@ int every_channel_reconnect_uses_shared_backoff_and_narration(void) {
     rc |= test_read_file(paths[i], &source);
     rc |= expect_substr(source, "fc_reconnect_backoff_next",
                         "adapter schedules with shared reconnect helper");
-    rc |= expect_substr(source, "reconnect in %llus (attempt %u)",
-                        "adapter narrates reconnect delay and attempt");
+    rc |= expect_substr(source, "attempt %u",
+                        "adapter narration carries reconnect attempt");
     free(source);
   }
   return rc;

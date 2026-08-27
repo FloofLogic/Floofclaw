@@ -475,116 +475,6 @@ static int agent_call_intent_name(const JsonRef *call,
   return 0;
 }
 
-static int output_contract_task_id(const RtContext *ctx, char *out,
-                                   size_t out_len) {
-  char request_kind[RT_SMALL], text[RT_LARGE];
-  JsonRef payload;
-  if (!ctx || !out || out_len == 0) return -1;
-  out[0] = '\0';
-  if (strcmp(ctx->event_kind, "user_message") == 0)
-    return rt_conversational_request_task(ctx, out, out_len,
-                                           request_kind, sizeof(request_kind),
-                                           text, sizeof(text));
-  if (strcmp(ctx->event_kind, "operation_result") == 0) {
-    if (json_ref_top_object(ctx->event_payload_json, &payload) != 0 ||
-        json_ref_object_get_string(&payload, "task_id", out, out_len) != 0 ||
-        !out[0] || !rt_task_reference_in_context(ctx->context_id, out))
-      return -1;
-    return 0;
-  }
-  return 1;
-}
-
-int rt_agent_validate_output_contract(const RtContext *ctx,
-                                      const RtAgentMeta *agent_meta,
-                                      const char *output_json,
-                                      char *reason, size_t reason_len) {
-  JsonRef root, calls, call;
-  char expected_task[RT_SMALL];
-  size_t message_count = 0, update_count = 0, sidecar_count = 0;
-  size_t substantive_count = 0;
-  int task_rc;
-  if (reason && reason_len) reason[0] = '\0';
-  if (!agent_meta || !agent_meta->output_contract[0]) return 1;
-  if (strcmp(agent_meta->output_contract,
-             "task_action_or_finalize") != 0) {
-    if (reason) snprintf(reason, reason_len,
-                         "unknown configured output contract");
-    return -1;
-  }
-  task_rc = output_contract_task_id(ctx, expected_task,
-                                    sizeof(expected_task));
-  if (task_rc > 0) return 1;
-  if (task_rc < 0) {
-    if (reason) snprintf(
-        reason, reason_len,
-        "the task-bearing event has no exact active task binding");
-    return -1;
-  }
-  if (!output_json || json_ref_top_object(output_json, &root) != 0 ||
-      json_ref_object_get_array(&root, "calls", &calls) != 0) {
-    if (reason) snprintf(reason, reason_len,
-                         "output must be one JSON object with a calls array");
-    return -1;
-  }
-  for (size_t i = 0; i < json_ref_array_size(&calls); ++i) {
-    char name[RT_SMALL];
-    if (json_ref_array_get(&calls, i, &call) != 0 ||
-        call.type != JSON_REF_OBJECT ||
-        agent_call_intent_name(&call, name, sizeof(name)) != 0) {
-      if (reason) snprintf(
-          reason, reason_len,
-          "every call must contain exactly one name or action");
-      return -1;
-    }
-    if (strcmp(name, "message") == 0 ||
-        strcmp(name, "message.send") == 0) {
-      message_count++;
-    } else if (strcmp(name, "task.update") == 0) {
-      JsonRef args;
-      char task_id[RT_SMALL] = "", state[RT_SMALL] = "";
-      update_count++;
-      if (json_ref_object_get_object(&call, "args", &args) != 0 ||
-          json_ref_object_get_string(&args, "task_id", task_id,
-                                     sizeof(task_id)) != 0 ||
-          json_ref_object_get_string(&args, "state", state,
-                                     sizeof(state)) != 0 ||
-          strcmp(task_id, expected_task) != 0 ||
-          strcmp(state, "completed") != 0) {
-        if (reason) snprintf(
-            reason, reason_len,
-            "FINALIZE requires task.update with the exact current task_id "
-            "and state completed");
-        return -1;
-      }
-    } else if (strcmp(name, "working_memory_append") == 0) {
-      sidecar_count++;
-    } else {
-      substantive_count++;
-    }
-  }
-  if (message_count == 1 && update_count == 0 &&
-      substantive_count == 0 && sidecar_count == 0) {
-    if (reason) snprintf(
-        reason, reason_len,
-        "message-only response is invalid: it neither continues work nor "
-        "finalizes the task");
-    return -1;
-  }
-  if (substantive_count == 1 && update_count == 0 &&
-      message_count <= 1 && sidecar_count <= 1)
-    return 0;
-  if (substantive_count == 0 && update_count == 1 &&
-      message_count == 1 && sidecar_count == 0)
-    return 0;
-  if (reason) snprintf(
-      reason, reason_len,
-      "return exactly CONTINUE (one substantive action, optional message "
-      "and working_memory_append, no task.update) or FINALIZE (one message "
-      "plus exact completed task.update, no substantive action)");
-  return -1;
-}
-
 int rt_agent_normalize_output(RtContext *ctx, const RtStep *step,
                               const RtAgentMeta *agent_meta,
                               const char *bound_task_id,
@@ -970,7 +860,7 @@ int rt_agent_prepare_invocation(RtContext *ctx, const char *floop_name, const Rt
                         input_err[0] ? input_err : "agent input render failed");
     return -1;
   }
-  return fs_write_text(out->in_path, out->input);
+  return fs_write_text_atomic(out->in_path, out->input);
 }
 
 int rt_agent_append_output(RtContext *ctx, const RtStep *step,

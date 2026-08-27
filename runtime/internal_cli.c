@@ -76,9 +76,14 @@ static int agent_llm_main(int argc, char **argv) {
     fprintf(stderr, "internal agent-llm: agent %s missing model.ref\n", agent);
     return 1;
   }
-  if (llm_load_profile(model_ref, &profile) != 0) {
-    fprintf(stderr, "internal agent-llm: profile %s not found\n", model_ref);
-    return 1;
+  {
+    char profile_err[RT_LARGE];
+    if (llm_load_profile_with_error(model_ref, &profile, profile_err,
+                                    sizeof(profile_err)) != 0) {
+      fprintf(stderr, "internal agent-llm: %s\n",
+              profile_err[0] ? profile_err : "model profile load failed");
+      return 1;
+    }
   }
 
   /* Read agent step input. */
@@ -105,10 +110,14 @@ static int agent_llm_main(int argc, char **argv) {
   llm_media_dispose(media);
   free(step_input);
   if (rc != 0) {
-    fprintf(stderr, "internal agent-llm: llm_call failed for %s\n", agent);
+    if (response[0] == '{')
+      fprintf(stderr, "internal agent-llm: llm_call failed for %s: %.240s\n",
+              agent, response);
+    else
+      fprintf(stderr, "internal agent-llm: llm_call failed for %s\n", agent);
     return 1;
   }
-  if (fs_write_text(out_path, response) != 0) {
+  if (fs_write_text_atomic(out_path, response) != 0) {
     fprintf(stderr, "internal agent-llm: could not write %s\n", out_path);
     return 1;
   }

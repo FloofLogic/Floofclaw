@@ -212,6 +212,48 @@ static void a1_scheduler_close(RtScheduler *scheduler) {
   free(scheduler);
 }
 
+int availability_action_contracts_keep_calendar_and_inventory_distinct(void) {
+  char *gcal = NULL;
+  char *work = NULL;
+  int rc = 0;
+
+  rc |= test_read_file("actions/common/gcal/action.json", &gcal);
+  rc |= test_read_file("actions/core/work/action.json", &work);
+  rc |= expect(gcal && work,
+               "availability action manifests are readable");
+  if (gcal) {
+    rc |= expect_substr(
+        gcal,
+        "Never use freebusy to check availability of campsites",
+        "Google Calendar contract excludes campsite inventory");
+    rc |= expect_substr(
+        gcal,
+        "freebusy reads busy intervals from a configured Google Calendar only",
+        "freebusy kind names its Google Calendar boundary");
+  }
+  if (work) {
+    rc |= expect_substr(
+        work,
+        "The worker does not receive this conversation",
+        "work contract names the missing conversation boundary");
+    rc |= expect_substr(
+        work,
+        "inclusive nights versus checkout date",
+        "work contract preserves date-range meaning");
+    rc |= expect_substr(
+        work,
+        "Never use a fragment such as 'check availability on those dates.'",
+        "work contract rejects the live underspecified delegation");
+    rc |= expect_substr(
+        work,
+        "do not reduce it to a generic condition",
+        "work completion retains the user's full scope");
+  }
+  free(work);
+  free(gcal);
+  return rc;
+}
+
 static int a1_run(const char *response_path, char **request_out,
                   char *run_id, size_t run_id_len) {
   char response[8192];

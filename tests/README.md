@@ -2,9 +2,9 @@
 
 The routine suite is hermetic, offline, and intentionally contract-focused:
 
-- `bin/fclaw_unit_tests`: 32 fast C checks for parser, provider, filesystem,
+- `bin/fclaw_unit_tests`: 41 fast C checks for parser, provider, filesystem,
   reconnect, TLS, and allocation-boundary contracts.
-- `bin/fclaw_integration_tests`: 139 in-process checks across the scheduler,
+- `bin/fclaw_integration_tests`: 193 in-process checks across the scheduler,
   reducers, recovery, channels, provider limits, durable operations, and hard
   capacity boundaries.
 - `tests/test_local_client_api.sh`: an isolated loopback lifecycle probe for
@@ -31,9 +31,10 @@ make -j4 bin/fclaw_integration_tests
 The raw C runners refuse to start in the checkout. `make integration` also
 SIGKILLs a real fixture-writing test after it has changed the copied registry
 and created copied action/floop fixtures, then proves the scratch root is gone
-and the checkout's byte-for-byte Git status is unchanged. The Makefile also
-exposes focused sanitizer, small-stack, fuzz, chaos, disk-full, and thrash
-targets.
+and the checkout's byte-for-byte Git status is unchanged. It also rejects
+malformed shard controls and child sanitizer diagnostics. The shell-contract
+driver refuses any unregistered `tests/test_*.sh`. The Makefile also exposes
+focused sanitizer, small-stack, fuzz, chaos, disk-full, and thrash targets.
 
 `make robustness` composes those expensive proofs on macOS and takes roughly
 20–23 minutes. It is required only before a major version release or after

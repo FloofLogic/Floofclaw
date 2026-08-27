@@ -188,25 +188,54 @@ int dc_queue_raw(DcAdapter *a, const char *channel_id, const char *payload) {
 int dc_queue_message_chunks(DcAdapter *a, const char *channel_id, const char *text) {
   char clean[DC_REPLY_MAX];
   const char *cursor;
+  size_t needed = 0;
+  int original_count;
   int count = 0;
+  if (!a || !channel_id || !*channel_id || a->out_count < 0 ||
+      a->out_count > DC_OUT_QUEUE_MAX)
+    return -1;
   dc_sanitize_text(text, clean, sizeof(clean));
+  cursor = clean;
+  while (*cursor) {
+    size_t chunk_len = dc_choose_chunk_len(cursor, DC_CHUNK_MAX);
+    if (chunk_len == 0U) break;
+    needed++;
+    cursor += chunk_len;
+    while (*cursor == ' ' || *cursor == '\n') cursor++;
+  }
+  if (needed == 0U) needed = 1U;
+  if (needed > (size_t)(DC_OUT_QUEUE_MAX - a->out_count))
+    return DC_QUEUE_FULL;
+
+  original_count = a->out_count;
   cursor = clean;
   while (*cursor) {
     char chunk[DC_CHUNK_MAX + 4];
     char esc[DC_CHUNK_MAX * 2 + 8];
     char payload[DC_CHUNK_MAX * 2 + 64];
     size_t chunk_len = dc_choose_chunk_len(cursor, DC_CHUNK_MAX);
+    int payload_len;
     if (chunk_len == 0U) break;
     memcpy(chunk, cursor, chunk_len);
     chunk[chunk_len] = '\0';
-    if (json_escape(chunk, esc, sizeof(esc)) != 0) return -1;
-    snprintf(payload, sizeof(payload), "{\"content\":\"%s\"}", esc);
-    if (dc_queue_raw(a, channel_id, payload) != 0) return -1;
+    payload_len = json_escape(chunk, esc, sizeof(esc)) == 0
+                      ? snprintf(payload, sizeof(payload),
+                                 "{\"content\":\"%s\"}", esc)
+                      : -1;
+    if (payload_len < 0 || (size_t)payload_len >= sizeof(payload) ||
+        dc_queue_raw(a, channel_id, payload) != 0) {
+      a->out_count = original_count;
+      return -1;
+    }
     count++;
     cursor += chunk_len;
     while (*cursor == ' ' || *cursor == '\n') cursor++;
   }
-  if (count == 0) return dc_queue_raw(a, channel_id, "{\"content\":\" \"}");
+  if (count == 0 &&
+      dc_queue_raw(a, channel_id, "{\"content\":\" \"}") != 0) {
+    a->out_count = original_count;
+    return -1;
+  }
   return 0;
 }
 

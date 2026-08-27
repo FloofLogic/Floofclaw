@@ -10,6 +10,7 @@
 #include "../../runtime/ports.h"
 #include "../../runtime/runtime.h"
 #include "../../runtime/runtime_kernel.h"
+#include "../../runtime/secure/secret_store.h"
 #include "../../runtime/support/fsutil.h"
 #include "../../runtime/support/net.h"
 #include "../../runtime/support/timing.h"
@@ -265,8 +266,8 @@ int usage_cli_states_and_enforces_current_segment_scope(void) {
       "{\"ts\":\"2026-08-08T00:00:00Z\",\"floop\":\"hello\","
       "\"run_id\":\"run_001\",\"call_seq\":1,"
       "\"agent\":\"current_agent\",\"profile\":\"current_profile\","
-      "\"provider\":\"mock\","
-      "\"model\":\"mock-v1\",\"input_chars\":10,"
+      "\"provider\":\"gemini_key\","
+      "\"model\":\"gemini-2.5-flash-lite\",\"input_chars\":10,"
       "\"input_media_count\":0,\"input_media_bytes\":0,\"output_chars\":20,"
       "\"input_tokens\":3,\"output_tokens\":4,\"total_tokens\":7,"
       "\"provider_cached_input_tokens\":2,"
@@ -274,8 +275,8 @@ int usage_cli_states_and_enforces_current_segment_scope(void) {
       "{\"ts\":\"2026-08-08T00:00:01Z\",\"floop\":\"hello\","
       "\"run_id\":\"run_002\",\"call_seq\":1,"
       "\"agent\":\"current_agent\",\"profile\":\"current_profile\","
-      "\"provider\":\"mock\","
-      "\"model\":\"mock-v2\",\"input_chars\":11,"
+      "\"provider\":\"gemini_key\","
+      "\"model\":\"gemini-2.5-flash\",\"input_chars\":11,"
       "\"input_media_count\":0,\"input_media_bytes\":0,\"output_chars\":21,"
       "\"input_tokens\":5,\"output_tokens\":6,\"total_tokens\":11,"
       "\"provider_cached_input_tokens\":null,"
@@ -314,8 +315,10 @@ int usage_cli_states_and_enforces_current_segment_scope(void) {
                        "scope: current log segment only; rotated history not included\n") == 1,
                "usage states the current-segment scope exactly once");
   rc |= expect_substr(out, "current_agent", "usage includes the current segment");
-  rc |= expect_substr(out, "mock-v1", "usage table identifies the first model");
-  rc |= expect_substr(out, "mock-v2", "usage table keeps a changed model separate");
+  rc |= expect_substr(out, "gemini-2.5-flash-lite",
+                      "usage table identifies the first model");
+  rc |= expect_substr(out, "gemini-2.5-flash",
+                      "usage table keeps a changed model separate");
   rc |= expect_no_substr(out, "rotated_agent", "usage excludes rotated history");
   rc |= expect(rt_usage_client_json(projection, sizeof(projection)) == 0,
                "versioned client usage projection builds");
@@ -329,6 +332,10 @@ int usage_cli_states_and_enforces_current_segment_scope(void) {
   rc |= expect_substr(projection,
                       "\"provider_cached_input_tokens\":2",
                       "client usage preserves provider-reported cache tokens");
+  rc |= expect_substr(projection, "\"estimated_usd\":0.00001822",
+                      "client usage reports the complete estimated USD total");
+  rc |= expect_substr(projection, "\"pricing_complete\":true",
+                      "client usage states complete pricing coverage");
   rc |= expect(harness_cli_usage(1, agent_argv, &agent_out,
                                  &agent_exit_code) == 0,
                "capture agent-readable usage output");
@@ -2320,6 +2327,11 @@ int socket_parse_progress_deadlines_are_bounded(void) {
                      discord->next_reconnect_ms > 31000U,
                  "stalled Discord frame closes into reconnect backoff");
 
+    rc |= expect(dc_queue_raw(discord, "progress-channel",
+                              "{\"content\":\"fixture\"}") == 0,
+                 "queue the REST response whose progress will expire");
+    discord->rest_cur = discord->outq[discord->out_head];
+    discord->rest_has_cur = 1;
     discord->rest_state = DC_REST_READING;
     discord->rest_read_started_ms = 1000U;
     rc |= expect(dc_rest_progress_expired(discord, 31000U) == 1 &&
@@ -2348,12 +2360,511 @@ int socket_parse_progress_deadlines_are_bounded(void) {
 
   rc |= test_read_file("workspace/logs/narration.jsonl", &narration);
   rc |= expect_substr(narration,
-                      "discord: gateway input made no parse progress",
+                      "cause=gateway input made no parse progress",
                       "Discord progress expiry is narrated");
   free(discord);
   free(irc_source);
   free(ws_source);
   free(narration);
+  return rc;
+}
+
+static char *discord_save_env(const char *name) {
+  const char *value = getenv(name);
+  return value ? strdup(value) : NULL;
+}
+
+static void discord_restore_env(const char *name, char *saved) {
+  if (saved) {
+    (void)setenv(name, saved, 1);
+    free(saved);
+  } else {
+    (void)unsetenv(name);
+  }
+}
+
+static int discord_install_test_token(DcAdapter *a, const char *home) {
+  if (!a || !home || setenv("FCLAW_HOME", home, 1) != 0 ||
+      secret_store_set("endpoint:discord_fixture_token", "fixture-token") !=
+          0)
+    return -1;
+  snprintf(a->token_key, sizeof(a->token_key), "discord_fixture_token");
+  return 0;
+}
+
+static int discord_decode_client_frame(const DcAdapter *a, char *out,
+                                       size_t out_len) {
+  const unsigned char *p;
+  const unsigned char *mask;
+  uint64_t payload_len;
+  size_t header = 2U;
+  if (!a || !out || out_len == 0U || a->gw_tx_len < 6U) return -1;
+  p = (const unsigned char *)a->gw_tx;
+  if ((p[1] & 0x80U) == 0U) return -1;
+  payload_len = p[1] & 0x7fU;
+  if (payload_len == 126U) {
+    if (a->gw_tx_len < 8U) return -1;
+    payload_len = ((uint64_t)p[2] << 8) | p[3];
+    header = 4U;
+  } else if (payload_len == 127U) {
+    if (a->gw_tx_len < 14U) return -1;
+    payload_len = 0;
+    for (int i = 0; i < 8; ++i)
+      payload_len = (payload_len << 8) | p[2 + i];
+    header = 10U;
+  }
+  if (payload_len >= out_len || payload_len > a->gw_tx_len - header - 4U)
+    return -1;
+  mask = p + header;
+  header += 4U;
+  for (size_t i = 0; i < (size_t)payload_len; ++i)
+    out[i] = (char)(p[header + i] ^ mask[i & 3U]);
+  out[payload_len] = '\0';
+  return 0;
+}
+
+int discord_reconnect_causes_and_heartbeat_ack_are_narrated(void) {
+  DcAdapter *a = NULL;
+  char *saved_home = discord_save_env("FCLAW_HOME");
+  char *narration = NULL;
+  char frame_payload[12000];
+  int rc = 0;
+
+  rc |= test_reset_workspace();
+  a = (DcAdapter *)calloc(1, sizeof(*a));
+  rc |= expect(a != NULL, "allocate Discord reconnect fixture");
+  if (!a) {
+    discord_restore_env("FCLAW_HOME", saved_home);
+    return 1;
+  }
+  a->enabled = 1;
+  a->gw_fd = -1;
+  a->rest_fd = -1;
+  rc |= expect(discord_install_test_token(a, "workspace/discord-gateway-auth") ==
+                   0,
+               "install isolated Discord gateway token");
+  snprintf(a->module_id_buf, sizeof(a->module_id_buf), "discord-cause-test");
+  fc_reconnect_backoff_init(&a->reconnect_backoff, a->module_id_buf);
+  (void)setenv("FCLAW_FAKE_MONOTONIC_MS", "1000", 1);
+
+  rc |= expect(dc_test_gateway_close_frame(a, 4000U, "fixture close") != 0 &&
+                   a->gw_state == DC_DISCONNECTED,
+               "server close frame enters reconnect state");
+
+  a->gw_state = DC_GATEWAY_OPEN;
+  a->resume_eligible = 1;
+  snprintf(a->session_id, sizeof(a->session_id), "session-before-reconnect");
+  a->sequence = 41;
+  rc |= expect(dc_test_gateway_json(a, "{\"op\":7,\"d\":null}") != 0 &&
+                   a->gw_state == DC_DISCONNECTED && a->resume_eligible &&
+                   strcmp(a->session_id, "session-before-reconnect") == 0 &&
+                   a->sequence == 41,
+               "server RECONNECT preserves resumable session state");
+  a->gw_state = DC_GATEWAY_OPEN;
+  rc |= expect(dc_test_gateway_json(
+                   a,
+                   "{\"op\":10,\"d\":{\"heartbeat_interval\":45000}}") ==
+                       0 &&
+                   discord_decode_client_frame(a, frame_payload,
+                                               sizeof(frame_payload)) == 0 &&
+                   strstr(frame_payload, "\"op\":6") != NULL &&
+                   strstr(frame_payload, "session-before-reconnect") != NULL &&
+                   strstr(frame_payload, "\"seq\":41") != NULL,
+               "HELLO after op 7 queues RESUME with the preserved session");
+
+  a->gw_tx_len = 0;
+  a->gw_state = DC_GATEWAY_OPEN;
+  a->resume_eligible = 1;
+  snprintf(a->session_id, sizeof(a->session_id), "session-resumable-invalid");
+  a->sequence = 42;
+  rc |= expect(dc_test_gateway_json(a, "{\"op\":9,\"d\":true}") != 0 &&
+                   a->gw_state == DC_DISCONNECTED && a->resume_eligible &&
+                   strcmp(a->session_id, "session-resumable-invalid") == 0 &&
+                   a->sequence == 42,
+               "resumable invalid session preserves resume state");
+  a->gw_state = DC_GATEWAY_OPEN;
+  rc |= expect(dc_test_gateway_json(
+                   a,
+                   "{\"op\":10,\"d\":{\"heartbeat_interval\":45000}}") ==
+                       0 &&
+                   discord_decode_client_frame(a, frame_payload,
+                                               sizeof(frame_payload)) == 0 &&
+                   strstr(frame_payload, "\"op\":6") != NULL &&
+                   strstr(frame_payload, "session-resumable-invalid") != NULL,
+               "HELLO after resumable op 9 queues RESUME");
+
+  a->gw_tx_len = 0;
+  a->gw_state = DC_GATEWAY_OPEN;
+  snprintf(a->session_id, sizeof(a->session_id), "session-before-invalid");
+  a->sequence = 42;
+  rc |= expect(dc_test_gateway_json(a, "{\"op\":9,\"d\":false}") != 0 &&
+                   a->gw_state == DC_DISCONNECTED &&
+                   !a->resume_eligible && !a->session_id[0] && a->sequence == 0,
+               "non-resumable invalid session clears resume state");
+  a->gw_state = DC_GATEWAY_OPEN;
+  rc |= expect(dc_test_gateway_json(
+                   a,
+                   "{\"op\":10,\"d\":{\"heartbeat_interval\":45000}}") ==
+                       0 &&
+                   discord_decode_client_frame(a, frame_payload,
+                                               sizeof(frame_payload)) == 0 &&
+                   strstr(frame_payload, "\"op\":2") != NULL,
+               "HELLO after non-resumable op 9 queues IDENTIFY");
+
+  a->gw_tx_len = 0;
+  a->gw_state = DC_GATEWAY_OPEN;
+  a->heartbeat_interval_ms = 100;
+  a->next_heartbeat_ms = 1100;
+  rc |= expect(dc_test_heartbeat_due(a, 1100) == 1 &&
+                   a->heartbeat_ack_pending,
+               "heartbeat records its pending ACK");
+  rc |= expect(dc_test_gateway_json(a, "{\"op\":11,\"d\":null}") == 0 &&
+                   !a->heartbeat_ack_pending,
+               "op 11 clears the pending heartbeat ACK");
+  a->next_heartbeat_ms = 1200;
+  rc |= expect(dc_test_heartbeat_due(a, 1200) == 1,
+               "next heartbeat starts a fresh ACK window");
+  rc |= expect(dc_test_heartbeat_due(a, 1300) != 0 &&
+                   a->gw_state == DC_DISCONNECTED,
+               "next interval without op 11 reconnects deliberately");
+
+  a->gw_state = DC_GATEWAY_OPEN;
+  rc |= expect(dc_test_gateway_json(
+                   a, "{\"op\":0,\"t\":\"READY\",\"d\":{\"session_id\":\"s\",\"user\":{\"id\":\"u\"}}}") == 0,
+               "READY dispatch is accepted");
+  rc |= expect(dc_test_gateway_json(
+                   a, "{\"op\":0,\"t\":\"RESUMED\",\"d\":{}}") == 0,
+               "RESUMED dispatch is accepted");
+
+  (void)unsetenv("FCLAW_FAKE_MONOTONIC_MS");
+  rc |= test_read_file("workspace/logs/narration.jsonl", &narration);
+  rc |= expect_substr(narration, "close code=4000 reason=fixture close",
+                      "close narration carries code and reason");
+  rc |= expect_substr(narration, "server RECONNECT (op 7)",
+                      "server RECONNECT cause is narrated");
+  rc |= expect_substr(narration, "invalid session resumable=false",
+                      "invalid-session resumability is narrated");
+  rc |= expect_substr(narration, "invalid session resumable=true",
+                      "resumable invalid-session decision is narrated");
+  rc |= expect_substr(narration, "heartbeat ACK missed",
+                      "missed heartbeat ACK is narrated");
+  rc |= expect_substr(narration, "session ready via IDENTIFY",
+                      "fresh IDENTIFY session is distinguished");
+  rc |= expect_substr(narration, "session ready via RESUME",
+                      "resumed session is distinguished");
+  free(narration);
+  free(a);
+  discord_restore_env("FCLAW_HOME", saved_home);
+  return rc;
+}
+
+int discord_gateway_oversized_frame_is_rejected(void) {
+  static const unsigned char oversized[] = {
+      0x81U, 0x7fU, 0xffU, 0xffU, 0xffU, 0xffU,
+      0xffU, 0xffU, 0xffU, 0xffU};
+  DcAdapter *a = (DcAdapter *)calloc(1, sizeof(*a));
+  int rc = 0;
+
+  rc |= expect(a != NULL, "allocate Discord oversized-frame fixture");
+  if (!a) return 1;
+  rc |= test_reset_workspace();
+  a->enabled = 1;
+  a->gw_fd = -1;
+  a->rest_fd = -1;
+  snprintf(a->module_id_buf, sizeof(a->module_id_buf),
+           "discord-frame-test");
+  fc_reconnect_backoff_init(&a->reconnect_backoff, a->module_id_buf);
+  rc |= expect(dc_test_gateway_raw_frame(a, oversized, sizeof(oversized)) != 0 &&
+                   a->gw_state == DC_DISCONNECTED && a->gw_rx_len == 0,
+               "UINT64_MAX WebSocket payload length is rejected before arithmetic");
+  free(a);
+  return rc;
+}
+
+int discord_rest_429_then_200_preserves_delivery_order(void) {
+  static const char limited[] =
+      "HTTP/1.1 429 Too Many Requests\r\n"
+      "Retry-After: 2.5\r\nContent-Length: 17\r\n\r\n"
+      "{\"retry_after\":9}";
+  static const char ok[] =
+      "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}";
+  static const char server_error[] =
+      "HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\n\r\n";
+  static const char huge_retry_after[] =
+      "HTTP/1.1 429 Too Many Requests\r\n"
+      "Retry-After: 999999\r\nContent-Length: 0\r\n\r\n";
+  DcAdapter *a = (DcAdapter *)calloc(1, sizeof(*a));
+  int rc = 0;
+
+  rc |= expect(a != NULL, "allocate Discord REST fixture");
+  if (!a) return 1;
+  a->enabled = 1;
+  a->gw_fd = -1;
+  a->rest_fd = -1;
+  a->rest_state = DC_REST_IDLE;
+  rc |= expect(dc_queue_raw(a, "chan", "{\"content\":\"first\"}") == 0 &&
+                   dc_queue_raw(a, "chan", "{\"content\":\"second\"}") == 0,
+               "queue two ordered Discord deliveries");
+
+  rc |= expect(dc_test_rest_response(a, limited, 1000U) == 0 &&
+                   a->out_count == 2 && a->out_head == 0 &&
+                   a->rest_retry_after_ms == 3500U &&
+                   strstr(a->outq[a->out_head].payload, "first") != NULL,
+               "429 Retry-After keeps the first delivery at queue head");
+  rc |= expect(dc_test_rest_response(a, ok, 3500U) == 0 &&
+                   a->out_count == 1 &&
+                   strstr(a->outq[a->out_head].payload, "second") != NULL,
+               "successful retry commits exactly the first delivery");
+  rc |= expect(dc_test_rest_response(a, ok, 3501U) == 0 &&
+                   a->out_count == 0,
+               "the following delivery remains ordered and commits once");
+
+  rc |= expect(dc_queue_raw(a, "chan", "{\"content\":\"server\"}") == 0,
+               "queue server-error retry fixture");
+  rc |= expect(dc_test_rest_response(a, server_error, 4000U) == 0 &&
+                   a->out_count == 1 && a->rest_server_retries == 1U,
+               "first 5xx retains the delivery for one retry");
+  rc |= expect(dc_test_rest_response(a, server_error, 5500U) == 0 &&
+                   a->out_count == 0 && a->rest_server_retries == 0U,
+               "second 5xx drops after the designed single retry");
+
+  rc |= expect(dc_queue_raw(a, "chan", "{\"content\":\"clamped\"}") == 0,
+               "queue oversized Retry-After fixture");
+  rc |= expect(dc_test_rest_response(a, huge_retry_after, 6000U) == 0 &&
+                   a->out_count == 1 &&
+                   a->rest_retry_after_ms ==
+                       6000U + DC_REST_RETRY_AFTER_MAX_MS,
+               "oversized Retry-After clamps to the one-day maximum");
+  rc |= expect(dc_test_rest_response(a, ok, a->rest_retry_after_ms) == 0 &&
+                   a->out_count == 0,
+               "delivery succeeds after the clamped rate-limit delay");
+
+  free(a);
+  return rc;
+}
+
+/* A reply Discord will never accept -- a non-retryable 4xx, or a 5xx that
+ * failed its one retry -- is committed off the queue so the head cannot
+ * wedge. Until 2026-08-25 that drop went only to the debug-only diagnostic,
+ * so a revoked token or a lost channel permission silently ate every reply
+ * in production. It is a delivery the operator did not get: narrate it with
+ * the channel, the status, and Discord's own reason. */
+int discord_rest_permanent_failure_is_narrated_and_dropped(void) {
+  static const char forbidden_body[] =
+      "{\"message\":\"Missing Access\",\"code\":50001}";
+  static const char server_error[] =
+      "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n";
+  char forbidden[256];
+  DcAdapter *a = (DcAdapter *)calloc(1, sizeof(*a));
+  char *narration = NULL;
+  int rc = 0;
+
+  rc |= expect(a != NULL, "allocate Discord REST fixture");
+  if (!a) return 1;
+  rc |= test_reset_workspace();
+  a->enabled = 1;
+  a->gw_fd = -1;
+  a->rest_fd = -1;
+  a->rest_state = DC_REST_IDLE;
+  snprintf(forbidden, sizeof(forbidden),
+           "HTTP/1.1 403 Forbidden\r\nContent-Length: %zu\r\n\r\n%s",
+           strlen(forbidden_body), forbidden_body);
+
+  rc |= expect(dc_queue_raw(a, "1234567890", "{\"content\":\"hello\"}") == 0,
+               "queue one delivery to a channel the bot cannot post to");
+  rc |= expect(dc_test_rest_response(a, forbidden, 1000U) == 0 &&
+                   a->out_count == 0 && a->rest_retry_after_ms == 0,
+               "a non-retryable 4xx is dropped without a retry so the head cannot wedge");
+  rc |= test_read_file("workspace/logs/narration.jsonl", &narration);
+  rc |= expect_substr(narration,
+                      "discord: REST post to channel 1234567890 failed status=403"
+                      " code=50001 message=Missing Access; reply dropped",
+                      "the permanent drop is narrated with channel, status, and Discord's reason");
+  free(narration);
+  narration = NULL;
+
+  rc |= expect(dc_queue_raw(a, "1234567890", "{\"content\":\"again\"}") == 0,
+               "queue a delivery that will meet two server errors");
+  rc |= expect(dc_test_rest_response(a, server_error, 2000U) == 0 &&
+                   a->out_count == 1 && a->rest_server_retries == 1U,
+               "first 5xx retains the delivery for its one retry");
+  rc |= expect(dc_test_rest_response(a, server_error, 4000U) == 0 &&
+                   a->out_count == 0 && a->rest_server_retries == 0U,
+               "second 5xx drops the delivery");
+  rc |= test_read_file("workspace/logs/narration.jsonl", &narration);
+  rc |= expect_substr(narration,
+                      "failed status=502; reply dropped after one retry",
+                      "the post-retry drop is narrated as such");
+
+  free(narration);
+  free(a);
+  return rc;
+}
+
+int discord_rest_ambiguous_completion_is_bounded_and_narrated(void) {
+  static const char ok[] =
+      "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}";
+  DcAdapter *a = (DcAdapter *)calloc(1, sizeof(*a));
+  char *saved_home = discord_save_env("FCLAW_HOME");
+  char *narration = NULL;
+  int rc = 0;
+
+  rc |= expect(a != NULL, "allocate Discord ambiguous-completion fixture");
+  if (!a) {
+    discord_restore_env("FCLAW_HOME", saved_home);
+    return 1;
+  }
+  rc |= test_reset_workspace();
+  a->enabled = 1;
+  a->gw_fd = -1;
+  a->rest_fd = -1;
+  a->rest_state = DC_REST_IDLE;
+  rc |= expect(discord_install_test_token(a, "workspace/discord-rest-auth") ==
+                   0,
+               "install isolated Discord REST token");
+
+  rc |= expect(dc_queue_raw(a, "timeout-channel",
+                            "{\"content\":\"timeout\"}") == 0,
+               "queue response-timeout fixture");
+  a->rest_cur = a->outq[a->out_head];
+  a->rest_has_cur = 1;
+  a->rest_state = DC_REST_READING;
+  a->rest_read_started_ms = 1000U;
+  rc |= expect(dc_rest_progress_expired(a, 31000U) == 1 &&
+                   a->out_count == 1 && a->rest_state == DC_REST_IDLE &&
+                   a->rest_ambiguous_retries == 1U &&
+                   a->rest_retry_after_ms == 32500U,
+               "a no-response outcome retains the head for one bounded retry");
+  rc |= expect(dc_test_rest_response(a, "not an HTTP response", 32500U) == 0 &&
+                   a->out_count == 0 && a->rest_ambiguous_retries == 0U &&
+                   a->rest_retry_after_ms == 0,
+               "a second ambiguous outcome drops instead of retrying forever");
+
+  rc |= expect(dc_queue_raw(a, "tls-read-channel",
+                            "{\"content\":\"tls read\"}") == 0,
+               "queue TLS-read failure fixture");
+  a->rest_cur = a->outq[a->out_head];
+  a->rest_has_cur = 1;
+  a->rest_state = DC_REST_READING;
+  (void)setenv("FCLAW_FAKE_MONOTONIC_MS", "50000", 1);
+  dc_drive_rest(a, POLLIN);
+  rc |= expect(a->out_count == 1 && a->rest_state == DC_REST_IDLE &&
+                   a->rest_ambiguous_retries == 1U,
+               "TLS read failure takes the shared one-retry path");
+  a->rest_cur = a->outq[a->out_head];
+  a->rest_has_cur = 1;
+  a->rest_state = DC_REST_READING;
+  (void)setenv("FCLAW_FAKE_MONOTONIC_MS", "52000", 1);
+  dc_drive_rest(a, POLLIN);
+  rc |= expect(a->out_count == 0 && a->rest_state == DC_REST_IDLE &&
+                   a->rest_ambiguous_retries == 0U,
+               "repeated TLS read failure cannot duplicate without bound");
+  (void)unsetenv("FCLAW_FAKE_MONOTONIC_MS");
+
+  snprintf(a->token_key, sizeof(a->token_key), "missing_discord_fixture");
+  rc |= expect(dc_queue_raw(a, "build-channel",
+                            "{\"content\":\"build\"}") == 0 &&
+                   dc_rest_start(a, 53000U) != 0 && a->out_count == 0 &&
+                   a->rest_retry_after_ms == 0,
+               "an unbuildable request is dropped before opening a connection");
+
+  snprintf(a->token_key, sizeof(a->token_key), "discord_fixture_token");
+  rc |= expect(dc_queue_raw(a, "connect-channel",
+                            "{\"content\":\"connect\"}") == 0,
+               "queue pre-send connect failure fixture");
+  net_test_fail_next_dns();
+  rc |= expect(dc_rest_start(a, 54000U) != 0 && a->out_count == 1 &&
+                   a->rest_state == DC_REST_IDLE &&
+                   a->rest_ambiguous_retries == 0U &&
+                   a->rest_retry_after_ms == 55500U,
+               "pre-send connection failure retains the head without spending the ambiguous budget");
+  net_test_reset_dns();
+  rc |= expect(dc_test_rest_response(a, ok, 55500U) == 0 &&
+                   a->out_count == 0,
+               "delivery can commit after a safe pre-send retry");
+
+  rc |= test_read_file("workspace/logs/narration.jsonl", &narration);
+  rc |= expect_substr(narration, "response timeout after request write",
+                      "response timeout ambiguity is narrated");
+  rc |= expect_substr(narration, "unreadable HTTP response after request write",
+                      "malformed response ambiguity is narrated");
+  rc |= expect_substr(narration, "TLS read failed after request write",
+                      "TLS read ambiguity is narrated");
+  rc |= expect_substr(narration,
+                      "reply dropped after one retry to avoid duplicate delivery",
+                      "ambiguous retry cap explains its permanent drop");
+  rc |= expect_substr(narration,
+                      "REST request for channel build-channel could not be built; reply dropped",
+                      "permanent local request-build failure is narrated");
+
+  net_test_reset_dns();
+  (void)unsetenv("FCLAW_FAKE_MONOTONIC_MS");
+  free(narration);
+  free(a);
+  discord_restore_env("FCLAW_HOME", saved_home);
+  return rc;
+}
+
+int discord_outbox_backpressure_preserves_whole_deliveries(void) {
+  DcAdapter *a = (DcAdapter *)calloc(1, sizeof(*a));
+  char long_text[DC_CHUNK_MAX + 101U];
+  char delivery_log[DC_CHUNK_MAX + 1024U];
+  char *narration = NULL;
+  long log_size;
+  int n;
+  int rc = 0;
+
+  rc |= expect(a != NULL, "allocate Discord outbox backpressure fixture");
+  if (!a) return 1;
+  rc |= test_reset_workspace();
+  memset(long_text, 'x', sizeof(long_text) - 1U);
+  long_text[sizeof(long_text) - 1U] = '\0';
+  snprintf(a->module_id_buf, sizeof(a->module_id_buf), "discord-main");
+  a->delivery_cursor_init = 1;
+  a->delivery_cursor = 0;
+  for (int i = 0; i < DC_OUT_QUEUE_MAX - 1; ++i)
+    rc |= expect(dc_queue_raw(a, "blocked-head", "{\"content\":\"held\"}") ==
+                     0,
+                 "fill Discord queue to one free slot");
+  n = snprintf(
+      delivery_log, sizeof(delivery_log),
+      "{\"delivery\":{\"channel\":\"discord\","
+      "\"adapter_id\":\"discord-main\",\"text\":\"%s\","
+      "\"ref\":{\"channel_id\":\"first-channel\"}}}\n"
+      "{\"delivery\":{\"channel\":\"discord\","
+      "\"adapter_id\":\"discord-main\",\"text\":\"later\","
+      "\"ref\":{\"channel_id\":\"later-channel\"}}}\n",
+      long_text);
+  rc |= expect(n > 0 && (size_t)n < sizeof(delivery_log) &&
+                   test_write_file(DC_DELIVERIES_LOG, delivery_log) == 0,
+               "write a two-chunk delivery followed by another delivery");
+  log_size = test_file_size(DC_DELIVERIES_LOG);
+
+  dc_drain_deliveries(a);
+  dc_drain_deliveries(a);
+  rc |= expect(a->out_count == DC_OUT_QUEUE_MAX - 1 &&
+                   a->delivery_cursor == 0,
+               "insufficient ring space enqueues no partial chunks and advances no cursor");
+  rc |= test_read_file("workspace/logs/narration.jsonl", &narration);
+  rc |= expect(narration &&
+                   test_count_substr(
+                       narration,
+                       "delivery to channel first-channel deferred at log offset 0; outbound queue is full") ==
+                       1,
+               "one production narration identifies the deferred delivery");
+
+  a->out_head = 0;
+  a->out_count = 0;
+  dc_drain_deliveries(a);
+  rc |= expect(a->out_count == 3 && a->delivery_cursor == log_size,
+               "released ring capacity queues the whole blocked delivery and its successor");
+  rc |= expect(strstr(a->outq[0].payload, "xxxxxxxx") != NULL &&
+                   strstr(a->outq[1].payload, "xxxxxxxx") != NULL &&
+                   strstr(a->outq[2].payload, "later") != NULL,
+               "resumed drain preserves chunk and delivery order");
+
+  free(narration);
+  free(a);
   return rc;
 }
 

@@ -20,7 +20,7 @@ see [gateway-reactor.md](concepts/gateway-reactor.md).
 | bus | file-backed inbox → processed under `workspace/bus/` |
 | gateway | one long-lived, single-thread reactor process with pluggable modules and short-lived job children |
 | channels | reactor modules: IRC, WS, Discord, Telegram, chosen at build time with `FCLAW_ADAPTERS`; CLI publishes via bus events |
-| media | Discord attachments (10 × 25 MiB, 50 MiB per message) ride `user_message` behind a private content-addressed manifest; the bounded LLM child downloads from the channel's CDN only; Gemini receives images, PDF, audio, video, OpenAI-style profiles images; Telegram is text-only |
+| media | Discord attachments (10 × 25 MiB, 50 MiB per message) and Telegram photos/documents (20 MiB per Bot API file) ride `user_message` behind a private content-addressed manifest; the bounded LLM child downloads only from the authenticated channel file host; Gemini receives images, PDF, audio, video, and OpenAI-style profiles receive images |
 | affairs | durable concerns reduced from `affair_*` events; affair watcher module fires review envelopes |
 | tasks | durable task state reduced from task-specific events |
 | workers | common `manage_codex`, `manage_claude`, and `manage_hermes`, driven as managed operations |
@@ -79,12 +79,12 @@ same `main_claw` through a later `operation_result` run. The original input
 task and its `working_memory` remain the request context until Main Claw
 explicitly completes it. `main_claw` may choose another tool after each result
 and may send a progress message alongside one action; a final message is paired
-with the existing validated `task.update` call. Its configured output contract
-withholds a message-only promise before delivery and gives the same agent up to
-two artifact-backed repair calls with an exact correction. Its bootstrap
-catalog is the single `all_actions` entry, expanded in place to the complete
-loaded registry with every authoritative description and schema. The same
-main claw also owns affair-review choices.
+with the existing validated `task.update` call. The prompt owns that product
+behavior; the kernel normalizes individual calls without judging their overall
+combination. Structurally malformed output gets bounded, artifact-backed
+feedback. Its bootstrap catalog is the single `all_actions` entry, expanded in
+place to the complete loaded registry with every authoritative description and
+schema. The same main claw also owns affair-review choices.
 
 ## Agents
 
@@ -208,8 +208,9 @@ Current test surfaces and required gates:
 | layer | command | purpose |
 |---|---|---|
 | unit | `make unit` | 37 fast C boundary/budget checks |
-| integration | `make integration` | 177 in-process runtime checks |
+| integration | `make integration` | 184 in-process runtime checks across four isolated workers |
 | routine gate | `make test` | unit + integration + public-contract probes + hermetic smoke in isolated workspaces; offline |
+| release/build contracts | `make test-full` | routine gate plus mock-only, adapter-selection, and Android ARM64 rebuilds |
 | major/deep-engine gate | `make robustness` (currently macOS) | ASan, UBSan, small-stack, fuzz, chaos, disk-full, and thrash; about 20–23 minutes |
 | live provider | `FCLAW_LIVE_SMOKE=1 make live-smoke` | opt-in single real-provider path check |
 | IRC baseline | `scripts/irc_probe.py` per flow | end-to-end agent behavior on the shipped floops |

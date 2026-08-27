@@ -320,14 +320,8 @@ if [ "$gog_rc" -ne 0 ]; then
 fi
 [ "$sync_ok" = true ] || emit_failure GOG_PROTOCOL_ERROR "gog token writeback could not be persisted atomically." "$account"
 data="$(jq -c '.' "$GCAL_GOG_STDOUT" 2>/dev/null)" || emit_failure GOG_PROTOCOL_ERROR "gog returned invalid JSON." "$account"
-case "$kind" in
-  calendars) text="Listed calendars for $account." ;;
-  list) text="Listed calendar events for $account." ;;
-  get) text="Retrieved event $event_id for $account." ;;
-  search) text="Searched calendar events for $account." ;;
-  create) text="Created a calendar event for $account." ;;
-  update) text="Updated event $event_id for $account." ;;
-  delete) text="Deleted event $event_id for $account." ;;
-  freebusy) text="Retrieved free/busy information for $account." ;;
-esac
+# shellcheck source=/dev/null
+. "$(cd "$(dirname "$0")" && pwd -P)/render.sh"
+text="$(gcal_result_text "$kind" "$account" "$data" "${query:-}" "${time_min:-}" "${time_max:-}" "${event_id:-}")"
+[ -n "$text" ] || text="Completed $kind for $account."
 finish "$handle" "$kind" "$account" "$text" "$data"

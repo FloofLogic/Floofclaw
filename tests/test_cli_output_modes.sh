@@ -64,6 +64,13 @@ assert_rejected() {
 
 mkdir -p workspace
 
+seed_open_task() {
+  mkdir -p workspace/memory/state
+  printf '%s\n' \
+    '{"tasks":[{"task_id":"task_cli_mode_001","context_id":"chat:cli:mode","kind":"work","input":null,"created_event_id":"evt_cli_mode_001","created_ms":1,"state":{"status":"open","work":"verify task output","done_when":"the command is covered","work_rev":1,"working_memory":"","artifacts":[],"external":null,"updated_ms":1}}]}' \
+    > workspace/memory/state/tasks.json
+}
+
 assert_agent "actions default" ./bin/fclaw actions >/dev/null
 assert_agent "actions -a" ./bin/fclaw actions -a >/dev/null
 assert_agent "adapters default" ./bin/fclaw adapters >/dev/null
@@ -141,6 +148,26 @@ assert_agent "affair schedule default" ./bin/fclaw affair schedule \
   "$affair_id" --in 1m >/dev/null
 assert_agent "affair review default" ./bin/fclaw affair review "$affair_id" >/dev/null
 assert_agent "affair close default" ./bin/fclaw affair close "$affair_id" >/dev/null
+
+seed_open_task
+task_json="$(assert_agent "task cancel default" \
+  ./bin/fclaw task cancel task_cli_mode_001)"
+[[ "$task_json" == *'"command":"task.cancel"'* ]] ||
+  fail "task cancel omitted command"
+[[ "$task_json" == *'"status":"canceled"'* ]] ||
+  fail "task cancel omitted status"
+seed_open_task
+assert_agent "task cancel -a" \
+  ./bin/fclaw task cancel -a task_cli_mode_001 >/dev/null
+seed_open_task
+assert_human "task cancel -h" \
+  ./bin/fclaw task cancel -h task_cli_mode_001
+assert_agent_failure "task cancel terminal task" \
+  ./bin/fclaw task cancel task_cli_mode_001
+assert_agent_failure "task cancel missing task" \
+  ./bin/fclaw task cancel -a task_missing_mode
+assert_agent_failure "task cancel conflicting output modes" \
+  ./bin/fclaw task cancel -a -h task_cli_mode_001
 
 assert_agent "action auth default" ./bin/fclaw action auth \
   --name gcal -- client list >/dev/null

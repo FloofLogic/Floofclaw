@@ -149,7 +149,7 @@ int rt_write_state_snapshot(RtContext *ctx) {
            eu, es, er, em);
   {
     char path[PATH_MAX];
-    rt_state_path(ctx, path, sizeof(path));
+    if (rt_state_path(ctx, path, sizeof(path)) != 0) return -1;
     return fs_write_text_atomic(path, ctx->state_json);
   }
 }

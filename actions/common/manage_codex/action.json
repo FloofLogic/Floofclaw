@@ -44,7 +44,7 @@
           "safe",
           "dangerous"
         ],
-        "description": "Permission mode. Defaults to safe."
+        "description": "Permission mode for this start. Defaults to safe and cannot exceed the deployment's actions.manage_codex.max_permission_mode ceiling."
       }
     }
   },
@@ -63,6 +63,12 @@
       "name": "MODEL",
       "key": "model",
       "kind": "string",
+      "required": false
+    },
+    {
+      "name": "MAX_PERMISSION_MODE",
+      "key": "max_permission_mode",
+      "kind": "permission_mode_ceiling",
       "required": false
     }
   ],

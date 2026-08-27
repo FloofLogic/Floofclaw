@@ -1,10 +1,12 @@
 #include "provider_limit.h"
+#include "pricing.h"
 
 #include "../support/fsutil.h"
 #include "../support/json.h"
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,6 +21,7 @@ typedef struct {
   char provider_id[LLM_ID_MAX];
   char day_key[16];
   long long day_count;
+  long long day_usd_reserved_micros;
   long long minute_key;
   long long minute_count;
 } ProviderLimitState;
@@ -44,30 +47,6 @@ static int current_day_key(time_t now, char *out, size_t out_len) {
   return strftime(out, out_len, "%Y-%m-%d", &local_tm) > 0 ? 0 : -1;
 }
 
-static int read_fd_text(int fd, char **out_text) {
-  struct stat st;
-  char *buf = NULL;
-  ssize_t nread;
-  if (!out_text) return -1;
-  *out_text = NULL;
-  if (fstat(fd, &st) != 0) return -1;
-  if (st.st_size <= 0) {
-    buf = (char *)malloc(1);
-    if (!buf) return -1;
-    buf[0] = '\0';
-    *out_text = buf;
-    return 0;
-  }
-  buf = (char *)malloc((size_t)st.st_size + 1U);
-  if (!buf) return -1;
-  if (lseek(fd, 0, SEEK_SET) < 0) { free(buf); return -1; }
-  nread = read(fd, buf, (size_t)st.st_size);
-  if (nread < 0 || nread != st.st_size) { free(buf); return -1; }
-  buf[nread] = '\0';
-  *out_text = buf;
-  return 0;
-}
-
 static void state_init(ProviderLimitState *state, const LlmProvider *provider) {
   if (!state || !provider) return;
   memset(state, 0, sizeof(*state));
@@ -83,6 +62,7 @@ static void state_roll_windows(ProviderLimitState *state, time_t now) {
   if (day_key[0] == '\0' || strcmp(state->day_key, day_key) != 0) {
     snprintf(state->day_key, sizeof(state->day_key), "%s", day_key);
     state->day_count = 0;
+    state->day_usd_reserved_micros = 0;
   }
   if (state->minute_key != minute_key) {
     state->minute_key = minute_key;
@@ -98,33 +78,41 @@ static int parse_state_text(const char *text, ProviderLimitState *state) {
   (void)json_ref_object_get_string(&root, "provider_id", state->provider_id, sizeof(state->provider_id));
   (void)json_ref_object_get_string(&root, "day_key", state->day_key, sizeof(state->day_key));
   if (json_ref_object_get_long(&root, "day_count", &value) == 0) state->day_count = value;
+  if (json_ref_object_get_long(&root, "day_usd_reserved_micros", &value) == 0)
+    state->day_usd_reserved_micros = value;
   if (json_ref_object_get_long(&root, "minute_key", &value) == 0) state->minute_key = value;
   if (json_ref_object_get_long(&root, "minute_count", &value) == 0) state->minute_count = value;
   return 0;
 }
 
-static int write_state_fd(int fd, const ProviderLimitState *state) {
+/* The state file is replaced, never rewritten in place: a child killed
+ * between a truncate and its write used to leave an empty file (read back
+ * as a fresh day, so the whole day's reservation vanished) or a partial one
+ * (unparsable, so every later call failed preflight until an operator
+ * deleted it). fs_write_text_atomic writes a sibling temp file, fsyncs it,
+ * and renames it over the path, so the file is always the previous state
+ * or the new one. The lock lives in a separate file (see open_lock_file)
+ * because a lock held on the replaced inode would not exclude a waiter
+ * that opened the path before the rename. */
+static int write_state_atomic(const char *path, const ProviderLimitState *state) {
   char json[512];
-  size_t len;
-  if (!state) return -1;
+  if (!path || !state) return -1;
   if (snprintf(json, sizeof(json),
                "{"
                "\"provider_id\":\"%s\","
                "\"day_key\":\"%s\","
                "\"day_count\":%lld,"
+               "\"day_usd_reserved_micros\":%lld,"
                "\"minute_key\":%lld,"
                "\"minute_count\":%lld"
                "}\n",
                state->provider_id,
                state->day_key,
                state->day_count,
+               state->day_usd_reserved_micros,
                state->minute_key,
                state->minute_count) >= (int)sizeof(json)) return -1;
-  len = strlen(json);
-  if (ftruncate(fd, 0) != 0) return -1;
-  if (lseek(fd, 0, SEEK_SET) < 0) return -1;
-  if (write(fd, json, len) != (ssize_t)len) return -1;
-  return fsync(fd);
+  return fs_write_text_atomic(path, json);
 }
 
 static void set_block_reason(LlmUsage *usage_out, const char *reason) {
@@ -150,7 +138,35 @@ static void build_block_json(const LlmProvider *provider, const char *reason,
                  reason, provider_id, provider->rpm_limit, provider->daily_limit);
 }
 
-static int open_state_file(const char *path) {
+static void build_budget_block_json(const LlmProvider *provider,
+                                    const char *reason,
+                                    long long reserved_micros,
+                                    long long request_micros,
+                                    char *out, size_t out_len) {
+  char provider_id[(LLM_ID_MAX * 2)];
+  if (!out || out_len == 0) return;
+  out[0] = '\0';
+  if (!provider || !reason) return;
+  if (json_escape(provider->id, provider_id, sizeof(provider_id)) != 0)
+    provider_id[0] = '\0';
+  (void)snprintf(out, out_len,
+                 "{"
+                 "\"error\":\"provider_budget_exceeded\","
+                 "\"reason\":\"%s\","
+                 "\"provider\":\"%s\","
+                 "\"daily_usd_limit\":%.6f,"
+                 "\"reserved_usd\":%.6f,"
+                 "\"request_max_usd\":%.6f"
+                 "}",
+                 reason, provider_id, provider->daily_usd_limit,
+                 (double)reserved_micros / 1000000.0,
+                 (double)request_micros / 1000000.0);
+}
+
+/* Exclusive lock for one provider's reservation critical section. The
+ * lock file is never replaced, so every process that opens the path locks
+ * the same inode; the state file beside it is what gets renamed over. */
+static int open_lock_file(const char *path) {
   int fd = open(path, O_RDWR | O_CREAT, 0644);
   if (fd < 0) return -1;
   if (flock(fd, LOCK_EX) != 0) {
@@ -176,35 +192,65 @@ static int limit_disabled(const LlmProvider *provider, LlmUsage *usage_out,
   return LLM_PROVIDER_LIMIT_OK;
 }
 
-int llm_provider_limit_reserve_at(const LlmProvider *provider, const char *logs_root,
-                                  time_t now, LlmUsage *usage_out,
-                                  char *raw_response_out, size_t raw_response_out_len) {
+static long long daily_usd_limit_micros(const LlmProvider *provider) {
+  double micros;
+  if (!provider || provider->daily_usd_limit < 0.0) return -1;
+  micros = provider->daily_usd_limit * 1000000.0;
+  if (micros <= 0.0) return 0;
+  if (micros > (double)LLONG_MAX) return LLONG_MAX;
+  return (long long)micros;
+}
+
+static int reserve_at(const LlmProvider *provider, const char *logs_root,
+                      time_t now, int enforce_usd,
+                      long long request_usd_micros, LlmUsage *usage_out,
+                      char *raw_response_out,
+                      size_t raw_response_out_len) {
   ProviderLimitState state;
   char dir_path[LIMIT_PATH_MAX];
   char state_path[LIMIT_PATH_MAX];
+  char lock_path[LIMIT_PATH_MAX];
   char *text = NULL;
   int fd = -1;
   int rc = LLM_PROVIDER_LIMIT_OK;
+  long long usd_limit_micros = daily_usd_limit_micros(provider);
   const char *root = default_logs_root(logs_root);
 
   if (!provider || !provider->id[0]) return -1;
   if (usage_out) usage_out->local_limit_reason[0] = '\0';
   if (raw_response_out && raw_response_out_len > 0) raw_response_out[0] = '\0';
 
-  rc = limit_disabled(provider, usage_out, raw_response_out, raw_response_out_len);
+  rc = limit_disabled(provider, usage_out, raw_response_out,
+                      raw_response_out_len);
   if (rc != LLM_PROVIDER_LIMIT_OK) return rc;
-  if (provider->rpm_limit < 0 && provider->daily_limit < 0) return LLM_PROVIDER_LIMIT_OK;
+  if (enforce_usd && usd_limit_micros == 0) {
+    set_block_reason(usage_out, "daily_usd");
+    build_budget_block_json(provider, "daily_usd", 0,
+                            request_usd_micros, raw_response_out,
+                            raw_response_out_len);
+    return LLM_PROVIDER_LIMIT_BLOCKED_USD;
+  }
+  if (provider->rpm_limit < 0 && provider->daily_limit < 0 &&
+      (!enforce_usd || usd_limit_micros < 0))
+    return LLM_PROVIDER_LIMIT_OK;
 
   if (build_limit_paths(root, provider->id, dir_path, sizeof(dir_path),
                         state_path, sizeof(state_path)) != 0) return -1;
   if (fs_mkdir_p(dir_path) != 0) return -1;
+  if (snprintf(lock_path, sizeof(lock_path), "%s.lock", state_path) >=
+      (int)sizeof(lock_path)) return -1;
 
-  fd = open_state_file(state_path);
+  fd = open_lock_file(lock_path);
   if (fd < 0) return -1;
 
   state_init(&state, provider);
-  if (read_fd_text(fd, &text) != 0) goto fail;
+  /* A missing state file is a fresh provider; any other read failure is
+   * fail-closed, like an unparsable file. */
+  if (fs_read_text(state_path, &text, 0) != 0 && errno != ENOENT) goto fail;
   if (parse_state_text(text, &state) != 0) goto fail;
+  if (strcmp(state.provider_id, provider->id) != 0 || state.day_count < 0 ||
+      state.day_usd_reserved_micros < 0 || state.minute_count < 0)
+    goto fail;
   state_roll_windows(&state, now);
 
   if (provider->daily_limit >= 0 && state.day_count >= provider->daily_limit) {
@@ -219,10 +265,23 @@ int llm_provider_limit_reserve_at(const LlmProvider *provider, const char *logs_
     rc = LLM_PROVIDER_LIMIT_BLOCKED_RPM;
     goto done;
   }
+  if (enforce_usd && usd_limit_micros >= 0 &&
+      (request_usd_micros > usd_limit_micros ||
+       state.day_usd_reserved_micros >
+           usd_limit_micros - request_usd_micros)) {
+    set_block_reason(usage_out, "daily_usd");
+    build_budget_block_json(provider, "daily_usd",
+                            state.day_usd_reserved_micros,
+                            request_usd_micros, raw_response_out,
+                            raw_response_out_len);
+    rc = LLM_PROVIDER_LIMIT_BLOCKED_USD;
+    goto done;
+  }
 
   state.day_count++;
   state.minute_count++;
-  if (write_state_fd(fd, &state) != 0) goto fail;
+  if (enforce_usd) state.day_usd_reserved_micros += request_usd_micros;
+  if (write_state_atomic(state_path, &state) != 0) goto fail;
   rc = LLM_PROVIDER_LIMIT_OK;
   goto done;
 
@@ -236,9 +295,74 @@ done:
   return rc;
 }
 
+int llm_provider_limit_reserve_at(const LlmProvider *provider, const char *logs_root,
+                                  time_t now, LlmUsage *usage_out,
+                                  char *raw_response_out, size_t raw_response_out_len) {
+  return reserve_at(provider, logs_root, now, 0, 0, usage_out,
+                    raw_response_out, raw_response_out_len);
+}
+
 int llm_provider_limit_reserve(const LlmProvider *provider, const char *logs_root,
                                LlmUsage *usage_out,
                                char *raw_response_out, size_t raw_response_out_len) {
   return llm_provider_limit_reserve_at(provider, logs_root, time(NULL),
                                        usage_out, raw_response_out, raw_response_out_len);
+}
+
+int llm_provider_limit_reserve_request_at(
+    const LlmProvider *provider, const LlmProfile *profile,
+    const LlmRequest *request, const char *logs_root, time_t now,
+    LlmUsage *usage_out, char *raw_response_out,
+    size_t raw_response_out_len) {
+  LlmPricingCatalog catalog;
+  long long input_token_ceiling;
+  long long output_token_ceiling;
+  long long request_micros = 0;
+  size_t text_len;
+  int price_rc;
+  if (!provider || !profile || !request || !request->text) return -1;
+  if (provider->daily_usd_limit < 0.0)
+    return llm_provider_limit_reserve_at(provider, logs_root, now, usage_out,
+                                         raw_response_out,
+                                         raw_response_out_len);
+  if (provider->daily_usd_limit == 0.0)
+    return reserve_at(provider, logs_root, now, 1, 0, usage_out,
+                      raw_response_out, raw_response_out_len);
+  if (request->media_count > 0U) {
+    set_block_reason(usage_out, "daily_usd_unpriced_media");
+    build_budget_block_json(provider, "daily_usd_unpriced_media", 0, 0,
+                            raw_response_out, raw_response_out_len);
+    return LLM_PROVIDER_LIMIT_BLOCKED_USD;
+  }
+  text_len = strlen(request->text);
+  if (text_len > (size_t)(LLONG_MAX - 1024)) return -1;
+  /* One token per input byte plus a fixed serializer allowance deliberately
+   * over-reserves ordinary text. A hard local ceiling values safety over
+   * perfect utilization, and a crash leaves this reservation intact. */
+  input_token_ceiling = (long long)text_len + 1024;
+  output_token_ceiling = profile->max_output_tokens > 0
+                             ? profile->max_output_tokens
+                             : LLM_DEFAULT_MAX_OUTPUT_TOKENS;
+  if (llm_pricing_catalog_load(&catalog) != 0) price_rc = -1;
+  else
+    price_rc = llm_pricing_max_cost_micros(
+        &catalog, provider->id, profile->model, input_token_ceiling,
+        output_token_ceiling, &request_micros);
+  if (price_rc != 0) {
+    set_block_reason(usage_out, "daily_usd_unpriced");
+    build_budget_block_json(provider, "daily_usd_unpriced", 0, 0,
+                            raw_response_out, raw_response_out_len);
+    return LLM_PROVIDER_LIMIT_BLOCKED_USD;
+  }
+  return reserve_at(provider, logs_root, now, 1, request_micros, usage_out,
+                    raw_response_out, raw_response_out_len);
+}
+
+int llm_provider_limit_reserve_request(
+    const LlmProvider *provider, const LlmProfile *profile,
+    const LlmRequest *request, const char *logs_root, LlmUsage *usage_out,
+    char *raw_response_out, size_t raw_response_out_len) {
+  return llm_provider_limit_reserve_request_at(
+      provider, profile, request, logs_root, time(NULL), usage_out,
+      raw_response_out, raw_response_out_len);
 }

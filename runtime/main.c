@@ -103,7 +103,7 @@ static void usage(int human) {
           "\"commands\":[\"run\",\"replay\",\"view\",\"usage\","
           "\"cacheview\",\"auth\",\"bus\",\"affair\",\"gateway\","
           "\"channel\",\"clear\",\"actions\",\"adapters\",\"floops\","
-          "\"action\",\"operation\",\"mcp\",\"config\",\"setup\","
+          "\"action\",\"operation\",\"task\",\"mcp\",\"config\",\"setup\","
           "\"-i\",\"--version\"]}\n", stdout);
     return;
   }
@@ -128,6 +128,7 @@ static void usage(int human) {
           "  fclaw action auth [-a|-h] --name <action> -- <action-owned arguments>\n"
           "  fclaw operation complete [-a|-h] [--operation-id <id>] [--token <token>] "
           "(--result-file <json> | --status <s> [--text <t>])\n"
+          "  fclaw task cancel [-a|-h] <task_id>\n"
           "  fclaw mcp sync|secret [-a|-h] [...]\n"
           "  fclaw setup [-a|-h]\n"
           "  fclaw config get|set|enable|disable [-a|-h] <key> [<value>]\n"
@@ -260,6 +261,9 @@ int main(int argc, char **argv) {
   }
   if (strcmp(argv[1], "operation") == 0) {
     return rt_operation_cli_main(argc - 2, argv + 2);
+  }
+  if (strcmp(argv[1], "task") == 0) {
+    return rt_task_main(argc - 2, argv + 2);
   }
   if (strcmp(argv[1], "setup") == 0) {
     return rt_setup_main(argc - 2, argv + 2);

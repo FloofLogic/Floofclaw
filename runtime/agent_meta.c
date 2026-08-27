@@ -179,8 +179,6 @@ int rt_agent_read_listen_config(const char *floop_name, const char *agent_id, co
   meta->handler[0] = '\0';
   meta->recent = 10;
   meta->autocomplete_message_task_on_send = meta->conversational_payload_only = 0;
-  meta->output_contract[0] = '\0';
-  meta->output_repair_attempts = 0;
   meta->decision_repair_attempts = RT_AGENT_DECISION_REPAIR_DEFAULT;
   meta->affair_extraction_context_only = 0;
   meta->memory_compaction_context_only = 0;
@@ -213,73 +211,19 @@ int rt_agent_read_listen_config(const char *floop_name, const char *agent_id, co
   (void)json_ref_object_get_bool(&root, "affair_extraction_context_only", &meta->affair_extraction_context_only);
   (void)json_ref_object_get_bool(&root, "memory_compaction_context_only", &meta->memory_compaction_context_only);
   {
-    JsonRef contract;
-    if (json_ref_object_get(&root, "output_contract", &contract) == 0) {
-      JsonRef repair_value;
-      long long repair_attempts = 0;
-      if (contract.type != JSON_REF_OBJECT ||
-          json_ref_object_get_string(&contract, "kind", meta->output_contract,
-                                     sizeof(meta->output_contract)) != 0 ||
-          strcmp(meta->output_contract, "task_action_or_finalize") != 0) {
-        if (err) snprintf(
-            err, err_len,
-            "agent %s has invalid output_contract; fix: use kind "
-            "\"task_action_or_finalize\" or remove it from %s",
-            agent_id, path);
-        free(text);
-        return -1;
-      }
-      if (executor && strcmp(executor, "llm") != 0) {
-        if (err) snprintf(err, err_len,
-                          "agent %s declares output_contract but is not executor=llm; "
-                          "fix: remove output_contract from %s",
-                          agent_id, path);
-        free(text);
-        return -1;
-      }
-      if (json_ref_object_get(&contract, "repair_attempts",
-                              &repair_value) == 0) {
-        if (json_ref_get_long(&repair_value, &repair_attempts) != 0 ||
-            repair_attempts < 0 ||
-            repair_attempts > RT_AGENT_OUTPUT_REPAIR_LIMIT) {
-          if (err) snprintf(
-              err, err_len,
-              "agent %s has invalid output_contract.repair_attempts; fix: use "
-              "an integer from 0 through %d in %s",
-              agent_id, RT_AGENT_OUTPUT_REPAIR_LIMIT, path);
-          free(text);
-          return -1;
-        }
-      }
-      meta->output_repair_attempts = (int)repair_attempts;
-    }
-  }
-  {
-    /* Top-level repair_attempts is the budget for an agent that declares
-     * no output_contract. Under a contract the contract's own value wins
-     * and this key is meaningless, so say so rather than silently
-     * preferring one of two numbers the operator wrote down. */
+    /* Top-level repair_attempts bounds feedback passes after the ordinary
+     * output normalizer rejects an LLM decision. */
     JsonRef repair_value;
     long long repair_attempts = 0;
     if (json_ref_object_get(&root, "repair_attempts", &repair_value) == 0) {
       if (json_ref_get_long(&repair_value, &repair_attempts) != 0 ||
           repair_attempts < 0 ||
-          repair_attempts > RT_AGENT_OUTPUT_REPAIR_LIMIT) {
+          repair_attempts > RT_AGENT_DECISION_REPAIR_LIMIT) {
         if (err) snprintf(
             err, err_len,
             "agent %s has invalid repair_attempts; fix: use an integer "
             "from 0 through %d in %s",
-            agent_id, RT_AGENT_OUTPUT_REPAIR_LIMIT, path);
-        free(text);
-        return -1;
-      }
-      if (meta->output_contract[0]) {
-        if (err) snprintf(
-            err, err_len,
-            "agent %s declares both output_contract and a top-level "
-            "repair_attempts; fix: keep output_contract.repair_attempts "
-            "and remove the top-level key from %s",
-            agent_id, path);
+            agent_id, RT_AGENT_DECISION_REPAIR_LIMIT, path);
         free(text);
         return -1;
       }

@@ -22,7 +22,7 @@ int rt_narrate_flush_pending(void) {
 static int append_trace_line(RtContext *ctx, const char *line) {
   char path[PATH_MAX];
   if (!ctx || !line) return -1;
-  rt_trace_path(ctx, path, sizeof(path));
+  if (rt_trace_path(ctx, path, sizeof(path)) != 0) return -1;
   return fs_append_text(path, line);
 }
 

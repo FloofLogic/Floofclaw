@@ -35,7 +35,7 @@ make MOCK_ONLY=1
 
 `MOCK_ONLY=1` omits both libcurl and OpenSSL. Mock providers and local
 execution work; every network provider and TLS channel refuses to start.
-`make test` builds and runs that configuration as a contract, so it cannot
+`make test-full` builds and runs that configuration as a contract, so it cannot
 quietly stop compiling.
 
 ## Bundled actions
@@ -63,6 +63,10 @@ git submodule update --init actions/common/web_read/_pluck
 
 ## Build
 
+Tagged releases provide a ready-built macOS arm64 archive; Linux installs
+build from source. See [Prebuilt binaries](prebuilt-binaries.md).
+Source builds remain:
+
 ```bash
 make -j4
 ```
@@ -71,6 +75,18 @@ Produces the `bin/fclaw` runtime. Test and robustness targets may also place
 harness binaries under `bin/`. Passing `CFLAGS=` on the command line refines
 the base flags; it does not drop the feature defines and include paths the
 build detects.
+
+For the distributed shape, build the stripped all-adapter binary:
+
+```bash
+make release-small
+./scripts/metrics.sh
+```
+
+That profile uses `-Oz`, LTO, section garbage collection, and a 900 KiB hard
+ceiling. It includes Discord, IRC, Telegram, and WS; the ordinary `make` build
+defaults to WS only. The target fails rather than emitting an oversized
+artifact.
 
 ## Verify
 
@@ -81,7 +97,7 @@ build detects.
 Expected output (current branch):
 
 ```text
-fclaw 0.28.0
+fclaw 0.30.0
 ```
 
 Then run the routine suite:
@@ -97,7 +113,7 @@ enabling the bundled actions — run the guided wizard from the checkout root:
 ./scripts/onboard.sh
 ```
 
-It currently runs 37 unit cases, 177 integration cases, auxiliary contract
+It currently runs 41 unit cases, 192 integration cases, auxiliary contract
 probes, and the end-to-end smoke:
 
 - `tests/smoke_lookup_and_poem.sh` — runs a mock-backed lookup-and-poem prompt
@@ -115,6 +131,9 @@ Gemini. Store matching authentication, then run:
 ```bash
 FCLAW_LIVE_SMOKE=1 make live-smoke
 ```
+
+Release assembly and explicit build-selection work use `make test-full`,
+which adds mock-only, adapter-selection, and Android ARM64 rebuild contracts.
 
 To exercise another configured profile, select it explicitly:
 

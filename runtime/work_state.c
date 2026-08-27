@@ -1351,7 +1351,7 @@ int rt_work_state_rebuild_from_logs(void) {
   for (size_t i = 0; i < count; ++i) {
     char path[PATH_MAX], *text = NULL, *line;
     rebuild_context(runs[i].name, ctx);
-    rt_event_log_path(ctx, path, sizeof(path));
+    if (rt_event_log_path(ctx, path, sizeof(path)) != 0) continue;
     if (fs_read_text(path, &text, FS_READ_TEXT_DEFAULT_CAP) != 0 || !text)
       continue;
     line = text;

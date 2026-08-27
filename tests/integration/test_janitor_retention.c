@@ -284,10 +284,13 @@ int janitor_never_prunes_a_running_operations_store_entry(void) {
  * must re-apply it to whatever accumulated while it was down. */
 int janitor_restart_reapplies_worker_store_retention(void) {
   FcReactorModule *m = NULL;
+  char *saved_config = NULL;
+  char *restored_config = NULL;
   int rc = 0;
   int i;
 
   rc |= test_reset_workspace();
+  rc |= test_read_file("config/floofclaw_config.json", &saved_config);
   rc |= test_write_file("config/floofclaw_config.json",
                         "{\"appliance\":{"
                         "\"codex_ops\":{\"keep\":2,\"check_interval_ms\":1000},"
@@ -332,5 +335,14 @@ int janitor_restart_reapplies_worker_store_retention(void) {
   rc |= expect(worker_entry_exists("claude_ops",
                                    "op_actionreq_run_001_000009", 1),
                "the newest two survive the restart");
+  if (saved_config) {
+    rc |= test_write_file("config/floofclaw_config.json", saved_config);
+    rc |= test_read_file("config/floofclaw_config.json", &restored_config);
+    rc |= expect(restored_config != NULL &&
+                     strcmp(restored_config, saved_config) == 0,
+                 "the janitor fixture restores the deployment config exactly");
+    free(restored_config);
+    free(saved_config);
+  }
   return rc;
 }

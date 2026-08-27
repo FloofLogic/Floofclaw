@@ -31,7 +31,8 @@ void llm_extract_usage(const char *provider_kind, const char *response_json,
     return;
   }
   if (json_ref_object_get_object(&root, "usage", &usage) != 0) return;
-  if (strcmp(provider_kind, "openai_compat") == 0) {
+  if (strcmp(provider_kind, "openai_chat") == 0 ||
+      strcmp(provider_kind, "openai_compat") == 0) {
     (void)json_ref_object_get_long(&usage, "prompt_tokens", &prompt_tokens);
     (void)json_ref_object_get_long(&usage, "completion_tokens", &completion_tokens);
     (void)json_ref_object_get_long(&usage, "total_tokens", &total_tokens);

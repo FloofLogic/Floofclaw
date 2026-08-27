@@ -417,5 +417,5 @@ int rt_agent_write_llm_response_artifact(RtContext *ctx, const RtStep *step,
   if (rt_append_text(doc, sizeof(doc), &pos, ",\"model_text\":") != 0 ||
       append_json_value_or_string(doc, sizeof(doc), &pos, model_text) != 0 ||
       rt_append_text(doc, sizeof(doc), &pos, "}\n") != 0) return -1;
-  return fs_write_text(path, doc);
+  return fs_write_text_atomic(path, doc);
 }

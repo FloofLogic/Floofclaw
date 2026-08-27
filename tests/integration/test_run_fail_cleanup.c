@@ -6,6 +6,7 @@
 #include "../../runtime/bus/bus.h"
 #include "../../runtime/gateway/affair_watcher_module.h"
 #include "../../runtime/gateway/reactor.h"
+#include "../../runtime/support/json.h"
 #include "../../runtime/support/timing.h"
 
 #include <stdio.h>
@@ -32,6 +33,15 @@ static void restore_env_value(const char *name, char *value) {
   } else {
     (void)unsetenv(name);
   }
+}
+
+static int wait_for_file_bounded(const char *path, uint64_t timeout_ms) {
+  uint64_t deadline = timing_monotonic_ms() + timeout_ms;
+  do {
+    if (path && access(path, F_OK) == 0) return 0;
+    usleep(10000);
+  } while (timing_monotonic_ms() < deadline);
+  return -1;
 }
 
 /* Materialize the legacy fixed-worker FloofClaw composition as an in-workspace
@@ -2041,7 +2051,8 @@ int manage_codex_project_root_is_explicit_cached_and_contained(void) {
       "cat >/dev/null\n"
       "printf '%s' \"$selected\" > received_c.txt\n"
       "printf 'project marker\\n' > marker.txt\n"
-      "printf 'project complete\\n' > \"$out\"\n");
+      "printf 'project complete\\n' > \"$out\"\n"
+      "printf 'finished\\n' > \"$FCLAW_ACTION_ROOT/workspace/fixtures/project_codex_finished.txt\"\n");
   rc |= chmod("workspace/fixtures/project_fake_codex.sh", 0755) != 0;
   rc |= test_write_file(
       "workspace/fixtures/project_start.json",
@@ -2069,6 +2080,9 @@ int manage_codex_project_root_is_explicit_cached_and_contained(void) {
                            response, sizeof(response), run_id,
                            sizeof(run_id)) == 0,
                "project-root managed operation starts");
+  rc |= expect(wait_for_file_bounded(
+                   "workspace/fixtures/project_codex_finished.txt", 5000) == 0,
+               "project-root fake worker finishes within the bounded wait");
   rc |= expect_file_exists("project_area/project_123/marker.txt");
   rc |= expect_file_not_exists("workspace/project_123/marker.txt");
   rc |= test_read_file("project_area/project_123/received_c.txt", &received);
@@ -2183,6 +2197,8 @@ int manage_codex_project_root_is_explicit_cached_and_contained(void) {
       "\"discord\":{\"enabled\":false}}}\n");
   rc |= test_write_file(
       "workspace/fixtures/project_codex_argv.txt", "not launched\n");
+  rc |= test_remove_path(
+      "workspace/fixtures/project_codex_finished.txt");
   (void)setenv("LLM_MOCK_RESPONSE_PATHS",
                "workspace/fixtures/project_workspace_start.json:"
                "workspace/fixtures/project_rest.json", 1);
@@ -2190,6 +2206,9 @@ int manage_codex_project_root_is_explicit_cached_and_contained(void) {
                            response, sizeof(response), run_id,
                            sizeof(run_id)) == 0,
                "managed Codex starts when no model is configured");
+  rc |= expect(wait_for_file_bounded(
+                   "workspace/fixtures/project_codex_finished.txt", 5000) == 0,
+               "default-model fake worker finishes within the bounded wait");
   rc |= test_read_file(
       "workspace/fixtures/project_codex_argv.txt", &codex_argv);
   rc |= expect_no_substr(codex_argv, "--model",
@@ -2247,6 +2266,166 @@ int manage_codex_project_root_is_explicit_cached_and_contained(void) {
                       "invalid model names the exact deployment fix");
   free(cache_registry);
   cache_registry = NULL;
+
+  if (saved_config)
+    rc |= test_write_file("config/floofclaw_config.json", saved_config);
+  free(saved_config);
+  restore_env_value("FCLAW_CODEX_START_SYNC_MS", saved_sync);
+  restore_env_value("FCLAW_CODEX_BIN", saved_codex);
+  restore_env_value("LLM_MOCK_RESPONSE_PATHS", saved_paths);
+  restore_env_value("FCLAW_MODEL_PROFILES", saved_profiles);
+  return rc;
+}
+
+int managed_worker_permission_ceiling_is_durable_and_prelaunch(void) {
+  char *saved_profiles = capture_env_value("FCLAW_MODEL_PROFILES");
+  char *saved_paths = capture_env_value("LLM_MOCK_RESPONSE_PATHS");
+  char *saved_codex = capture_env_value("FCLAW_CODEX_BIN");
+  char *saved_sync = capture_env_value("FCLAW_CODEX_START_SYNC_MS");
+  char *saved_config = NULL;
+  char response[8192], run_id[RT_SMALL];
+  char *log = NULL, *argv_text = NULL;
+  RtActionRegistry *registry = NULL;
+  char registry_error[RT_LARGE] = "";
+  int rc = 0;
+
+  rc |= test_read_file("config/floofclaw_config.json", &saved_config);
+  rc |= test_reset_workspace();
+  rc |= setup_project_root_floop();
+  rc |= test_mkdir_p("workspace/fixtures");
+  rc |= test_write_file(
+      "workspace/fixtures/permission_fake_codex.sh",
+      "#!/usr/bin/env bash\n"
+      "set -euo pipefail\n"
+      "printf '%s\\n' \"$@\" > \"$FCLAW_ACTION_ROOT/workspace/fixtures/permission_codex_argv.txt\"\n"
+      "out=''\n"
+      "while [ \"$#\" -gt 0 ]; do\n"
+      "  case \"$1\" in -o) out=\"$2\"; shift 2 ;; *) shift ;; esac\n"
+      "done\n"
+      "cat >/dev/null\n"
+      "printf 'permission fixture complete\\n' > \"$out\"\n");
+  rc |= chmod("workspace/fixtures/permission_fake_codex.sh", 0755) != 0;
+  rc |= test_write_file(
+      "workspace/fixtures/permission_dangerous.json",
+      "{\"calls\":[{\"name\":\"manage_codex\",\"args\":{"
+      "\"op\":\"start\",\"task\":\"must not launch\","
+      "\"permission_mode\":\"dangerous\"}}]}\n");
+  rc |= test_write_file(
+      "workspace/fixtures/permission_safe.json",
+      "{\"calls\":[{\"name\":\"manage_codex\",\"args\":{"
+      "\"op\":\"start\",\"task\":\"launch safely\","
+      "\"permission_mode\":\"safe\"}}]}\n");
+  rc |= test_write_file("workspace/fixtures/permission_rest.json",
+                        "{\"calls\":[]}\n");
+  (void)setenv("FCLAW_MODEL_PROFILES",
+               "tests/fixtures/smoke/model_profiles_mock.json", 1);
+  (void)setenv("FCLAW_CODEX_BIN",
+               "workspace/fixtures/permission_fake_codex.sh", 1);
+  (void)setenv("FCLAW_CODEX_START_SYNC_MS", "500", 1);
+
+  rc |= test_write_file(
+      "config/floofclaw_config.json",
+      "{\"bot_name\":\"FloofClaw\",\"default_floop\":\"hello\","
+      "\"force_disable\":[],\"actions\":{\"manage_codex\":{"
+      "\"max_permission_mode\":\"safe\"}},\"channels\":{"
+      "\"ws\":{\"enabled\":false},\"irc\":{\"enabled\":false},"
+      "\"discord\":{\"enabled\":false}}}\n");
+  registry = (RtActionRegistry *)calloc(1, sizeof(*registry));
+  rc |= expect(registry &&
+               rt_action_registry_load(registry, registry_error,
+                                       sizeof(registry_error)) == 0,
+               "worker permission-ceiling manifests load");
+  if (registry) {
+    static const char *const protected_workers[] = {
+      "manage_codex", "manage_claude"
+    };
+    for (size_t w = 0;
+         w < sizeof(protected_workers) / sizeof(protected_workers[0]); ++w) {
+      const RtActionDef *worker =
+          rt_action_registry_find(registry, protected_workers[w]);
+      int has_ceiling = 0;
+      if (worker) {
+        for (int i = 0; i < worker->config_count; ++i) {
+          if ((RtActionConfigKind)worker->config_kinds[i] ==
+              RT_ACTION_CONFIG_PERMISSION_MODE_CEILING)
+            has_ceiling = 1;
+        }
+      }
+      rc |= expect(worker && has_ceiling,
+                   "each managed coding worker declares a permission ceiling");
+    }
+    rc |= expect(
+        rt_action_cached_config(registry, "manage_codex",
+                                "max_permission_mode") &&
+        strcmp(rt_action_cached_config(registry, "manage_codex",
+                                       "max_permission_mode"),
+               "safe") == 0,
+        "configured safe ceiling is cached in its action namespace");
+  }
+  free(registry);
+  registry = NULL;
+  (void)setenv("LLM_MOCK_RESPONSE_PATHS",
+               "workspace/fixtures/permission_dangerous.json:"
+               "workspace/fixtures/permission_rest.json", 1);
+  rc |= expect(harness_run("tests", "test_project_root", "unsafe request",
+                           response, sizeof(response), run_id,
+                           sizeof(run_id)) == 0,
+               "permission-ceiling rejection retires normally");
+  rc |= test_read_run_event_log("run_001", &log);
+  rc |= expect_substr(log, "\"type\":\"action_rejected\"",
+                      "permission-ceiling rejection is durable");
+  rc |= expect_substr(log, "\"reason\":\"permission_ceiling\"",
+                      "durable rejection names the permission ceiling");
+  rc |= expect_no_substr(log, "\"kind\":\"action_started\"",
+                         "rejected worker never reaches action_started");
+  rc |= expect_file_not_exists("workspace/logs/codex_ops");
+  rc |= expect_file_not_exists(
+      "workspace/fixtures/permission_codex_argv.txt");
+  free(log);
+  log = NULL;
+
+  rc |= test_write_file(
+      "config/floofclaw_config.json",
+      "{\"bot_name\":\"FloofClaw\",\"default_floop\":\"hello\","
+      "\"force_disable\":[],\"actions\":{\"manage_codex\":{"
+      "\"max_permission_mode\":\"dangerous\"}},\"channels\":{"
+      "\"ws\":{\"enabled\":false},\"irc\":{\"enabled\":false},"
+      "\"discord\":{\"enabled\":false}}}\n");
+  (void)setenv("LLM_MOCK_RESPONSE_PATHS",
+               "workspace/fixtures/permission_safe.json:"
+               "workspace/fixtures/permission_rest.json", 1);
+  rc |= expect(harness_run("tests", "test_project_root", "safe request",
+                           response, sizeof(response), run_id,
+                           sizeof(run_id)) == 0,
+               "safe request runs below a dangerous ceiling");
+  rc |= test_read_file(
+      "workspace/fixtures/permission_codex_argv.txt", &argv_text);
+  rc |= expect_substr(argv_text, "--sandbox\nworkspace-write\n",
+                      "safe request keeps Codex workspace sandboxing");
+  rc |= expect_no_substr(argv_text,
+                         "--dangerously-bypass-approvals-and-sandbox",
+                         "ceiling does not promote a safe request");
+  free(argv_text);
+  argv_text = NULL;
+
+  rc |= test_write_file(
+      "config/floofclaw_config.json",
+      "{\"bot_name\":\"FloofClaw\",\"default_floop\":\"hello\","
+      "\"force_disable\":[],\"actions\":{\"manage_codex\":{"
+      "\"max_permission_mode\":\"unbounded\"}},\"channels\":{"
+      "\"ws\":{\"enabled\":false},\"irc\":{\"enabled\":false},"
+      "\"discord\":{\"enabled\":false}}}\n");
+  registry = (RtActionRegistry *)calloc(1, sizeof(*registry));
+  registry_error[0] = '\0';
+  rc |= expect(registry &&
+               rt_action_registry_load(registry, registry_error,
+                                       sizeof(registry_error)) != 0,
+               "invalid permission ceiling fails registry initialization");
+  rc |= expect_substr(
+      registry_error,
+      "actions.manage_codex.max_permission_mode must be safe or dangerous",
+      "invalid ceiling names the exact deployment fix");
+  free(registry);
 
   if (saved_config)
     rc |= test_write_file("config/floofclaw_config.json", saved_config);
@@ -2651,7 +2830,7 @@ int memory_compaction_input_carries_the_request_when_the_prompt_omits_json(void)
   RtAgentMeta meta, compactor_meta;
   RtStep step;
   RtAgentInvocation inv;
-  RtActionRegistry empty_registry;
+  static RtActionRegistry empty_registry;
   char *written = NULL;
   int rc = 0;
   memset(&empty_registry, 0, sizeof(empty_registry));
@@ -2750,7 +2929,7 @@ int memory_compaction_with_an_empty_slot_fails_before_the_provider(void) {
   RtAgentMeta compactor_meta;
   RtStep step;
   RtAgentInvocation inv;
-  RtActionRegistry empty_registry;
+  static RtActionRegistry empty_registry;
   char *event_log = NULL;
   char *written = NULL;
   int rc = 0;
@@ -2914,6 +3093,107 @@ static int seed_open_input(const char *task_id, const char *context_id,
   return rt_task_apply_event("task_created", payload);
 }
 
+/* An operator must be able to retire the exact inert work record without a
+ * live run or an agent catalog entry. The public command still goes through
+ * the task reducer, accepts only the kernel's open-state boundary, and leaves
+ * one durable narration record for the control action. */
+int operator_task_cancel_is_reducer_guarded_and_narrated(void) {
+  char *out = NULL;
+  char *tasks = NULL;
+  char *narration = NULL;
+  char *cancel_argv[] = {"cancel", "task_run_947_000008"};
+  char *working_argv[] = {"cancel", "task_working_001"};
+  char *missing_argv[] = {"cancel", "task_missing_001"};
+  int exit_code = -1;
+  int rc = 0;
+
+  rc |= test_reset_workspace();
+  rc |= expect(
+      rt_task_apply_event(
+          "task_created",
+          "{\"task_id\":\"task_run_947_000008\","
+          "\"context_id\":\"chat:irc:dm:operator\",\"kind\":\"work\","
+          "\"input\":null,\"created_event_id\":\"evt_run_947_000008\","
+          "\"created_ms\":1,\"state\":{\"status\":\"open\","
+          "\"work\":\"finish the release\",\"done_when\":\"published\","
+          "\"artifacts\":[],\"updated_ms\":1}}") == 0,
+      "seed the inert open work task");
+
+  rc |= expect(harness_cli_task(2, cancel_argv, &out, &exit_code) == 0 &&
+                   exit_code == 0,
+               "task cancel succeeds through the public CLI");
+  rc |= expect_substr(out, "\"command\":\"task.cancel\"",
+                      "agent output names task.cancel");
+  rc |= expect_substr(out, "\"task_id\":\"task_run_947_000008\"",
+                      "agent output preserves the exact task id");
+  rc |= expect_substr(out, "\"status\":\"canceled\"",
+                      "agent output reports the terminal state");
+  free(out);
+  out = NULL;
+
+  rc |= test_read_file("workspace/memory/state/tasks.json", &tasks);
+  rc |= expect_substr(tasks, "\"status\":\"canceled\"",
+                      "the reducer persists task_canceled");
+  rc |= expect_substr(tasks, "\"work\":\"finish the release\"",
+                      "cancellation preserves the task contract");
+  free(tasks);
+  tasks = NULL;
+  rc |= test_read_file("workspace/logs/narration.jsonl", &narration);
+  rc |= expect_substr(narration,
+                      "task canceled by operator: task_run_947_000008",
+                      "operator cancellation is narrated");
+  rc |= expect(test_count_substr(narration, "task canceled by operator:") == 1,
+               "the successful transition narrates exactly once");
+  free(narration);
+  narration = NULL;
+
+  rc |= expect(harness_cli_task(2, cancel_argv, &out, &exit_code) == 0 &&
+                   exit_code == 1,
+               "a terminal task cannot be canceled again");
+  rc |= expect_substr(out, "\"code\":\"task_not_open\"",
+                      "the repeated transition fails structurally");
+  free(out);
+  out = NULL;
+
+  rc |= expect(
+      rt_task_apply_event(
+          "task_created",
+          "{\"task_id\":\"task_working_001\","
+          "\"context_id\":\"chat:tests\",\"kind\":\"work\","
+          "\"input\":null,\"created_event_id\":\"evt_working_001\","
+          "\"created_ms\":2,\"state\":{\"status\":\"working\","
+          "\"work\":\"live work\",\"done_when\":\"done\","
+          "\"artifacts\":[],\"updated_ms\":2}}") == 0,
+      "seed a non-open work task");
+  rc |= expect(
+      rt_task_apply_event(
+          "task_canceled",
+          "{\"task_id\":\"task_working_001\","
+          "\"state\":{\"status\":\"canceled\",\"updated_ms\":3}}") != 0,
+      "the reducer itself refuses cancellation outside the open state");
+  rc |= expect(harness_cli_task(2, working_argv, &out, &exit_code) == 0 &&
+                   exit_code == 1,
+               "task cancel refuses a working task");
+  rc |= expect_substr(out, "\"code\":\"task_not_open\"",
+                      "working refusal names the open-state guard");
+  free(out);
+  out = NULL;
+
+  rc |= expect(harness_cli_task(2, missing_argv, &out, &exit_code) == 0 &&
+                   exit_code == 1,
+               "task cancel refuses an unknown task");
+  rc |= expect_substr(out, "\"code\":\"task_not_found\"",
+                      "unknown task has a stable error code");
+  free(out);
+  out = NULL;
+
+  rc |= test_read_file("workspace/logs/narration.jsonl", &narration);
+  rc |= expect(test_count_substr(narration, "task canceled by operator:") == 1,
+               "refused transitions do not narrate cancellation");
+  free(narration);
+  return rc;
+}
+
 static int init_run_ctx(RtContext *ctx, const char *run_id,
                         const char *context_id, const char *event_kind,
                         const char *event_payload_json) {
@@ -3022,5 +3302,36 @@ int failed_continuation_run_fails_the_ask_it_was_handling(void) {
   rc |= expect(count_substr(tasks, "\"status\":\"open\"") == 1,
                "only the other room's ask remains open");
   free(tasks);
+  return rc;
+}
+
+/* Deployment branches deliberately ship different default floops. Keep this
+ * registry-level check about the shared contract: the configured name is
+ * present and resolves to a valid shipped profile. Config-mutating fixtures
+ * prove their own byte-for-byte restoration beside the mutation, because
+ * four-way sharding means an end-of-registry tail probe is another process. */
+int configured_default_floop_is_loadable(void) {
+  RtProfile profile;
+  JsonRef root;
+  char default_floop[RT_SMALL] = "";
+  char error[RT_LARGE] = "";
+  char *config = NULL;
+  int parsed = 0;
+  int rc = 0;
+
+  rc |= test_reset_workspace();
+  rc |= test_read_file("config/floofclaw_config.json", &config);
+  parsed = config && json_ref_first_object(config, &root) == 0 &&
+           json_ref_object_get_string(&root, "default_floop", default_floop,
+                                      sizeof(default_floop)) == 0 &&
+           default_floop[0] != '\0';
+  rc |= expect(parsed, "deployment config names its default floop");
+  if (parsed) {
+    rc |= expect(rt_profile_load(default_floop, &profile, error,
+                                 sizeof(error)) == 0,
+                 "the configured default floop is a valid shipped profile");
+  }
+
+  free(config);
   return rc;
 }

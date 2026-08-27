@@ -35,6 +35,22 @@ situation. Adding a new event kind requires an explicit floop gate and step;
 the floop may route it to a new specialist or an existing agent. The kernel
 does not decide that product policy.
 
+That split is a reliability feature, not just an organizational preference.
+An OpenClaw-shaped floop makes the opposite tradeoff: one general agent sees
+the complete action catalog and decides how to continue on every event turn.
+That is more flexible and conversational, but it depends more heavily on the
+model choosing the right call each time. A plausible-sounding promise can be a
+structurally valid turn without creating any durable work.
+
+The `floofclaw` floop reduces that exposure with narrower, role-specific
+capability surfaces; durable tasks after work admission; a bound controller
+that ends work explicitly as completed or blocked; and deterministic routing
+of results. It is not magically immune: `chat_manager` can still promise work
+without admitting it. The durable-work path begins when `work` is accepted;
+from there, progress and completion live in explicit workflow state instead of
+depending on one general agent to reconstruct and choose the whole workflow on
+every turn.
+
 ### Workers below, agents above
 
 Coding assistants (Codex and Claude Code) do the heavy lifting
@@ -106,8 +122,9 @@ managed-op, and configured result turns receive it through the existing path.
 
 ### One binary, one long-lived process, zero magic
 
-FloofClaw is one C binary (667,304 bytes stripped in the current macOS arm64
-source-release measurement; `make metrics` reproduces it) and one
+FloofClaw is one C binary (557,192 bytes for the stripped macOS arm64
+`release-small` build with Discord, IRC, Telegram, and WS; run
+`./scripts/metrics.sh` immediately after that target to reproduce it) and one
 long-lived, single-threaded gateway process with no pthreads on the hot
 path. LLM agents and subprocess actions appear as bounded, short-lived
 child jobs while work is active. Runtime state is under `workspace/`;

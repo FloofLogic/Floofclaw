@@ -1,6 +1,6 @@
 {
   "id": "work",
-  "description": "Create or revise the durable background work intent. Asynchronous: it queues or updates the work and returns immediately; it never waits for the work to run. Include task_id (from your task list) to revise existing work with the complete revised description; omit it to create new work.",
+  "description": "Create or revise durable background work. The worker does not receive this conversation, so work must be self-contained: include the subject, scope or location, absolute dates and range meaning, constraints, and corrections from memory. For a revision, restate the whole corrected task and include task_id; omit task_id to create. Asynchronous: queues and returns immediately.",
   "outside_world": false,
   "args_schema": {
     "type": "object",
@@ -9,11 +9,11 @@
     "properties": {
       "work": {
         "type": "string",
-        "description": "Complete description of the work to perform. For a revision, restate the entire revised work, not just the change."
+        "description": "Self-contained instructions for a worker that cannot see the conversation or chat memory. Include the exact subject, scope or location, absolute dates including year and range meaning (for example inclusive nights versus checkout date), constraints, prior corrections, and what evidence to return. Never use a fragment such as 'check availability on those dates.' For a revision, restate the entire corrected task, not just the change."
       },
       "done_when": {
         "type": "string",
-        "description": "Completion condition for the work."
+        "description": "Specific, evidence-based condition that proves the user's full request is satisfied. Preserve the scope, date-range meaning, and constraints from work; do not reduce it to a generic condition such as 'availability confirmed.'"
       },
       "task_id": {
         "type": "string",

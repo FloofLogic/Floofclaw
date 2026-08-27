@@ -21,8 +21,10 @@ cd app/tokenwatch && python3 -m http.server 8004
 Then open `http://127.0.0.1:8004/`. `scripts/up.sh` starts the server and
 refreshes the artifact automatically.
 
-Pricing lives in `pricing.json` and is an app-owned estimate in USD per one
-million tokens. `pricing.html` lists each provider/model pair as a separate
+Pricing lives authoritatively in `config/pricing.json`; this directory's
+`pricing.json` is an exact, test-enforced static mirror for the browser. Rates
+are estimates in USD per one million tokens. `pricing.html` lists each
+provider/model pair as a separate
 line with the exact input, cached-input, and output assumptions plus the date
 and outbound source for its last known pricing. The document-level
 `last_updated` date is shown in the page header; each row keeps its independent

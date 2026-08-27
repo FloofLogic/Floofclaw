@@ -3612,7 +3612,7 @@ int floofclaw_manager_retry_no_duplicate_effects(void) {
    * agent out of in-run decision repair. With the default budget the
    * malformed decision is repaired inside the run and the floop retry
    * never engages -- which is the point of that feature, and is proved
-   * by floofclaw_contract_less_agent_repairs_a_normalizer_rejection. */
+   * by floofclaw_agent_repairs_a_normalizer_rejection. */
   rc |= test_write_file("floops/fatest/agents/floofclaw_manager/agent.json",
       "{\"id\":\"floofclaw_manager\",\"executor\":\"llm\","
       "\"model\":{\"ref\":\"floofclaw_manager\"},"
@@ -4301,77 +4301,6 @@ done:
   return rc;
 }
 
-static int openclaw_decision_contract_exhaustion_proof(void) {
-  HarnessGateway *g = NULL;
-  char *runstate = NULL, *deliveries = NULL, *third_request = NULL;
-  char *rejection = NULL, *logs = NULL;
-  int rc = 0;
-
-  rc |= fx_reset();
-  rc |= test_write_file("workspace/fixtures/openclaw_profiles.json",
-      "{\"version\":1,\"profiles\":["
-      "{\"id\":\"default_gemini_flash\",\"provider\":\"mock\",\"model\":\"mock-1\"},"
-      "{\"id\":\"responses\",\"provider\":\"mock\",\"model\":\"mock-1\"}]}\n");
-  rc |= test_write_file("workspace/fixtures/openclaw_invalid_1.json",
-      "{\"calls\":[{\"name\":\"message\",\"args\":{\"message\":"
-      "\"INVALID_PROMISE_ONE\"}}]}\n");
-  rc |= test_write_file("workspace/fixtures/openclaw_invalid_2.json",
-      "{\"calls\":[{\"name\":\"message\",\"args\":{\"message\":"
-      "\"INVALID_PROMISE_TWO\"}}]}\n");
-  rc |= test_write_file("workspace/fixtures/openclaw_invalid_3.json",
-      "{\"calls\":[{\"name\":\"message\",\"args\":{\"message\":"
-      "\"INVALID_PROMISE_THREE\"}}]}\n");
-  (void)setenv("FCLAW_MODEL_PROFILES",
-               "workspace/fixtures/openclaw_profiles.json", 1);
-  (void)setenv("LLM_MOCK_RESPONSE_PATHS",
-               "workspace/fixtures/openclaw_invalid_1.json:"
-               "workspace/fixtures/openclaw_invalid_2.json:"
-               "workspace/fixtures/openclaw_invalid_3.json", 1);
-
-  g = harness_gateway_init("openclaw");
-  rc |= expect(g != NULL, "OpenClaw loads for decision-contract exhaustion proof");
-  if (!g) goto done;
-  rc |= expect(harness_gateway_publish(g, "tests", "do something real") == 0,
-               "publish decision-contract exhaustion request");
-  rc |= expect(drive_until_file_contains(
-                   g, "workspace/runs/run_001/event_log.jsonl",
-                   "\"type\":\"run_failed\"", 10000) == 0,
-               "three invalid decisions exhaust two configured repairs");
-done:
-  if (g) harness_gateway_close(g);
-  rc |= test_read_file("workspace/runs/run_001/runstate.json", &runstate);
-  (void)test_read_file("workspace/logs/deliveries.jsonl", &deliveries);
-  rc |= test_read_file(
-      "workspace/runs/run_001/provider_calls/003_request.json", &third_request);
-  rc |= test_read_file(
-      "workspace/runs/run_001/agent_outputs/003_main.json.rejected.json",
-      &rejection);
-  logs = read_all_run_logs();
-  rc |= expect_substr(runstate ? runstate : "",
-                      "agent_decision_contract_exhausted",
-                      "exhaustion has a specific terminal error code");
-  rc |= expect(count_provider_request_artifacts() == 3,
-               "initial decision plus exactly two repair calls are bounded");
-  rc |= expect_substr(third_request ? third_request : "",
-                      "repair attempt 2",
-                      "last provider call receives its exact repair number");
-  rc |= expect_substr(third_request ? third_request : "",
-                      "INVALID_PROMISE_TWO",
-                      "last repair receives the exact previous response");
-  rc |= expect_substr(rejection ? rejection : "", "\"executed\":false",
-                      "exhausted decision is preserved as unexecuted");
-  rc |= expect_no_substr(deliveries ? deliveries : "", "INVALID_PROMISE_",
-                         "no rejected promise is delivered");
-  rc |= expect_no_substr(logs ? logs : "", "\"action\":\"message\"",
-                         "no rejected promise becomes an action request");
-  free(logs);
-  free(rejection);
-  free(third_request);
-  free(deliveries);
-  free(runstate);
-  return rc;
-}
-
 /* Observed live (truly run_121, then run_130 three times in a row):
  * gemini-2.5-flash emits a perfect action call but places task_id beside
  * args instead of inside it. The binding is the same fact either way, so
@@ -4528,7 +4457,6 @@ int openclaw_same_main_claw_completes_multi_tool_chain(void) {
   char *saved_paths = fx_capture_env("LLM_MOCK_RESPONSE_PATHS");
   HarnessGateway *g = NULL;
   char *logs = NULL, *memory = NULL, *archive = NULL, *deliveries = NULL;
-  char *repair_request = NULL, *rejection = NULL;
   int rc = 0;
 
   rc |= fx_reset();
@@ -4537,9 +4465,6 @@ int openclaw_same_main_claw_completes_multi_tool_chain(void) {
       "{\"version\":1,\"profiles\":["
       "{\"id\":\"default_gemini_flash\",\"provider\":\"mock\",\"model\":\"mock-1\"},"
       "{\"id\":\"responses\",\"provider\":\"mock\",\"model\":\"mock-1\"}]}\n");
-  rc |= test_write_file("workspace/fixtures/openclaw_chain_invalid.json",
-      "{\"calls\":[{\"name\":\"message\",\"args\":{"
-      "\"message\":\"I will look into that; please give me a moment.\"}}]}\n");
   rc |= test_write_file("workspace/fixtures/openclaw_chain_1.json",
       "{\"calls\":["
       "{\"name\":\"working_memory_append\",\"args\":{"
@@ -4561,7 +4486,6 @@ int openclaw_same_main_claw_completes_multi_tool_chain(void) {
   (void)setenv("FCLAW_MODEL_PROFILES",
                "workspace/fixtures/openclaw_profiles.json", 1);
   (void)setenv("LLM_MOCK_RESPONSE_PATHS",
-               "workspace/fixtures/openclaw_chain_invalid.json:"
                "workspace/fixtures/openclaw_chain_1.json:"
                "workspace/fixtures/openclaw_chain_2.json:"
                "workspace/fixtures/openclaw_chain_3.json", 1);
@@ -4584,18 +4508,12 @@ done:
   rc |= test_read_file("workspace/memory/memory.jsonl", &memory);
   rc |= test_read_file("workspace/memory/state/tasks_archive.jsonl", &archive);
   rc |= test_read_file("workspace/logs/deliveries.jsonl", &deliveries);
-  rc |= test_read_file(
-      "workspace/runs/run_001/provider_calls/002_request.json",
-      &repair_request);
-  rc |= test_read_file(
-      "workspace/runs/run_001/agent_outputs/001_main.json.rejected.json",
-      &rejection);
   rc |= expect(logs && memory && archive && deliveries,
                "multi-tool OpenClaw proof artifacts exist");
   if (logs) {
     rc |= expect(count_substr(logs, "\"source\":\"main_claw\"") >= 3 &&
-                 count_provider_request_artifacts() == 4,
-                 "the same main_claw owns the repaired decision and tool chain");
+                 count_provider_request_artifacts() == 3,
+                 "the same main_claw owns all three provider decisions");
     rc |= expect_substr(logs, "\"action\":\"read_file\"",
                         "main_claw selects read_file");
     rc |= expect_substr(logs, "\"action\":\"read_dir\"",
@@ -4611,16 +4529,6 @@ done:
     rc |= expect_no_substr(logs, "\"type\":\"run_failed\"",
                            "multi-tool chain has no failed run");
   }
-  rc |= expect_substr(repair_request ? repair_request : "",
-                      "Nothing from it was executed or delivered",
-                      "repair call receives explicit non-execution feedback");
-  rc |= expect_substr(repair_request ? repair_request : "",
-                      "I will look into that; please give me a moment.",
-                      "repair call receives the exact rejected response");
-  rc |= expect_substr(rejection ? rejection : "", "\"executed\":false",
-                      "rejected response is preserved as unexecuted evidence");
-  rc |= expect_no_substr(deliveries ? deliveries : "", "please give me a moment",
-                         "message-only promise is never delivered");
   if (memory) {
     rc |= expect_substr(memory, "read the chain file",
                         "original request enters existing conversation memory");
@@ -4640,12 +4548,9 @@ done:
                         "second working-memory note stays on the same task");
   }
   free(deliveries);
-  free(rejection);
-  free(repair_request);
   free(archive);
   free(memory);
   free(logs);
-  rc |= openclaw_decision_contract_exhaustion_proof();
   rc |= openclaw_call_level_task_id_binds_without_repair();
   rc |= openclaw_stray_call_key_repair_names_the_key();
   fx_restore_env("LLM_MOCK_RESPONSE_PATHS", saved_paths);
@@ -4653,14 +4558,82 @@ done:
   return rc;
 }
 
-/* Until this landed, a contract-less agent failed terminally as
+/* Truly run_168 returned three individually valid calls: preserve working
+ * memory, send the answer, then complete the exact task. The removed semantic
+ * contract rejected that whole response solely because a final answer carried
+ * the memory sidecar. The kernel should normalize calls, not classify the
+ * model's overall decision as one of two product-shaped forms. */
+int openclaw_finalize_with_working_memory_is_not_semantically_rejected(void) {
+  char *saved_profiles = fx_capture_env("FCLAW_MODEL_PROFILES");
+  char *saved_paths = fx_capture_env("LLM_MOCK_RESPONSE_PATHS");
+  HarnessGateway *g = NULL;
+  char *logs = NULL, *deliveries = NULL, *archive = NULL;
+  int rc = 0;
+
+  rc |= fx_reset();
+  rc |= test_write_file("workspace/fixtures/openclaw_profiles.json",
+      "{\"version\":1,\"profiles\":["
+      "{\"id\":\"default_gemini_flash\",\"provider\":\"mock\",\"model\":\"mock-1\"},"
+      "{\"id\":\"responses\",\"provider\":\"mock\",\"model\":\"mock-1\"}]}\n");
+  rc |= test_write_file("workspace/fixtures/openclaw_final_with_memory.json",
+      "{\"calls\":["
+      "{\"name\":\"working_memory_append\",\"args\":{"
+      "\"task_id\":\"task_run_001_000002\","
+      "\"working_memory\":\"The requested dates were confirmed.\"}},"
+      "{\"name\":\"message\",\"args\":{"
+      "\"message\":\"FINAL_WITH_MEMORY_OK\"}},"
+      "{\"name\":\"task.update\",\"args\":{"
+      "\"task_id\":\"task_run_001_000002\","
+      "\"state\":\"completed\"}}]}\n");
+  (void)setenv("FCLAW_MODEL_PROFILES",
+               "workspace/fixtures/openclaw_profiles.json", 1);
+  (void)setenv("LLM_MOCK_RESPONSE_PATHS",
+               "workspace/fixtures/openclaw_final_with_memory.json", 1);
+
+  g = harness_gateway_init("openclaw");
+  rc |= expect(g != NULL, "OpenClaw loads without a semantic output contract");
+  if (!g) goto done;
+  rc |= expect(harness_gateway_publish(g, "tests", "answer and remember") == 0,
+               "publish a request finalized with a memory sidecar");
+  rc |= expect(drive_until_file_contains(
+                   g, "workspace/logs/deliveries.jsonl",
+                   "FINAL_WITH_MEMORY_OK", 10000) == 0,
+               "the valid final response reaches delivery");
+  drive_for_ms(g, 200);
+done:
+  if (g) harness_gateway_close(g);
+  logs = read_all_run_logs();
+  (void)test_read_file("workspace/logs/deliveries.jsonl", &deliveries);
+  (void)test_read_file("workspace/memory/state/tasks_archive.jsonl", &archive);
+  rc |= expect(access(
+                   "workspace/runs/run_001/agent_outputs/001_main.json.rejected.json",
+                   F_OK) != 0,
+               "the response is not semantically rejected");
+  rc |= expect(count_provider_request_artifacts() == 1,
+               "the valid response needs no repair call");
+  rc |= expect_substr(archive ? archive : "",
+                      "The requested dates were confirmed.",
+                      "working memory is committed before task completion");
+  rc |= expect(count_substr(deliveries ? deliveries : "",
+                            "FINAL_WITH_MEMORY_OK") == 1,
+               "the final message is delivered exactly once");
+  rc |= expect_no_substr(logs ? logs : "", "\"type\":\"run_failed\"",
+                         "the valid response completes without failure");
+  free(archive);
+  free(deliveries);
+  free(logs);
+  fx_restore_env("LLM_MOCK_RESPONSE_PATHS", saved_paths);
+  fx_restore_env("FCLAW_MODEL_PROFILES", saved_profiles);
+  return rc;
+}
+
+/* Until this landed, an LLM agent failed terminally as
  * agent_output_invalid on its first normalizer rejection, and floop
  * retry_attempts then re-ran the identical turn at full model price with
  * nothing said about what was wrong -- Scraps run_781 spent three clean
  * envelopes on three identical rejections and zero repair prompts. The
- * shipped floofclaw chat_manager declares no contract, so the default
- * floop could not repair a single slip. */
-int floofclaw_contract_less_agent_repairs_a_normalizer_rejection(void) {
+ * shipped floofclaw chat_manager could not repair a single slip. */
+int floofclaw_agent_repairs_a_normalizer_rejection(void) {
   char *saved_profiles = fx_capture_env("FCLAW_MODEL_PROFILES");
   char *saved_paths = fx_capture_env("LLM_MOCK_RESPONSE_PATHS");
   HarnessGateway *g = NULL;
@@ -4673,11 +4646,11 @@ int floofclaw_contract_less_agent_repairs_a_normalizer_rejection(void) {
    * exactly the shape gemini-2.5-flash produces intermittently. */
   rc |= test_write_file("workspace/fc_chat_stray.json",
       "{\"calls\":[{\"name\":\"message\",\"args\":{"
-      "\"message\":\"CONTRACTLESS_REPAIRED_REPLY\"},"
+      "\"message\":\"NORMALIZER_REPAIRED_REPLY\"},"
       "\"rationale\":\"the user said hello\"}]}\n");
   rc |= test_write_file("workspace/fc_chat_clean.json",
       "{\"calls\":[{\"name\":\"message\",\"args\":{"
-      "\"message\":\"CONTRACTLESS_REPAIRED_REPLY\"}}]}\n");
+      "\"message\":\"NORMALIZER_REPAIRED_REPLY\"}}]}\n");
   (void)setenv("FCLAW_MODEL_PROFILES",
                "tests/fixtures/smoke/model_profiles_mock.json", 1);
   (void)setenv("LLM_MOCK_RESPONSE_PATHS",
@@ -4691,8 +4664,8 @@ int floofclaw_contract_less_agent_repairs_a_normalizer_rejection(void) {
                "publish a message the agent answers with a stray key");
   rc |= expect(drive_until_file_contains(
                    g, "workspace/logs/deliveries.jsonl",
-                   "CONTRACTLESS_REPAIRED_REPLY", 12000) == 0,
-               "a contract-less agent repairs its slip and still replies");
+                   "NORMALIZER_REPAIRED_REPLY", 12000) == 0,
+               "an LLM agent repairs its slip and still replies");
   drive_for_ms(g, 200);
 done:
   if (g) harness_gateway_close(g);
@@ -4713,16 +4686,15 @@ done:
                       "the repair prompt says which attempt this is");
   rc |= expect_no_substr(repair_request ? repair_request : "",
                          "CONTINUE = one substantive action",
-                         "no contract shape is prescribed to an agent "
-                         "that declares none");
-  rc |= expect_substr(rejection ? rejection : "", "\"contract\":null",
-                      "the rejection artifact names no contract");
+                         "repair does not prescribe a semantic decision shape");
+  rc |= expect_no_substr(rejection ? rejection : "", "\"contract\":",
+                         "the rejection artifact has no dead contract field");
   rc |= expect_substr(rejection ? rejection : "", "\"executed\":false",
                       "the rejected decision is preserved unexecuted");
   rc |= expect(count_substr(logs ? logs : "", "\"type\":\"run_failed\"") == 0,
                "one slip does not fail the run");
   rc |= expect(count_substr(deliveries ? deliveries : "",
-                            "CONTRACTLESS_REPAIRED_REPLY") == 1,
+                            "NORMALIZER_REPAIRED_REPLY") == 1,
                "the repaired reply is delivered exactly once");
   free(rejection);
   free(repair_request);
@@ -4733,10 +4705,9 @@ done:
   return rc;
 }
 
-/* The budget is bounded, and exhausting it is still terminal. A
- * contract-less agent has no contract to exhaust, so it keeps the
- * agent_output_invalid code operators already read for that shape. */
-int floofclaw_contract_less_repair_budget_is_bounded(void) {
+/* The normalizer-repair budget is bounded, and exhausting it is terminal as
+ * agent_output_invalid. */
+int floofclaw_repair_budget_is_bounded(void) {
   char *saved_profiles = fx_capture_env("FCLAW_MODEL_PROFILES");
   char *saved_paths = fx_capture_env("LLM_MOCK_RESPONSE_PATHS");
   HarnessGateway *g = NULL;
@@ -4797,12 +4768,9 @@ done:
   rc |= expect(second_rejection != NULL,
                "the budget bought exactly one repair before terminal");
   rc |= expect_substr(runstate ? runstate : "", "\"code\":\"agent_output_invalid\"",
-                      "a contract-less agent exhausts as agent_output_invalid");
+                      "an LLM agent exhausts as agent_output_invalid");
   rc |= expect_substr(runstate ? runstate : "", "call has non-intent key",
                       "the terminal error still names the rejection");
-  rc |= expect_no_substr(runstate ? runstate : "",
-                         "agent_decision_contract_exhausted",
-                         "no contract is claimed to have been exhausted");
   rc |= expect_no_substr(logs ? logs : "", "NEVER_DELIVERED",
                          "nothing from a rejected decision is delivered");
   free(second_rejection);

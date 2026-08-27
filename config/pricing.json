@@ -1,0 +1,88 @@
+{
+  "schema_version": 2,
+  "currency": "USD",
+  "unit": "per_1m_tokens",
+  "last_updated": "2026-08-09",
+  "models": [
+    {
+      "provider": "gemini_key",
+      "model": "gemini-2.5-flash-lite",
+      "input": 0.10,
+      "cached_input": 0.01,
+      "output": 0.40,
+      "checked_at": "2026-08-07",
+      "source_label": "Google Gemini API pricing",
+      "source": "https://ai.google.dev/gemini-api/docs/pricing"
+    },
+    {
+      "provider": "gemini_key",
+      "model": "gemini-2.5-flash",
+      "input": 0.30,
+      "cached_input": 0.03,
+      "output": 2.50,
+      "checked_at": "2026-08-07",
+      "source_label": "Google Gemini API pricing",
+      "source": "https://ai.google.dev/gemini-api/docs/pricing"
+    },
+    {
+      "provider": "gemini_key",
+      "model": "gemini-3.6-flash",
+      "input": 1.50,
+      "cached_input": 0.15,
+      "output": 7.50,
+      "checked_at": "2026-08-07",
+      "source_label": "Google Gemini API pricing",
+      "source": "https://ai.google.dev/gemini-api/docs/pricing"
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-6",
+      "input": 3.00,
+      "cached_input": 0.30,
+      "output": 15.00,
+      "checked_at": "2026-08-07",
+      "source_label": "Anthropic API pricing",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing"
+    },
+    {
+      "provider": "anthropic_key",
+      "model": "claude-sonnet-4-6",
+      "input": 3.00,
+      "cached_input": 0.30,
+      "output": 15.00,
+      "checked_at": "2026-08-07",
+      "source_label": "Anthropic API pricing",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing"
+    },
+    {
+      "provider": "openai_key",
+      "model": "gpt-5.4",
+      "input": 2.50,
+      "cached_input": 0.25,
+      "output": 15.00,
+      "checked_at": "2026-08-07",
+      "source_label": "OpenAI model pricing",
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.4"
+    },
+    {
+      "provider": "openai_responses_key",
+      "model": "gpt-5.4",
+      "input": 2.50,
+      "cached_input": 0.25,
+      "output": 15.00,
+      "checked_at": "2026-08-07",
+      "source_label": "OpenAI model pricing",
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.4"
+    },
+    {
+      "provider": "mock",
+      "model": "mock",
+      "input": 0,
+      "cached_input": 0,
+      "output": 0,
+      "checked_at": "2026-08-07",
+      "source_label": "FloofClaw mock provider",
+      "source": "FloofClaw mock provider (no external billing)"
+    }
+  ]
+}

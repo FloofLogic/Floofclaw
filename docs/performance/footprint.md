@@ -8,14 +8,14 @@ The current reproducible source and binary measurements are emitted by
 tables below preserve the 2026-07-20 macOS/arm64 hardening snapshot and must
 not be read as current release values.
 
-The 2026-08-24 arm64 macOS 0.28.0 measurement (Apple clang 17, revision
-`41e8790d`) reports 42,596 runtime C/header lines, a 667,304-byte stripped
-executable, a 0.174-second isolated mock-backed `hello`, and 8,256 KiB RSS for
-an idle isolated gateway. `make metrics` includes the exact measured revision;
-compare it to this one before trusting these numbers. RSS and wall time are
-simple, naturally variable samples for a reproducible idle scenario, not the
-Mach `physical_footprint` stress metric described below — treat single-digit
-percentage movement between revisions as noise.
+The 2026-08-25 arm64 macOS measurement (Apple clang 17) reports 42,665 runtime
+C/header lines and a 557,192-byte stripped `release-small` executable carrying
+all four shipped adapters. Repeated isolated samples put the mock-backed
+`hello` around 0.2 seconds and idle gateway RSS around 8–10 MiB. The older 667,304-byte
+number was the default `-O2`, WS-only build and is not the distributed-binary
+claim. `./scripts/metrics.sh` includes the exact profile, adapters, and revision;
+RSS and wall time are naturally variable samples, not the Mach
+`physical_footprint` stress metric described below.
 
 Idle RSS fell from ~11,840 KiB when the scheduler stopped being memset at
 startup. The struct is ~4.8 MB, nearly all of it the fixed run pool; zeroing
@@ -50,7 +50,8 @@ Historical sizes on macOS arm64:
 | Build target          | `ls -la` size | Make target     |
 |-----------------------|---------------|-----------------|
 | Dev (unstripped)      | 460,104 bytes | `make`          |
-| Release (stripped)    | 432,160 bytes | `make release`  |
+| Historical release (stripped) | 432,160 bytes | `make release` |
+| Current all-adapter small release | 557,192 bytes | `make release-small` |
 
 The dev build keeps symbols so backtraces from crashes are readable.
 

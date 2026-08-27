@@ -88,11 +88,11 @@ before Main Claw can decide, the task it was bound to — the `task_id` the
 event carries — is stamped `task_failed`, exactly as the originating run's
 own task would be. See `task-feature.md`, "Who closes an input task".
 
-OpenClaw also configures a pre-commit output contract around that choice. A
-task-bearing Main Claw response must contain either the next substantive action
-or the final message/completed-task pair. A message-only promise is withheld,
-then repaired by the same agent with the exact rejected response and explicit
-feedback; no rejected call reaches the event log or delivery path.
+Main Claw's prompt owns that choice. The kernel validates each proposed call
+through the ordinary action and task boundaries, but does not classify the
+overall response as a continuation or final answer. A structurally rejected
+response may receive bounded normalizer feedback; no rejected call reaches the
+event log or delivery path.
 
 A bound work controller may take several such turns. The runtime binds it to
 the exact same-context task and `work_rev`, persists each semantic selection

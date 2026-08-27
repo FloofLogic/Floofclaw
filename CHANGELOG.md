@@ -3,6 +3,208 @@
 FloofClaw follows semantic versioning for public source releases. The public
 release tag and `runtime/version.h` carry the same plain `X.Y.Z` version.
 
+## 0.30.0 — 2026-08-27
+
+Everything since v0.29.0. The `0.29.1` version in `runtime/version.h` was
+never published; its changes are here.
+
+### Added
+
+- **Telegram photos and documents now reach the model.** The adapter selects
+  the largest photo rendition, preserves document filename and MIME metadata,
+  and uses the caption as the turn text. It resolves `getFile` before bus
+  publication, keeps token-bearing download URLs inside a private media
+  manifest, and lets the bounded LLM child fetch the bytes through the same
+  model-media path used by Discord. The Telegram transport gate proves the
+  complete path (`getUpdates` → `getFile` → private manifest → LLM-child
+  download → Gemini request → `sendMessage`) while asserting the bot token
+  never reaches bus, gateway, or run artifacts.
+- **A crash-safe daily cost ceiling per provider.** `limits.daily_usd` in
+  `config/llm_registry.json` caps a provider's estimated spend per local day,
+  priced from the dated USD-per-million-token table in `config/pricing.json`.
+  A conservative reservation is committed before dispatch and survives
+  crashes; its state file is replaced atomically under a `.lock` sibling.
+  Requests the table cannot price — an unlisted model, or any turn carrying
+  media — fail closed with `daily_usd_unpriced` / `daily_usd_unpriced_media`
+  while a cap is set. Every response's usage record now carries
+  `estimated_usd`.
+- **Explicit, portable output budgets.** Model profiles accept
+  `max_output_tokens` (default 4096, bounded 1–16384 against the fixed
+  response buffer); an out-of-range value is a named profile-load error.
+  Anthropic requests previously used a fixed 1024. Profile `effort` is sent
+  in each provider's own shape: Anthropic `output_config.effort`
+  (`low`/`medium`/`high`/`xhigh`, validated before dispatch), OpenAI chat
+  `reasoning_effort`, Gemini 2.5 numeric thinking budgets. A Gemini 2.5
+  Flash/Flash-Lite profile without `effort` still sends `thinkingBudget: 0`
+  — thinking off, as before — so turns stay fast and unbilled thinking is
+  not introduced by default.
+- **`openai_chat`, a transport for the official OpenAI chat-completions
+  route.** It sends `max_completion_tokens` and omits `temperature`, which
+  reasoning models reject; generic `openai_compat` servers keep `max_tokens`
+  and `temperature: 0`. The registry's official OpenAI row uses it. Exact
+  serializer bytes are pinned by tests for every HTTP provider kind.
+- **Discord reconnects narrate their cause** — the WebSocket close
+  code/reason, a server-requested RECONNECT, invalid-session resumability, a
+  missed heartbeat ACK, or a transport failure — and `session ready via
+  IDENTIFY` / `via RESUME` says which path recovered. Both resumable opcode 9
+  and a HELLO received after the initial session build RESUME, and oversized
+  64-bit WebSocket frame lengths are rejected before arithmetic.
+- **Discord deliveries survive rate limiting.** A REST 429 honors
+  `Retry-After` (clamped to 24 hours) and keeps the message at the head of the
+  queue; a 5xx is retried once. An ambiguous response after a completed POST
+  gets one narrated retry, then a narrated drop that bounds duplicate
+  delivery. Local request-build failures drop before connecting, chunked
+  replies enter the queue atomically, and a full queue leaves the delivery
+  cursor on the blocked record. Every permanent drop includes the channel,
+  HTTP status, and Discord's own `code`/`message`, so the queue cannot wedge.
+- **A deployment ceiling on managed-worker permissions.**
+  `actions.manage_codex.max_permission_mode` and
+  `actions.manage_claude.max_permission_mode` (`safe` by default,
+  `dangerous`) bound the `permission_mode` a model may request; a request
+  above the ceiling is a durable `action_rejected` with
+  `reason:"permission_ceiling"` before any process starts.
+- **`fclaw task cancel <task_id>` gives operators a narrow cleanup path for
+  inert open tasks.** It applies the canonical `task_canceled` transition
+  through the task reducer, refuses missing or non-open tasks, and narrates
+  every successful cancellation without creating a run or touching an
+  external worker.
+- **`make release-small`** — the stripped all-adapter (`discord irc
+  telegram ws`) `-Oz`/LTO build with a 900 KiB hard gate. It is the build
+  the README's size claim describes (~544 KiB).
+- **A prebuilt macOS arm64 archive.**
+  `scripts/build_binary_archive.sh dist` builds a relocatable `release-small`
+  binary — OpenSSL linked statically, Apple's system libcurl, no Homebrew
+  rpath — into `floofclaw-vX.Y.Z-darwin-arm64.tar.gz` with a `.sha256`
+  sibling. macOS arm64 is the only prebuilt target; Linux builds from source
+  in seconds. See
+  `docs/getting-started/prebuilt-binaries.md`.
+- **Sanitizer gates rebuilt as independent clean builds.** `make asan` and
+  `make ubsan` (non-recovering, so undefined behaviour fails immediately),
+  `make test-build-contracts` (the rebuild/feature-selection contracts), and
+  `make test-full` (`make test` plus those contracts). Instrumented runs
+  apply one `FCLAW_TEST_BUDGET_SCALE=4` timing scale instead of per-test
+  exceptions, and a failed sanitizer stage cleans its instrumented binaries.
+- **Crash chaos gains a third targeted kill**, `agent-output-write`, which
+  SIGKILLs the gateway mid-write of an agent output and checks every run
+  artifact still parses.
+
+### Changed
+
+- **The routine gate is sub-minute again.** Integration tests run in four
+  isolated shards (`FCLAW_INTEGRATION_SHARDS`) and the shell contracts in
+  parallel workers; 41 unit and 192 integration tests, about 40–80 s on the
+  reference machines.
+- **`make test` passes natively on Linux** (GCC 16, Fedora): portable
+  file-mode checks, a warning contract that cannot die of SIGPIPE, checked
+  path joins in place of truncation warnings, and linker inputs after the
+  sources in every link line.
+- **Pre-0.28.0 shared conversation contexts are inert history.** They stay
+  on disk and count toward `memory_bytes` but are never recalled or
+  compacted; see "Conversation memory and legacy contexts" in
+  `docs/concepts/floofclaw_floop.md`.
+- **Generated dashboard snapshots are no longer tracked.**
+  `app/pulse/pulse.json`, `app/runtime_flow/runtime_flow.json`, and
+  `app/tokenwatch/tokenwatch.json` are deployment-local; the generators still
+  write them.
+- **The v0.18 operator baseline left the public tree.**
+  `docs/testing/baseline_v0.18.0.md` is archived privately; the 0.29.0 notes
+  below still name that path.
+- **The README's numbers describe what a user downloads**: the archive
+  binary (4,545,944 bytes, static OpenSSL) beside the ~544 KiB source build,
+  and the size badge now says "source build".
+- **Test fixtures restore the deployment they borrow**, byte for byte, and the
+  registry's final probe loads the configured `default_floop` instead of
+  assuming `hello`, so deployment branches with their own default floop run
+  the shared suite unchanged.
+- **The shell harness has one authoritative contract registry.** Every
+  `tests/test_*.sh` belongs to either the routine or rebuild gate; an
+  unregistered script fails fixture isolation. Malformed shard selectors fail
+  instead of running the whole integration registry, and sanitizer diagnostics
+  emitted by a child make the shard fail.
+
+### Fixed
+
+- **A crash can no longer leave a torn run artifact.** Every kernel-written
+  `.json` under `workspace/runs` — agent input and output, the
+  normalized-events document, action input, and each LLM request, response,
+  and meta file — is replaced by rename, and a subprocess's drained stdout
+  lives in a `.partial` sibling until the job finalizes. The robustness
+  gauntlet found a SIGKILL mid-write leaving unparsable JSON.
+- **The `gcal` action's result now says what it found.** A search or list
+  returned only "Searched calendar events for <account>." whether it found
+  ten events or none, and a create said nothing about the event it made —
+  the model saw no titles, times, or ids, so Truly re-searched in a loop
+  until its rate limiter stopped it. Every kind now renders its `data`
+  into a bounded text: found/none-found with the query and range, event
+  titles with local times and ids, created/updated events with their id,
+  calendars, and busy intervals.
+- **A local provider limit names itself in the failure.** A run refused by
+  the `rpm`/`daily`/`daily_usd` guard reported a bare `llm_call failed`;
+  the failure now carries the block reason and limits.
+- **Anthropic `effort` was sent as a top-level request field**, which the
+  Messages API rejects with HTTP 400; it is now `output_config.effort`.
+- **Managed workers no longer mistake third-party availability for a Google
+  Calendar free/busy check.** The `gcal` action states that free/busy is
+  only for configured Google Calendar intervals and explicitly excludes
+  campsites, reservations, products, venues, appointments, and other
+  inventory. The `work` action requires a self-contained delegation for a
+  worker that cannot see chat history — subject, location or scope,
+  absolute dates and range meaning, constraints, corrections, and an
+  evidence-based completion condition — so a fragment such as "check
+  availability on those dates" cannot lose the thing being checked.
+
+### Removed
+
+- **The semantic `task_action_or_finalize` agent-output contract.** The kernel
+  no longer classifies an otherwise valid call set as a continuation or final
+  answer. Floops and prompts own that behavior; ordinary call/schema validation,
+  task transition validation, and bounded normalizer repair remain.
+- **The deprecated experimental iMessage/email delivery bridge.** The
+  outbound-only `channels/message_deliver.sh` depended on separately
+  installed, unshipped integrations and coupled core to their action
+  configuration. An external integration now owns its complete boundary —
+  ingress, matching deliveries, cursor/recovery, transport, and OS
+  supervision — or installs as a complete native adapter. No engine
+  behaviour changed.
+
+### Known limitations
+
+- **The optional daily USD ceiling is deliberately conservative and not a
+  billing authority.** Anthropic cache-creation tokens are not included in
+  the current estimate, so affected records can understate cost even while
+  reporting `pricing_complete:true`. Reservations use the request's maximum
+  output, are committed before dispatch, and are not released after a network
+  failure; a retry reserves again. A configured ceiling therefore may stop
+  ordinary work early, while an unpriced provider/model fails closed.
+- **A configured daily USD ceiling disables model turns carrying media.** The
+  runtime cannot conservatively price images, PDFs, audio, or video from token
+  counts alone, so those requests fail closed with
+  `daily_usd_unpriced_media`. Leave `limits.daily_usd` unset on a provider that
+  must accept media.
+- **Cost-ceiling accounting follows the local clock and the shipped pricing
+  table.** Moving the clock backward across midnight can reopen a previous
+  day's allowance. A missing pricing file and an unlisted model share the
+  `daily_usd_unpriced` refusal, and Gemini thought-token usage is not currently
+  included in the ledger's estimate.
+- **There is no semantic cap on repeating an identical action.** A model may
+  choose the same action with the same arguments on consecutive durable turns
+  without an engine-level loop breaker. A configured provider call limit can
+  eventually stop it. Action results now carry useful outcome text, but the
+  runtime does not judge whether repeating a valid call is sensible.
+
+### Upgrade notes
+
+- Remove `output_contract` blocks from custom agent packets; the runtime no
+  longer interprets that field. Top-level `repair_attempts` still bounds
+  feedback after an LLM response fails ordinary normalization.
+- No configuration is required. `limits.daily_usd` and `max_output_tokens`
+  are optional; without a cap, unpriced and media requests are unaffected.
+- Profiles on the registry's official OpenAI row now travel over
+  `openai_chat`; a custom registry that copied the old row keeps working as
+  `openai_compat`.
+- Anthropic replies may now run to 4096 output tokens by default; set
+  `max_output_tokens` per profile to keep the old 1024.
+
 ## 0.29.0 — 2026-08-24
 
 ### Added

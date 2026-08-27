@@ -32,7 +32,10 @@
 #define DC_CHUNK_MAX       2000
 #define DC_ALLOWED_MAX     16
 #define DC_OUT_QUEUE_MAX   32
+#define DC_QUEUE_FULL      (-2)
 #define DC_REST_RETRY_MS   1500
+#define DC_REST_AMBIGUOUS_RETRY_MAX 1U
+#define DC_REST_RETRY_AFTER_MAX_MS 86400000ULL
 #define DC_PARSE_PROGRESS_TIMEOUT_MS 30000ULL
 #define DC_DELIVERIES_LOG  "workspace/logs/deliveries.jsonl"
 
@@ -109,13 +112,15 @@ typedef struct {
   long long sequence;
   long long heartbeat_interval_ms;
   uint64_t next_heartbeat_ms;
+  int heartbeat_ack_pending;
   int resume_eligible;
-  int invalid_session;
   char session_id[256];
   char bot_user_id[64];
 
   long long delivery_cursor;
   int delivery_cursor_init;
+  long long delivery_backpressure_cursor;
+  int delivery_backpressure_narrated;
   DcOutbound outq[DC_OUT_QUEUE_MAX];
   int out_head;
   int out_count;
@@ -125,6 +130,8 @@ typedef struct {
   FcTls *rest_tls;
   short rest_want;
   uint64_t rest_retry_after_ms;
+  unsigned int rest_server_retries;
+  unsigned int rest_ambiguous_retries;
   DcOutbound rest_cur;
   int rest_has_cur;
   char rest_rx[DC_RX_MAX];
@@ -156,6 +163,7 @@ int dc_queue_message_chunks(DcAdapter *a, const char *channel_id,
 
 /* ===== gateway (defined in discord_gateway.c) ==================== */
 void dc_close_gateway(DcAdapter *a);
+void dc_close_gateway_with_cause(DcAdapter *a, const char *cause);
 int  dc_gateway_start_connect(DcAdapter *a, uint64_t now_ms);
 int  dc_gw_flush(DcAdapter *a);
 int  dc_queue_ws_frame(DcAdapter *a, unsigned char opcode,
@@ -166,6 +174,12 @@ int  dc_parse_message_create(const char *json, DcInboundMessage *out);
 void dc_inbound_message_dispose(DcInboundMessage *msg);
 int  dc_source_url_is_trusted(const char *url);
 int  dc_publish_message(DcAdapter *a, const DcInboundMessage *msg);
+int  dc_test_gateway_json(DcAdapter *a, const char *json);
+int  dc_test_gateway_close_frame(DcAdapter *a, unsigned int code,
+                                 const char *reason);
+int  dc_test_gateway_raw_frame(DcAdapter *a, const unsigned char *frame,
+                               size_t frame_len);
+int  dc_test_heartbeat_due(DcAdapter *a, uint64_t now_ms);
 /* Conversation key for one inbound message: the channel id for a guild
  * channel or thread, "dm:<user_id>" for a direct message. */
 void dc_context_id(const DcInboundMessage *msg, char *out, size_t out_len);
@@ -175,6 +189,8 @@ void dc_close_rest(DcAdapter *a);
 int  dc_rest_start(DcAdapter *a, uint64_t now_ms);
 void dc_drive_rest(DcAdapter *a, int revents);
 int  dc_rest_progress_expired(DcAdapter *a, uint64_t now_ms);
+int  dc_test_rest_response(DcAdapter *a, const char *response,
+                           uint64_t now_ms);
 
 /* ===== outbox (defined in discord_outbox.c) ====================== */
 void dc_drain_deliveries(DcAdapter *a);

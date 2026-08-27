@@ -251,11 +251,11 @@ run_targeted() {
   local marker bus_id atomic_match="" append_match=""
   new_scratch "$mode"
   marker="$CURRENT_SCRATCH/.chaos_pause"
-  if [[ "$mode" == "state-write" ]]; then
-    atomic_match="/state.json"
-  else
-    append_match="/event_log.jsonl"
-  fi
+  case "$mode" in
+    state-write)        atomic_match="/state.json" ;;
+    agent-output-write) atomic_match="_noop.json" ;;
+    *)                  append_match="/event_log.jsonl" ;;
+  esac
   start_gateway "$marker" "$atomic_match" "$append_match"
   bus_id="$(publish_chaos_text "chaos seed=$CHAOS_SEED targeted=$mode")" ||
     die "targeted publish failed mode=$mode scratch=$CURRENT_SCRATCH"
@@ -409,7 +409,8 @@ case "$CHAOS_MODE" in
     run_random_campaign
     run_targeted state-write
     run_targeted event-append
-    printf 'chaos: PASS seed=%s random=%s targeted=2\n' \
+    run_targeted agent-output-write
+    printf 'chaos: PASS seed=%s random=%s targeted=3\n' \
       "$CHAOS_SEED" "$CHAOS_ITERATIONS"
     ;;
   filesystem)

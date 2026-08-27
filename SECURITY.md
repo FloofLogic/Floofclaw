@@ -44,6 +44,21 @@ per-user Darwin temp directory, which is denied. Permitting that directory
 would void the confinement for any deployment installed under it, so the
 denial stands and commands use `"$TMPDIR"` instead.
 
+## Managed coding-worker permissions
+
+`manage_codex` and `manage_claude` expose `permission_mode` because some
+delegated work genuinely needs more authority than their safe modes provide.
+That model-selected argument is bounded by deployment-owned
+`actions.<id>.max_permission_mode`, which defaults to `safe`. A request above
+the ceiling is durably rejected before the worker launches. A deployment must
+explicitly set the corresponding ceiling to `dangerous` before Codex may
+bypass approvals and sandboxing or Claude may skip permission checks.
+
+This ceiling is a guardrail against accidental or injected escalation by the
+calling model; it is not an operating-system privilege boundary. A worker
+permitted to run in dangerous mode has the authority of the gateway user, so
+grant that mode only to a worker and deployment where that is intentional.
+
 Please don't test against someone else's running bot. You get a whole
 engine; kill -9 your own copy as hard as you like — it's rehearsed.
 

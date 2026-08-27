@@ -47,9 +47,12 @@ grep -q '"description":"Read UTF-8 text content' workspace/action-catalog.json |
   fail 'shared catalog omitted manifest description'
 grep -q '"args":{"type":"object"' workspace/action-catalog.json ||
   fail 'shared catalog omitted manifest schema'
-grep -q 'Call this to create, list, search, inspect, update, and delete Google Calendar events' \
+grep -q 'Use only for Google Calendar itself: create, list, search, inspect, update, or delete its events' \
   workspace/action-catalog.json ||
   fail 'gcal catalog omitted its capability summary'
+grep -q 'Never use freebusy to check availability of campsites' \
+  workspace/action-catalog.json ||
+  fail 'gcal catalog omitted its third-party inventory boundary'
 
 export FCLAW_CODEX_BIN=tests/fixtures/smoke/fake_codex.sh
 export FCLAW_CODEX_START_SYNC_MS=500

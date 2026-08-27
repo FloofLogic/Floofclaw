@@ -82,6 +82,10 @@ app/*
 !app/pulse/**
 !app/tokenwatch/
 !app/tokenwatch/**
+# Runtime-generated dashboard snapshots are deployment evidence, not source.
+app/pulse/pulse.json
+app/runtime_flow/runtime_flow.json
+app/tokenwatch/tokenwatch.json
 app/tokenwatch/__pycache__/
 !app/floofchatv1/
 !app/floofchatv1/sample_web_chat.html

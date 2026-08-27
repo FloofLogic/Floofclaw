@@ -29,7 +29,7 @@ static int next_provider_seq(const char *dir) {
   return seq;
 }
 
-static int write_artifact_bytes(const char *path, const char *data, size_t len) {
+static int write_artifact_bytes_to(const char *path, const char *data, size_t len) {
   int flags = O_WRONLY | O_CREAT | O_TRUNC;
   int fd;
   size_t off = 0U;
@@ -66,6 +66,23 @@ static int write_artifact_bytes(const char *path, const char *data, size_t len) 
   if (close(fd) != 0) {
     int saved_errno = errno;
     (void)unlink(path);
+    errno = saved_errno;
+    return -1;
+  }
+  return 0;
+}
+
+/* Same 0600/O_NOFOLLOW writer, but through a sibling temp file and a rename
+ * so a crash mid-write never leaves a torn .json under workspace/runs. */
+static int write_artifact_bytes(const char *path, const char *data, size_t len) {
+  char tmp[PATH_MAX];
+  if (!path) return -1;
+  if (snprintf(tmp, sizeof(tmp), "%s.tmp.%ld", path, (long)getpid()) >= (int)sizeof(tmp))
+    return -1;
+  if (write_artifact_bytes_to(tmp, data, len) != 0) return -1;
+  if (rename(tmp, path) != 0) {
+    int saved_errno = errno;
+    (void)unlink(tmp);
     errno = saved_errno;
     return -1;
   }
@@ -239,7 +256,7 @@ static void write_provider_meta(const char *path, const char *floop,
            usage->local_limit_reason[0] ? "true" : "false",
            local_limit_reason_json,
            repair_meta);
-  (void)fs_write_text(path, out);
+  (void)fs_write_text_atomic(path, out);
 }
 
 int llm_call_request(const char *run_dir, const char *floop,
@@ -293,7 +310,7 @@ int llm_call_request(const char *run_dir, const char *floop,
   /* Save raw outbound prompt. Secrets are never embedded in `prompt` itself —
    * the provider's auth header is built at send time elsewhere and never
    * written into this artifact. */
-  (void)fs_write_text(req_path, request->text);
+  (void)fs_write_text_atomic(req_path, request->text);
 
   t0 = timing_monotonic_ms();
   if (strcmp(provider.kind, "mock") == 0) {
@@ -309,6 +326,7 @@ int llm_call_request(const char *run_dir, const char *floop,
       snprintf(raw_response, sizeof(raw_response), "%s", response_out);
     }
   } else if (strcmp(provider.kind, "http") == 0 ||
+             strcmp(provider.kind, "openai_chat") == 0 ||
              strcmp(provider.kind, "openai_compat") == 0 ||
              strcmp(provider.kind, "openai_responses") == 0 ||
              strcmp(provider.kind, "gemini_key") == 0) {
@@ -321,8 +339,9 @@ int llm_call_request(const char *run_dir, const char *floop,
       fprintf(stderr, "llm: %s\n",
               request_err[0] ? request_err : "invalid media request");
     } else {
-      limit_rc = llm_provider_limit_reserve(&provider, "workspace/logs", &usage,
-                                            raw_response, sizeof(raw_response));
+      limit_rc = llm_provider_limit_reserve_request(
+          &provider, profile, request, "workspace/logs", &usage,
+          raw_response, sizeof(raw_response));
       if (limit_rc == LLM_PROVIDER_LIMIT_OK) {
         if (llm_request_body_build(profile, provider.kind, request,
                                    text_request_body, sizeof(text_request_body),
@@ -352,7 +371,13 @@ int llm_call_request(const char *run_dir, const char *floop,
           }
         }
       } else if (limit_rc == LLM_PROVIDER_LIMIT_BLOCKED_RPM ||
-                 limit_rc == LLM_PROVIDER_LIMIT_BLOCKED_DAILY) {
+                 limit_rc == LLM_PROVIDER_LIMIT_BLOCKED_DAILY ||
+                 limit_rc == LLM_PROVIDER_LIMIT_BLOCKED_USD) {
+        /* The block JSON is the response: the agent child prints it, so
+         * the run's failure names the reason instead of a bare llm_call
+         * failed (a 15/min local limit read as an outage to the operator). */
+        if (response_out && response_out_len > 0U)
+          snprintf(response_out, response_out_len, "%s", raw_response);
         rc = -1;
       } else {
         rc = -1;
@@ -381,10 +406,10 @@ int llm_call_request(const char *run_dir, const char *floop,
   }
   usage.output_chars = (long long)strlen(response_out);
 
-  if (rc == 0) (void)fs_write_text(resp_path, response_out);
+  if (rc == 0) (void)fs_write_text_atomic(resp_path, response_out);
   if (!raw_request_saved && raw_request && raw_request_len > 0U)
     (void)write_artifact_bytes(raw_req_path, raw_request, raw_request_len);
-  if (raw_response[0]) (void)fs_write_text(raw_resp_path, raw_response);
+  if (raw_response[0]) (void)fs_write_text_atomic(raw_resp_path, raw_response);
   if (rc != 0 && usage.json_repair_checked)
     fprintf(stderr, "llm: json rejected by output contract\n");
   write_provider_meta(meta_path, floop, agent_id, profile, &provider, &usage,

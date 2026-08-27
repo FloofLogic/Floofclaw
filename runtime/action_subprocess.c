@@ -98,7 +98,7 @@ int rt_action_subprocess_launch(RtRun *r, const char *rid, const RtActionDef *de
            task_id && *task_id ? task_id : "",
            task_id && *task_id ? "\"," : "",
            paths.call_id, body_path_esc);
-  if (fs_write_text(paths.in_path, input) != 0)
+  if (fs_write_text_atomic(paths.in_path, input) != 0)
     return emit_start_failure(
         r, rid, def, task_id, "action_input_write_failed",
         "action input artifact could not be written");

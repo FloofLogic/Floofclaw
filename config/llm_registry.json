@@ -53,7 +53,7 @@
     },
     {
       "id": "openai_key",
-      "kind": "openai_compat",
+      "kind": "openai_chat",
       "url": "https://api.openai.com/v1/chat/completions",
       "auth_endpoint": "openai_key",
       "auth_env": "OPENAI_API_KEY"

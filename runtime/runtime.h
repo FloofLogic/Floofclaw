@@ -39,15 +39,9 @@
  * ceiling; it does not otherwise choose the product's persistence. */
 #define RT_WORK_REPAIR_ATTEMPT_DEFAULT 1
 #define RT_WORK_REPAIR_ATTEMPT_LIMIT 8
-/* A configured LLM output contract may ask the same agent to repair an
- * uncommitted decision. Repairs are ordinary agent jobs/provider calls; this
- * is only the static configuration ceiling at the agent boundary. */
-#define RT_AGENT_OUTPUT_REPAIR_LIMIT 4
-/* Repair budget for an LLM agent that declares no output_contract. A
- * normalizer rejection is a slip, not a verdict, and re-running the
- * identical turn under floop retry_attempts costs the same model call
- * while showing the model nothing about what was wrong. Matches the
- * budget the one shipped output_contract declares. */
+/* A normalizer rejection is a slip, not a verdict. Repairs are ordinary
+ * agent jobs/provider calls; this is the static configuration ceiling. */
+#define RT_AGENT_DECISION_REPAIR_LIMIT 4
 #define RT_AGENT_DECISION_REPAIR_DEFAULT 2
 
 /* Durable state-store ceilings. These are boundary contracts, not private
@@ -106,7 +100,8 @@ typedef enum {
 typedef enum {
   RT_ACTION_CONFIG_PLAIN = 0,
   RT_ACTION_CONFIG_EXISTING_DIRECTORY,
-  RT_ACTION_CONFIG_STRING
+  RT_ACTION_CONFIG_STRING,
+  RT_ACTION_CONFIG_PERMISSION_MODE_CEILING
 } RtActionConfigKind;
 
 typedef struct {
@@ -252,13 +247,8 @@ typedef struct {
   char handler[RT_SMALL];
   int recent;
   int autocomplete_message_task_on_send;
-  /* Optional agent.json output_contract. The runtime validates this before
-   * normalizing or committing any calls, then may re-run the same agent phase
-   * with explicit feedback. Empty means the ordinary calls[] contract. */
-  char output_contract[RT_SMALL];
-  int output_repair_attempts;
-  /* Bounded repair budget for a normalizer rejection when no
-   * output_contract is declared. agent.json "repair_attempts". */
+  /* Bounded repair budget for an LLM normalizer rejection. agent.json
+   * "repair_attempts". */
   int decision_repair_attempts;
   int conversational_payload_only;
   int affair_extraction_context_only;
@@ -351,14 +341,17 @@ int rt_workspace_next_run_task_collision(const char *workspace,
 /* Path derivers — small inline helpers so callers don't keep
  * stamping the same suffix over and over. PATH_MAX-sized output
  * buffers are the caller's responsibility. */
-static inline void rt_event_log_path(const RtContext *ctx, char *out, size_t out_len) {
-  snprintf(out, out_len, "%s/event_log.jsonl", ctx->run_dir);
+static inline int rt_event_log_path(const RtContext *ctx, char *out,
+                                    size_t out_len) {
+  return ctx ? fs_join(out, out_len, ctx->run_dir, "event_log.jsonl") : -1;
 }
-static inline void rt_state_path(const RtContext *ctx, char *out, size_t out_len) {
-  snprintf(out, out_len, "%s/state.json", ctx->run_dir);
+static inline int rt_state_path(const RtContext *ctx, char *out,
+                                size_t out_len) {
+  return ctx ? fs_join(out, out_len, ctx->run_dir, "state.json") : -1;
 }
-static inline void rt_trace_path(const RtContext *ctx, char *out, size_t out_len) {
-  snprintf(out, out_len, "%s/trace.jsonl", ctx->run_dir);
+static inline int rt_trace_path(const RtContext *ctx, char *out,
+                                size_t out_len) {
+  return ctx ? fs_join(out, out_len, ctx->run_dir, "trace.jsonl") : -1;
 }
 
 int rt_append_event(RtContext *ctx, const char *type, const char *source, const char *payload_json);
@@ -447,6 +440,16 @@ int  rt_task_append_action_failure(RtContext *ctx, const char *action,
                                    const char *reason,
                                    const char *error_json);
 int  rt_task_apply_event(const char *type, const char *payload_json);
+enum {
+  RT_TASK_CANCEL_OK = 0,
+  RT_TASK_CANCEL_NOT_FOUND = 1,
+  RT_TASK_CANCEL_NOT_OPEN = 2,
+  RT_TASK_CANCEL_FAILED = -1
+};
+/* Operator control path. Only an exact open task may transition; the
+ * canonical task_canceled payload is applied by the task reducer. */
+int  rt_task_cancel_operator(const char *task_id,
+                             char *current_status, size_t status_len);
 int  rt_task_work_rev_of(const char *task_id, long long *out_rev);
 int  rt_task_working_memory_of(const char *task_id,
                                char *out, size_t out_len);
@@ -636,6 +639,7 @@ int  rt_affair_each(int (*visitor)(const char *affair_id, const char *context_id
                                    void *user),
                     void *user);
 int  rt_affair_main(int argc, char **argv);
+int  rt_task_main(int argc, char **argv);
 int  rt_memory_state_json(char *out, size_t out_len);
 int  rt_memory_projection_json(const char *context_id, int recent_limit,
                                char *out, size_t out_len);

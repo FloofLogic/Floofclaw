@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#include <errno.h>
 #include <signal.h>
 #include <limits.h>
 #include <stdio.h>
@@ -82,13 +83,16 @@ static const BudgetOverride kBudgetOverrides[] = {
    * 1046-1103ms; keep explicit headroom without relaxing global budgets. */
   { "codex_missing_deliverable_reports_honest_result", 2500 },
   { "manage_codex_project_root_is_explicit_cached_and_contained", 8000 },
+  { "managed_worker_permission_ceiling_is_durable_and_prelaunch", 3000 },
   { "claude_handler_delivers_modern_operation_result", 2500 },
   { "concrete_request_queues_managed_work", 2500 },
   /* Each drives two full LLM manager turns through the mock provider --
    * the rejected decision and its bounded repair -- with durable state
    * fsynced between them. Measured 320-480ms. */
-  { "floofclaw_contract_less_agent_repairs_a_normalizer_rejection", 1500 },
-  { "floofclaw_contract_less_repair_budget_is_bounded", 1500 },
+  { "floofclaw_agent_repairs_a_normalizer_rejection", 1500 },
+  { "floofclaw_repair_budget_is_bounded", 1500 },
+  /* One complete LLM turn plus durable message/task effects. */
+  { "openclaw_finalize_with_working_memory_is_not_semantically_rejected", 1500 },
   { "manual_affair_review_with_note_add_records_note", 1000 },
   { "manual_affair_review_with_close_marks_affair_closed", 1000 },
   /* Two real split-role manager turns prove result rejection followed by
@@ -177,10 +181,34 @@ static const BudgetOverride kBudgetOverrides[] = {
   { "floofclaw_review_queues_background_work",       15000 },
 };
 
-static int budget_for(const char *name) {
+static int budget_for(const char *name, int scale) {
+  int budget = DEFAULT_BUDGET_MS;
   for (size_t i = 0; i < sizeof(kBudgetOverrides) / sizeof(kBudgetOverrides[0]); ++i)
-    if (strcmp(kBudgetOverrides[i].name, name) == 0) return kBudgetOverrides[i].budget_ms;
-  return DEFAULT_BUDGET_MS;
+    if (strcmp(kBudgetOverrides[i].name, name) == 0) {
+      budget = kBudgetOverrides[i].budget_ms;
+      break;
+    }
+  return budget * scale;
+}
+
+static int read_budget_scale(int *out) {
+  const char *text = getenv("FCLAW_TEST_BUDGET_SCALE");
+  char *end = NULL;
+  long value;
+  if (!out) return -1;
+  *out = 1;
+  if (!text || !*text) return 0;
+  errno = 0;
+  value = strtol(text, &end, 10);
+  if (errno != 0 || end == text || *end != '\0' || value < 1 || value > 100) {
+    fprintf(stderr,
+            "test runner: FCLAW_TEST_BUDGET_SCALE must be an integer from "
+            "1 to 100 (got '%s')\n",
+            text);
+    return -1;
+  }
+  *out = (int)value;
+  return 0;
 }
 
 static const char *group_name(TestGroup group) {
@@ -207,14 +235,43 @@ static int matches_filter(const TestCase *test, const char *filter) {
 
 /* FCLAW_TEST_SHARD="I/N" → this worker runs tests where (index % N) == I-1.
  * I is 1-based ("1/4" means worker 1 of 4). Used by tests/run_integration_parallel.sh
- * to split the suite across N workers, each in its own per-worker workspace.
- * Returns 0 if the test does not belong to this shard (skip), 1 if it does. */
-static int matches_shard(int index, const char *shard) {
-  if (!shard || !*shard) return 1;
-  int i = 0, n = 0;
-  if (sscanf(shard, "%d/%d", &i, &n) != 2) return 1;
-  if (n <= 0 || i < 1 || i > n) return 1;
-  return (index % n) == (i - 1);
+ * to split the suite across N workers, each in its own per-worker workspace. */
+static int read_test_shard(int *out_index, int *out_count) {
+  const char *text = getenv("FCLAW_TEST_SHARD");
+  const char *count_text;
+  char *end = NULL;
+  long index;
+  long count;
+  if (!out_index || !out_count) return -1;
+  *out_index = 1;
+  *out_count = 1;
+  if (!text) return 0;
+
+  errno = 0;
+  index = strtol(text, &end, 10);
+  if (errno != 0 || end == text || *end != '/') goto invalid;
+  count_text = end + 1;
+  errno = 0;
+  count = strtol(count_text, &end, 10);
+  if (errno != 0 || end == count_text || *end != '\0' ||
+      index < 1 || count < 1 || index > count ||
+      index > INT_MAX || count > INT_MAX) {
+    goto invalid;
+  }
+  *out_index = (int)index;
+  *out_count = (int)count;
+  return 0;
+
+invalid:
+  fprintf(stderr,
+          "test runner: FCLAW_TEST_SHARD must be I/N with 1 <= I <= N "
+          "(got '%s')\n",
+          text);
+  return -1;
+}
+
+static int matches_shard(int index, int shard_index, int shard_count) {
+  return (index % shard_count) == (shard_index - 1);
 }
 
 static void on_alarm(int sig) {
@@ -269,27 +326,31 @@ static int require_isolated_test_root(const char *program) {
 
 int main(int argc, char **argv) {
   const char *filter = argc > 1 ? argv[1] : NULL;
-  const char *shard = getenv("FCLAW_TEST_SHARD");
   int failures = 0;
   int ran = 0;
+  int budget_scale = 1;
+  int shard_index = 1;
+  int shard_count = 1;
   int total = (int)(sizeof(tests) / sizeof(tests[0]));
   if (require_isolated_test_root(argc > 0 ? argv[0] : NULL) != 0) return 2;
+  if (read_budget_scale(&budget_scale) != 0) return 2;
+  if (read_test_shard(&shard_index, &shard_count) != 0) return 2;
   signal(SIGALRM, on_alarm);
   for (int i = 0; i < total; ++i) {
     if (!matches_filter(&tests[i], filter)) continue;
-    if (!matches_shard(i, shard)) continue;
+    if (!matches_shard(i, shard_index, shard_count)) continue;
     ran++;
     printf("[RUN ] [%s] %s\n", group_name(tests[i].group), tests[i].name);
     fflush(stdout);
     /* Hard wall-clock backstop: the per-test budget plus slack. Tests
      * with large overrides (gateway lifecycles with real timers) get a
      * proportionally larger alarm instead of a flat 15s. */
-    alarm((unsigned)(budget_for(tests[i].name) / 1000 + 10));
+    alarm((unsigned)(budget_for(tests[i].name, budget_scale) / 1000 + 10));
     long long t0 = now_ms();
     int rc = tests[i].fn();
     long long elapsed = now_ms() - t0;
     alarm(0);
-    int budget = budget_for(tests[i].name);
+    int budget = budget_for(tests[i].name, budget_scale);
     int over_budget = (elapsed > budget);
     if (rc == 0 && !over_budget) {
       printf("[PASS] [%s] %s (%lldms)\n",

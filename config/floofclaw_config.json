@@ -17,6 +17,14 @@
     "manage_claude",
     "manage_hermes"
   ],
+  "actions": {
+    "manage_codex": {
+      "max_permission_mode": "safe"
+    },
+    "manage_claude": {
+      "max_permission_mode": "safe"
+    }
+  },
   "channels": {
     "ws": {
       "enabled": false,

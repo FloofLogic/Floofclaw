@@ -2,6 +2,7 @@
 
 #include "../../runtime/bus/media_manifest.h"
 #include "../../adapters/discord/discord_internal.h"
+#include "../../adapters/telegram/telegram_internal.h"
 #include "../../runtime/support/heap_guard.h"
 #include "../../runtime/support/sha256.h"
 
@@ -315,6 +316,106 @@ int discord_media_parser_rejects_untrusted_sources_and_caps(void) {
   rc |= expect(dc_parse_message_create(json, &msg) != 0 &&
                    msg.attachments == NULL,
                "over-total-size Discord event is rejected and cleaned");
+  return rc;
+}
+
+int telegram_media_parser_keeps_caption_order_and_largest_photo(void) {
+  static const char payload[] =
+      "{\"message_id\":17,\"caption\":\"look at these\","
+      "\"text\":\"caption wins\","
+      "\"chat\":{\"id\":424242,\"type\":\"private\"},"
+      "\"from\":{\"id\":424242,\"is_bot\":false},"
+      "\"photo\":["
+      "{\"file_id\":\"small-file\",\"file_unique_id\":\"small\","
+      "\"file_size\":4,\"width\":16,\"height\":16},"
+      "{\"file_id\":\"large-file\",\"file_unique_id\":\"large\","
+      "\"file_size\":8192,\"width\":1024,\"height\":768}],"
+      "\"document\":{\"file_id\":\"doc-file\","
+      "\"file_unique_id\":\"doc-unique\",\"file_size\":1200,"
+      "\"file_name\":\"field-notes.pdf\","
+      "\"mime_type\":\"application/pdf\"}}";
+  static const char text_only[] =
+      "{\"message_id\":18,\"text\":\"plain telegram\","
+      "\"chat\":{\"id\":424242,\"type\":\"private\"},"
+      "\"from\":{\"id\":424242,\"is_bot\":false}}";
+  JsonRef root;
+  TgInboundMessage msg;
+  int rc = 0;
+
+  rc |= expect(json_ref_top_object(payload, &root) == 0,
+               "parse Telegram media fixture JSON");
+  rc |= expect(tg_parse_inbound_message(&root, &msg) == 0,
+               "parse Telegram photo and document message");
+  rc |= expect(strcmp(msg.text, "look at these") == 0,
+               "Telegram caption becomes the model text");
+  rc |= expect(msg.media_count == 2U && msg.media_bytes == 9392U,
+               "Telegram media aggregates are bounded and complete");
+  rc |= expect(strcmp(msg.media[0].file_id, "large-file") == 0 &&
+                   strcmp(msg.media[0].id, "large") == 0 &&
+                   msg.media[0].size_bytes == 8192U &&
+                   strcmp(msg.media[0].media_type, "image/jpeg") == 0,
+               "the last and largest photo size is selected first");
+  rc |= expect(strcmp(msg.media[1].file_id, "doc-file") == 0 &&
+                   strcmp(msg.media[1].filename, "field-notes.pdf") == 0 &&
+                   strcmp(msg.media[1].media_type, "application/pdf") == 0 &&
+                   msg.media[1].size_bytes == 1200U,
+               "the document follows the photo with its metadata intact");
+
+  rc |= expect(json_ref_top_object(text_only, &root) == 0 &&
+                   tg_parse_inbound_message(&root, &msg) == 0,
+               "text-only Telegram messages remain accepted");
+  rc |= expect(msg.media_count == 0U &&
+                   strcmp(msg.text, "plain telegram") == 0,
+               "text-only Telegram payload shape remains unchanged");
+  return rc;
+}
+
+int telegram_media_parser_rejects_untrusted_sources_and_caps(void) {
+  static const char over_cap[] =
+      "{\"message_id\":19,\"caption\":\"too large\","
+      "\"chat\":{\"id\":424242,\"type\":\"private\"},"
+      "\"from\":{\"id\":424242,\"is_bot\":false},"
+      "\"photo\":[{\"file_id\":\"huge-file\","
+      "\"file_unique_id\":\"huge\",\"file_size\":20971521}]}";
+  JsonRef root;
+  TgInboundMessage msg;
+  int rc = 0;
+
+  rc |= expect(tg_source_url_is_trusted(
+                   "https://api.telegram.org/file/bot123:ABC/photos/a.jpg",
+                   "123:ABC") == 1,
+               "the exact Telegram file host, token, and safe path are trusted");
+  rc |= expect(tg_source_url_is_trusted(
+                   "http://api.telegram.org/file/bot123:ABC/photos/a.jpg",
+                   "123:ABC") == 0,
+               "non-HTTPS Telegram file URLs are rejected");
+  rc |= expect(tg_source_url_is_trusted(
+                   "https://api.telegram.org.evil.test/file/"
+                   "bot123:ABC/photos/a.jpg",
+                   "123:ABC") == 0,
+               "Telegram file host suffix attacks are rejected");
+  rc |= expect(tg_source_url_is_trusted(
+                   "https://api.telegram.org/file/bot999:XYZ/photos/a.jpg",
+                   "123:ABC") == 0,
+               "a Telegram URL for another bot token is rejected");
+  rc |= expect(tg_source_url_is_trusted(
+                   "https://api.telegram.org/file/bot123:ABC/../secrets",
+                   "123:ABC") == 0,
+               "Telegram file path traversal is rejected");
+  rc |= expect(tg_source_url_is_trusted(
+                   "https://api.telegram.org/file/bot123:ABC/photos/a.jpg?q=x",
+                   "123:ABC") == 0,
+               "Telegram file URL query material is rejected");
+  rc |= expect(tg_source_url_is_trusted(
+                   "https://api.telegram.org/file/bot123:ABC/photos/a.jpg#x",
+                   "123:ABC") == 0,
+               "Telegram file URL fragments are rejected");
+
+  rc |= expect(json_ref_top_object(over_cap, &root) == 0,
+               "parse oversized Telegram media fixture JSON");
+  rc |= expect(tg_parse_inbound_message(&root, &msg) != 0 &&
+                   msg.media_count == 0U,
+               "Telegram's 20 MiB getFile ceiling is enforced at ingress");
   return rc;
 }
 

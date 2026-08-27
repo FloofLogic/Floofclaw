@@ -13,10 +13,9 @@ typedef struct {
  * be JSON-escaped by the transport. Kept as a pure provider-boundary helper
  * so request-shape behavior can be unit tested without libcurl.
  *
- * A profile's "effort" value passes through as thinkingConfig.thinkingLevel;
- * an empty effort keeps the legacy thinkingBudget:0 shape. The provider is
- * the authority on which values (and which models) are valid — a bad pair
- * fails loudly at the API with artifacts on disk, not silently here. */
+ * Gemini 2.5 maps low/medium/high effort to a bounded thinkingBudget;
+ * newer Gemini models receive thinkingLevel. An empty effort omits
+ * thinkingConfig so the selected model keeps its provider default. */
 int llm_build_gemini_body(const LlmProfile *profile,
                           const char *escaped_prompt,
                           char *body, size_t body_len);

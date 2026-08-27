@@ -49,7 +49,10 @@ The default limit is 40 messages and 25 runs.
 
 `/v1/usage` covers only the current `workspace/logs/llm_usage.jsonl` segment;
 rotated history is explicitly excluded. Its `rows` key is grouped by the
-complete `(agent, profile, provider, model)` tuple.
+complete `(agent, profile, provider, model)` tuple. Totals and rows include
+dated token-price estimates: `estimated_usd` is numeric only with complete
+pricing coverage, while the priced partial, priced/unpriced call counts, and
+`pricing_complete` remain explicit.
 
 The record routes use `Content-Type: application/x-ndjson` with chunked
 transfer. Their first line is a versioned `scope` record naming the active

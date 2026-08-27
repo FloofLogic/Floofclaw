@@ -132,39 +132,14 @@ Opting in is the gate. A floop that does not name a kind never sees it: the
 event still becomes an inspectable run, every step skips, and the run
 completes. It does not fall through to the chat agent.
 
-## LLM Output Contract
+## LLM output repair
 
-An ordinary LLM agent may opt into a bounded task-decision contract in
-`agent.json`:
-
-```json
-{
-  "output_contract": {
-    "kind": "task_action_or_finalize",
-    "repair_attempts": 2
-  }
-}
-```
-
-For task-bearing `user_message` and `operation_result` turns, the accepted
-forms are one substantive action (optionally one progress `message` and one
-`working_memory_append`) without `task.update`, or one final `message` plus the
-exact current `task.update(state:"completed")` without a substantive action.
-Validation happens before any event or delivery is committed. An invalid
-response is preserved, and the same agent phase receives it with a specific
-correction through another ordinary provider call. `repair_attempts` accepts
-`0` through `4`; exhaustion fails the run as
-`agent_decision_contract_exhausted`. Events without a task binding, such as an
-affair review, retain the ordinary calls-array contract.
-
-### Repair without a contract
-
-The bounded repair is not the contract's. Any LLM agent whose output the
-normalizer rejects — a stray key beside `args`, a missing `name`, a call the
-agent is not allowed — gets the same treatment: the rejected response is
-preserved, the phase re-runs as another ordinary provider call, and the prompt
-names what the normalizer objected to. An agent that declares no contract sets
-its budget at the top level of `agent.json`:
+The kernel validates call intent, not the product meaning of a response. It
+does not classify a call set as a continuation or final answer. Any LLM output
+the ordinary normalizer rejects — a stray key beside `args`, a missing `name`,
+an unknown action, or invalid arguments — is preserved, and the phase re-runs
+as another ordinary provider call whose prompt names the rejection. The agent
+sets that bounded repair budget at the top level of `agent.json`:
 
 ```json
 {
@@ -173,17 +148,15 @@ its budget at the top level of `agent.json`:
 }
 ```
 
-The default is `2`, the same budget the shipped contract declares; `0` through
-`4` are accepted, and `0` restores the old behavior of failing on the first
-rejection. It is an error to set this key alongside an `output_contract`, which
-carries its own `repair_attempts`, or on a non-LLM agent — a script or native
-agent is deterministic, so re-running the identical turn buys nothing.
+The default is `2`; `0` through `4` are accepted, and `0` restores the old
+behavior of failing on the first rejection. The setting is invalid on a
+non-LLM agent — a script or native agent is deterministic, so re-running the
+identical turn buys nothing.
 
-Exhausting a contract-less budget fails the run as `agent_output_invalid`,
-the same code that shape produced before, with the normalizer's own detail in
-the message. Without this, one slip ended the turn and floop `retry_attempts`
-re-ran the identical turn at full model price with nothing said about what was
-wrong.
+Exhausting the budget fails the run as `agent_output_invalid`, with the
+normalizer's own detail in the message. Without this, one slip ended the turn
+and floop `retry_attempts` re-ran the identical turn at full model price with
+nothing said about what was wrong.
 
 ## Bound Work Controller Policy
 

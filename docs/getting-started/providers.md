@@ -47,33 +47,40 @@ use the `gemini_key` provider. A minimal profile is:
 {
   "id": "my_gemini",
   "provider": "gemini_key",
-  "model": "gemini-2.5-flash-lite"
+  "model": "gemini-2.5-flash-lite",
+  "max_output_tokens": 4096
 }
 ```
 
 The provider's optional local limits live in `config/llm_registry.json`:
 
 ```json
-"limits": { "rpm": 15, "daily": 500 }
+"limits": { "rpm": 15, "daily": 500, "daily_usd": 5.00 }
 ```
 
 Omit a limit for no local cap; `0` deliberately blocks calls. These are local
-guardrails, not a claim about the account's server-side quota.
+guardrails, not a claim about the account's server-side quota. `daily_usd`
+uses the dated USD-per-million-token assumptions in `config/pricing.json`.
+Before dispatch, the runtime reserves the request's configured maximum output
+plus a deliberately high text-input estimate; the reservation survives a
+crash and resets on the next local day. An unlisted provider/model—or media,
+whose provider-specific billing is not token-complete—fails closed while a
+dollar cap is active. The raw provider artifact names that rejection as
+`provider_budget_exceeded`; no network request is sent.
 
 A model profile may also declare `"effort": "low"`, `"medium"`, or
-`"high"`. The Gemini transport emits that value as
-`generationConfig.thinkingConfig.thinkingLevel` for **any** Gemini profile
-that sets it, not only Gemini 3 models — the shipped `floofclaw_manager`
-profile sends it on gemini-2.5-flash. Profiles without `effort` use the
-legacy `thinkingBudget: 0` request. The engine does not whitelist values or
-models; an unsupported combination fails loudly at the API, with the request
-artifact on disk. See
+`"high"`. Gemini 2.5 profiles map those values to tested numeric thinking
+budgets (512, 1024, and 4096 tokens); newer Gemini models receive
+`generationConfig.thinkingConfig.thinkingLevel`. A Gemini 2.5 Flash or
+Flash-Lite profile without `effort` sends `thinkingBudget: 0` — thinking off,
+the fast default every deployment had before 0.30.0; other Gemini models
+without `effort` omit `thinkingConfig` and keep the provider default. See
 [Executors and model profiles](../concepts/executors.md#model-effort).
 
 ## OpenAI
 
-The OpenAI chat-completions route uses the `openai_compat` transport and a
-Bearer token:
+The official OpenAI chat-completions route uses the `openai_chat` transport
+and a Bearer token:
 
 ```bash
 ./bin/fclaw auth set-stdin -h openai_key
@@ -86,15 +93,22 @@ placeholder with an ID available to your account:
 {
   "id": "openai_chat",
   "provider": "openai_key",
-  "model": "YOUR_OPENAI_MODEL_ID"
+  "model": "YOUR_OPENAI_MODEL_ID",
+  "max_output_tokens": 4096
 }
 ```
 
-The registry also ships `openai_responses_key` for the OpenAI Responses wire
-format. Select it from a profile when that endpoint is the better match.
-A profile `"effort"` on that transport is emitted as
-`"reasoning": {"effort": ...}`; profiles without `effort` omit `reasoning`.
-The engine does not whitelist values — the provider validates them. See
+The chat transport sends `max_output_tokens` as OpenAI's
+`max_completion_tokens`, sends profile `effort` as `reasoning_effort`, and
+omits `temperature` so reasoning and non-reasoning chat models share one safe
+shape. The registry also ships `openai_responses_key` for the OpenAI Responses
+wire format; that transport sends `max_output_tokens` unchanged and sends
+`effort` as `"reasoning": {"effort": ...}`. Profiles without `effort` omit
+either effort field. Generic OpenAI-compatible servers remain on the separate
+`openai_compat` kind, which keeps their widely supported `max_tokens` field
+and `temperature: 0`; use that kind for vLLM, LM Studio, Ollama, LiteLLM, and
+OpenRouter. Choose a model that accepts the selected effort control; the
+provider remains the authority on supported values. See
 [Executors and model profiles](../concepts/executors.md#model-effort).
 
 ## Anthropic
@@ -112,13 +126,19 @@ The committed `anthropic_chat` profile is ready to select:
 {
   "id": "anthropic_chat",
   "provider": "anthropic",
-  "model": "claude-sonnet-4-6"
+  "model": "claude-sonnet-4-6",
+  "max_output_tokens": 4096
 }
 ```
 
 Both `anthropic` and its compatibility alias `anthropic_key` use provider
 kind `http`; in this runtime that kind specifically means the Anthropic
 Messages shape.
+
+Anthropic profiles send `effort` inside the native Messages
+`output_config` object. Accepted values are `low`, `medium`, `high`, `xhigh`,
+and `max`; unsupported values fail before dispatch. Omit it for the model
+default. This control does not require an Anthropic beta header.
 
 ## OpenRouter
 

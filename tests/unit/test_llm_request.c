@@ -6,10 +6,7 @@
 #include <string.h>
 #include <unistd.h>
 
-/* The profile "effort" value passes through to Gemini's thinkingLevel;
- * an absent effort keeps the legacy thinkingBudget:0 request shape. The
- * provider is the authority on valid values — the builder does not
- * maintain a whitelist. */
+/* Gemini 2.5 uses numeric thinking budgets while Gemini 3 uses levels. */
 int gemini_body_maps_effort_to_thinking_level(void) {
   LlmProfile profile;
   char body[2048];
@@ -23,6 +20,8 @@ int gemini_body_maps_effort_to_thinking_level(void) {
                "builder succeeds with effort set");
   rc |= expect_substr(body, "\"thinkingLevel\":\"medium\"",
                       "effort renders as thinkingLevel");
+  rc |= expect_substr(body, "\"maxOutputTokens\":4096",
+                      "Gemini receives the default output-token cap");
   rc |= expect_no_substr(body, "thinkingBudget",
                          "no legacy budget when effort is set");
 
@@ -32,13 +31,37 @@ int gemini_body_maps_effort_to_thinking_level(void) {
   rc |= expect_substr(body, "\"thinkingLevel\":\"thinking\"",
                       "effort value is not whitelisted by the engine");
 
+  snprintf(profile.model, sizeof(profile.model), "gemini-2.5-flash");
+  snprintf(profile.effort, sizeof(profile.effort), "medium");
+  rc |= expect(llm_build_gemini_body(&profile, "hi", body, sizeof(body)) == 0,
+               "Gemini 2.5 builder accepts generic medium effort");
+  rc |= expect_substr(body, "\"thinkingBudget\":1024",
+                      "Gemini 2.5 medium effort maps to a valid budget");
+  rc |= expect_no_substr(body, "thinkingLevel",
+                         "Gemini 2.5 does not receive Gemini 3 levels");
+
   profile.effort[0] = '\0';
   rc |= expect(llm_build_gemini_body(&profile, "hi", body, sizeof(body)) == 0,
                "builder succeeds with effort absent");
   rc |= expect_substr(body, "\"thinkingBudget\":0",
-                      "absent effort keeps the legacy request shape");
+                      "Gemini 2.5 Flash without effort keeps thinking off, as before 0.30.0");
   rc |= expect_no_substr(body, "thinkingLevel",
                          "no thinkingLevel without effort");
+
+  snprintf(profile.model, sizeof(profile.model), "gemini-2.5-flash-lite");
+  rc |= expect(llm_build_gemini_body(&profile, "hi", body, sizeof(body)) == 0 &&
+                   strstr(body, "\"thinkingBudget\":0") != NULL,
+               "Gemini 2.5 Flash-Lite without effort keeps thinking off");
+
+  snprintf(profile.model, sizeof(profile.model), "gemini-2.5-pro");
+  rc |= expect(llm_build_gemini_body(&profile, "hi", body, sizeof(body)) == 0 &&
+                   strstr(body, "thinkingConfig") == NULL,
+               "Gemini 2.5 Pro cannot disable thinking, so no budget is sent");
+
+  snprintf(profile.model, sizeof(profile.model), "gemini-3-flash-preview");
+  rc |= expect(llm_build_gemini_body(&profile, "hi", body, sizeof(body)) == 0 &&
+                   strstr(body, "thinkingConfig") == NULL,
+               "newer Gemini models without effort defer to the model default");
 
   {
     char tiny[32];
@@ -100,25 +123,35 @@ static void init_media(LlmMedia *media, const char *id, const char *filename,
   media->size_bytes = size_bytes;
 }
 
-int llm_text_request_shapes_remain_byte_identical_and_unallocated(void) {
+int llm_text_request_shapes_are_exact_and_unallocated(void) {
   static const struct {
     const char *kind;
     const char *expected;
   } cases[] = {
     {
       "http",
-      "{\"model\":\"model-x\",\"max_tokens\":1024,\"messages\":[{\"role\":"
+      "{\"model\":\"model-x\",\"max_tokens\":4096,"
+      "\"output_config\":{\"effort\":\"medium\"},"
+      "\"messages\":[{\"role\":"
       "\"user\",\"content\":\"hi\\n\\\"ride\\\"\"}]}"
     },
     {
+      "openai_chat",
+      "{\"model\":\"model-x\",\"max_completion_tokens\":4096,"
+      "\"reasoning_effort\":\"medium\",\"stream\":false,\"messages\":"
+      "[{\"role\":\"user\",\"content\":\"hi\\n\\\"ride\\\"\"}]}"
+    },
+    {
       "openai_compat",
-      "{\"model\":\"model-x\",\"temperature\":0,\"stream\":false,\"messages\":"
+      "{\"model\":\"model-x\",\"max_tokens\":4096,\"reasoning_effort\":"
+      "\"medium\",\"temperature\":0,\"stream\":false,\"messages\":"
       "[{\"role\":\"user\",\"content\":\"hi\\n\\\"ride\\\"\"}]}"
     },
     {
       "openai_responses",
       "{\"model\":\"model-x\",\"input\":\"hi\\n\\\"ride\\\"\",\"reasoning\":"
-      "{\"effort\":\"medium\"},\"temperature\":0,\"store\":false,"
+      "{\"effort\":\"medium\"},\"max_output_tokens\":4096,"
+      "\"temperature\":0,\"store\":false,"
       "\"stream\":false}"
     }
   };
@@ -140,7 +173,7 @@ int llm_text_request_shapes_remain_byte_identical_and_unallocated(void) {
     rc |= expect(body.data == scratch && !body.owned,
                  "text request reuses caller scratch without allocation");
     rc |= expect(strcmp(body.data, cases[i].expected) == 0,
-                 "legacy text request bytes are unchanged");
+                 "text request bytes match the provider contract");
     rc |= expect(body.len == strlen(cases[i].expected),
                  "text request exposes exact byte length");
     llm_request_body_free(&body);
@@ -281,6 +314,7 @@ int openai_responses_maps_effort_to_reasoning(void) {
   rc |= expect(strcmp(body.data,
                       "{\"model\":\"model-x\",\"input\":\"hi\","
                       "\"reasoning\":{\"effort\":\"minimal\"},"
+                      "\"max_output_tokens\":4096,"
                       "\"temperature\":0,\"store\":false,"
                       "\"stream\":false}") == 0,
                "effort renders as reasoning.effort without a whitelist");
@@ -308,6 +342,7 @@ int openai_responses_maps_effort_to_reasoning(void) {
                          "absent effort omits the reasoning object");
   rc |= expect(strcmp(body.data,
                       "{\"model\":\"model-x\",\"input\":\"hi\","
+                      "\"max_output_tokens\":4096,"
                       "\"temperature\":0,\"store\":false,"
                       "\"stream\":false}") == 0,
                "absent effort keeps the legacy request shape");
@@ -341,6 +376,89 @@ int openai_responses_maps_effort_to_reasoning(void) {
                          "media request without effort omits reasoning");
   llm_request_body_free(&body);
   unlink(path);
+  return rc;
+}
+
+int anthropic_request_maps_profile_controls(void) {
+  LlmProfile profile;
+  LlmRequest request = {"hi", NULL, 0U};
+  LlmRequestBody body;
+  char scratch[LLM_PROMPT_MAX + 1024];
+  char err[256];
+  int rc = 0;
+
+  memset(&profile, 0, sizeof(profile));
+  snprintf(profile.model, sizeof(profile.model), "claude-sonnet-4-6");
+  snprintf(profile.effort, sizeof(profile.effort), "high");
+  profile.max_output_tokens = 8192;
+  rc |= expect(llm_request_body_build(&profile, "http", &request,
+                                      scratch, sizeof(scratch), &body,
+                                      NULL, 0U) == 0,
+               "Anthropic request builds with profile controls");
+  rc |= expect_substr(body.data, "\"max_tokens\":8192",
+                      "Anthropic maps the output-token cap");
+  rc |= expect(strcmp(body.data,
+                      "{\"model\":\"claude-sonnet-4-6\","
+                      "\"max_tokens\":8192,\"output_config\":{"
+                      "\"effort\":\"high\"},\"messages\":[{\"role\":"
+                      "\"user\",\"content\":\"hi\"}]}" ) == 0,
+               "Anthropic request bytes match the Messages contract");
+  llm_request_body_free(&body);
+
+  snprintf(profile.effort, sizeof(profile.effort), "minimal");
+  rc |= expect(llm_request_body_build(&profile, "http", &request,
+                                      scratch, sizeof(scratch), &body,
+                                      err, sizeof(err)) != 0,
+               "Anthropic rejects an unsupported effort before dispatch");
+  rc |= expect_substr(err, "Anthropic effort",
+                      "Anthropic effort error names the provider control");
+  return rc;
+}
+
+int openai_compat_request_maps_profile_controls(void) {
+  LlmProfile profile;
+  LlmRequest request = {"hi", NULL, 0U};
+  LlmRequestBody body;
+  char scratch[LLM_PROMPT_MAX + 1024];
+  char err[256];
+  int rc = 0;
+
+  memset(&profile, 0, sizeof(profile));
+  snprintf(profile.model, sizeof(profile.model), "model-x");
+  snprintf(profile.effort, sizeof(profile.effort), "low");
+  profile.max_output_tokens = 2048;
+  rc |= expect(llm_request_body_build(&profile, "openai_compat", &request,
+                                      scratch, sizeof(scratch), &body,
+                                      NULL, 0U) == 0,
+               "OpenAI-compatible request builds with profile controls");
+  rc |= expect_substr(body.data, "\"max_tokens\":2048",
+                      "OpenAI chat maps the output-token cap");
+  rc |= expect_substr(body.data, "\"reasoning_effort\":\"low\"",
+                      "OpenAI-compatible chat passes reasoning_effort");
+  llm_request_body_free(&body);
+
+  rc |= expect(llm_request_body_build(&profile, "openai_chat", &request,
+                                      scratch, sizeof(scratch), &body,
+                                      err, sizeof(err)) == 0,
+               "official OpenAI chat request builds");
+  rc |= expect(strcmp(body.data,
+                      "{\"model\":\"model-x\","
+                      "\"max_completion_tokens\":2048,"
+                      "\"reasoning_effort\":\"low\",\"stream\":false,"
+                      "\"messages\":[{\"role\":\"user\","
+                      "\"content\":\"hi\"}]}" ) == 0,
+               "official OpenAI chat bytes use the current token field");
+  rc |= expect_no_substr(body.data, "temperature",
+                         "official OpenAI chat omits reasoning-incompatible temperature");
+  llm_request_body_free(&body);
+
+  profile.max_output_tokens = LLM_MAX_OUTPUT_TOKENS + 1;
+  rc |= expect(llm_request_body_build(&profile, "openai_chat", &request,
+                                      scratch, sizeof(scratch), &body,
+                                      err, sizeof(err)) != 0,
+               "serializer rejects an output cap beyond its response bound");
+  rc |= expect_substr(err, "max_output_tokens",
+                      "output-cap failure names the profile key");
   return rc;
 }
 

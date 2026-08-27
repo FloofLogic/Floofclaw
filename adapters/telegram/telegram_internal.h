@@ -2,6 +2,8 @@
 #define FCLAW_TELEGRAM_INTERNAL_H
 
 #include "../../runtime/gateway/adapter.h"
+#include "../../runtime/bus/media_manifest.h"
+#include "../../runtime/support/json.h"
 #include "../../runtime/support/net_tls.h"
 #include "../../runtime/support/reconnect_backoff.h"
 
@@ -15,8 +17,9 @@
  * absent too: getUpdates never returns the bot's own messages, and privacy
  * mode hides other bots.
  *
- * Two independent connections, each its own small state machine, because a
- * 50-second long poll must not block an outbound reply. */
+ * Three independent connections, each its own small state machine, because
+ * a 50-second long poll must not block getFile resolution or an outbound
+ * reply. */
 
 #define TG_HOST            "api.telegram.org"
 #define TG_PORT            443
@@ -32,6 +35,9 @@
 #define TG_PROGRESS_TIMEOUT_MS 90000ULL  /* > the 50s poll it must outlive */
 #define TG_OFFSET_PATH     ".fclaw/run/telegram_offset"
 #define TG_DELIVERIES_LOG  "workspace/logs/deliveries.jsonl"
+#define TG_FILE_ID_MAX     256
+#define TG_INBOUND_MEDIA_MAX 2U /* Bot API message media fields are singular. */
+#define TG_FILE_FETCH_MAX_BYTES (20ULL * 1024ULL * 1024ULL)
 
 typedef enum {
   TG_CONN_IDLE = 0,
@@ -65,6 +71,34 @@ typedef struct {
 } TgOutbound;
 
 typedef struct {
+  char file_id[TG_FILE_ID_MAX];
+  char id[FC_MEDIA_ID_MAX];
+  char filename[FC_MEDIA_FILENAME_MAX];
+  char media_type[FC_MEDIA_TYPE_MAX];
+  uint64_t size_bytes;
+  char source_url[FC_MEDIA_SOURCE_URL_MAX];
+} TgInboundMedia;
+
+typedef struct {
+  char text[TG_TEXT_MAX];
+  char chat_id[64];
+  char chat_type[32];
+  char user_id[64];
+  char message_id[64];
+  int author_is_bot;
+  TgInboundMedia media[TG_INBOUND_MEDIA_MAX];
+  size_t media_count;
+  uint64_t media_bytes;
+} TgInboundMessage;
+
+typedef struct {
+  int active;
+  long long update_id;
+  size_t resolve_index;
+  TgInboundMessage message;
+} TgPendingInbound;
+
+typedef struct {
   int enabled;
   int tls_verify;
   int allow_dms;
@@ -87,6 +121,9 @@ typedef struct {
   uint64_t poll_next_ms;
   long long offset;            /* next update_id to request */
   int offset_loaded;
+
+  TgConn file;                 /* getFile metadata resolution */
+  TgPendingInbound pending;
 
   TgConn send;                 /* outbound sendMessage */
   TgOutbound outq[TG_OUT_QUEUE_MAX];
@@ -113,6 +150,8 @@ void tg_context_id(const char *chat_type, const char *chat_id,
                    const char *user_id, char *out, size_t out_len);
 int  tg_chat_allowed(const TgAdapter *a, const char *chat_type,
                      const char *chat_id);
+int tg_parse_inbound_message(const JsonRef *msg, TgInboundMessage *out);
+int tg_source_url_is_trusted(const char *url, const char *token);
 
 /* Test hook: run one getUpdates response body through the parse, publish,
  * and offset-advance path without a network. */

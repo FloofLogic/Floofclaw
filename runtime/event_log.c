@@ -147,7 +147,7 @@ static int append_event_unchecked(RtContext *ctx, const char *type,
            "{\"event_id\":\"%s\",\"ts\":\"%s\",\"type\":\"%s\",\"source\":\"%s\",\"run_id\":\"%s\",\"payload\":%s}\n",
            event_id, ts, type, source, ctx->run_id, body);
   ctx->next_event++;
-  rt_event_log_path(ctx, log_path, sizeof(log_path));
+  if (rt_event_log_path(ctx, log_path, sizeof(log_path)) != 0) return -1;
   rc = (force_sync || requires_sync_append(type))
            ? fs_append_text_sync(log_path, line)
            : fs_append_text(log_path, line);

@@ -39,34 +39,80 @@ static int find_in_array(const char *path, const char *array_key, const char *ma
   return -1;
 }
 
-int llm_load_profile(const char *profile_id, LlmProfile *out) {
+static int profile_error(char *err, size_t err_len, const char *message,
+                         const char *profile_id) {
+  if (err && err_len > 0U)
+    (void)snprintf(err, err_len, message, profile_id ? profile_id : "",
+                   LLM_MAX_OUTPUT_TOKENS);
+  return -1;
+}
+
+int llm_load_profile_with_error(const char *profile_id, LlmProfile *out,
+                                char *err, size_t err_len) {
   JsonRef root, match;
+  JsonRef value;
+  long long max_output_tokens = 0;
   char *text = NULL;
-  if (!profile_id || !out) return -1;
+  if (err && err_len > 0U) err[0] = '\0';
+  if (!profile_id || !out)
+    return profile_error(err, err_len,
+                         "invalid model profile '%s'", profile_id);
   memset(out, 0, sizeof(*out));
-  if (find_in_array(profile_path(), "profiles", profile_id, &root, &match, &text) != 0) return -1;
+  if (find_in_array(profile_path(), "profiles", profile_id, &root, &match,
+                    &text) != 0)
+    return profile_error(
+        err, err_len,
+        "profile '%s' not found; fix: add it to config/model_profiles.json or change model.ref",
+        profile_id);
   if (json_ref_object_get_string(&match, "id", out->id, sizeof(out->id)) != 0 ||
       json_ref_object_get_string(&match, "provider", out->provider, sizeof(out->provider)) != 0 ||
       json_ref_object_get_string(&match, "model", out->model, sizeof(out->model)) != 0) {
     free(text);
-    return -1;
+    return profile_error(
+        err, err_len,
+        "profile '%s' must contain string id, provider, and model fields",
+        profile_id);
   }
-  /* Optional: absent leaves the zeroed field, which keeps each provider's
-   * legacy request shape. */
+  out->max_output_tokens = LLM_DEFAULT_MAX_OUTPUT_TOKENS;
   (void)json_ref_object_get_string(&match, "effort", out->effort, sizeof(out->effort));
+  if (json_ref_object_get(&match, "max_output_tokens", &value) == 0) {
+    if (json_ref_get_long(&value, &max_output_tokens) != 0) {
+      free(text);
+      return profile_error(
+          err, err_len,
+          "profile '%s' has non-integer max_output_tokens; fix: set max_output_tokens between 1 and %d",
+          profile_id);
+    }
+    if (max_output_tokens < 1 ||
+        max_output_tokens > LLM_MAX_OUTPUT_TOKENS) {
+      free(text);
+      return profile_error(
+          err, err_len,
+          "profile '%s' has out-of-range max_output_tokens; fix: set max_output_tokens between 1 and %d",
+          profile_id);
+    }
+    out->max_output_tokens = (int)max_output_tokens;
+  }
   free(text);
   return 0;
+}
+
+int llm_load_profile(const char *profile_id, LlmProfile *out) {
+  return llm_load_profile_with_error(profile_id, out, NULL, 0U);
 }
 
 int llm_load_provider(const char *provider_id, LlmProvider *out) {
   JsonRef root, match;
   JsonRef limits;
+  JsonRef usd_value;
   long long limit = 0;
+  double usd_limit = 0.0;
   char *text = NULL;
   if (!provider_id || !out) return -1;
   memset(out, 0, sizeof(*out));
   out->rpm_limit = -1;
   out->daily_limit = -1;
+  out->daily_usd_limit = -1.0;
   if (find_in_array(registry_path(), "providers", provider_id, &root, &match, &text) != 0) return -1;
   if (json_ref_object_get_string(&match, "id", out->id, sizeof(out->id)) != 0 ||
       json_ref_object_get_string(&match, "kind", out->kind, sizeof(out->kind)) != 0) {
@@ -79,6 +125,14 @@ int llm_load_provider(const char *provider_id, LlmProvider *out) {
   if (json_ref_object_get_object(&match, "limits", &limits) == 0) {
     if (json_ref_object_get_long(&limits, "rpm", &limit) == 0) out->rpm_limit = (int)limit;
     if (json_ref_object_get_long(&limits, "daily", &limit) == 0) out->daily_limit = (int)limit;
+    if (json_ref_object_get(&limits, "daily_usd", &usd_value) == 0) {
+      if (json_ref_get_double(&usd_value, &usd_limit) != 0 ||
+          usd_limit < 0.0 || usd_limit > 1000000.0) {
+        free(text);
+        return -1;
+      }
+      out->daily_usd_limit = usd_limit;
+    }
   }
   free(text);
   return 0;
@@ -87,6 +141,7 @@ int llm_load_provider(const char *provider_id, LlmProvider *out) {
 static int supported_provider_kind(const char *kind) {
   return kind && (strcmp(kind, "mock") == 0 ||
                   strcmp(kind, "http") == 0 ||
+                  strcmp(kind, "openai_chat") == 0 ||
                   strcmp(kind, "openai_compat") == 0 ||
                   strcmp(kind, "openai_responses") == 0 ||
                   strcmp(kind, "gemini_key") == 0);
@@ -97,11 +152,7 @@ int llm_validate_profile_startup(const char *profile_id,
   LlmProfile profile;
   LlmProvider provider;
   char secret[8192];
-  if (llm_load_profile(profile_id, &profile) != 0) {
-    if (err)
-      snprintf(err, err_len,
-               "profile '%s' not found; fix: add it to config/model_profiles.json or change model.ref",
-               profile_id ? profile_id : "");
+  if (llm_load_profile_with_error(profile_id, &profile, err, err_len) != 0) {
     return -1;
   }
   if (llm_load_provider(profile.provider, &provider) != 0) {
@@ -114,7 +165,7 @@ int llm_validate_profile_startup(const char *profile_id,
   if (!supported_provider_kind(provider.kind)) {
     if (err)
       snprintf(err, err_len,
-               "profile '%s' resolves to unimplemented provider kind '%s'; fix: use a provider whose kind is mock, http, openai_compat, openai_responses, or gemini_key",
+               "profile '%s' resolves to unimplemented provider kind '%s'; fix: use a provider whose kind is mock, http, openai_chat, openai_compat, openai_responses, or gemini_key",
                profile.id, provider.kind);
     return -1;
   }

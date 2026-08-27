@@ -54,7 +54,10 @@ void dc_drain_deliveries(DcAdapter *a) {
   /* Rotation detected: the file shrank because the janitor renamed
    * the live file to .1 and the append site created a fresh empty
    * one. Start from the top of the new file. */
-  if (total < a->delivery_cursor) a->delivery_cursor = 0;
+  if (total < a->delivery_cursor) {
+    a->delivery_cursor = 0;
+    a->delivery_backpressure_narrated = 0;
+  }
   if (total <= a->delivery_cursor) return;
   fp = fopen(DC_DELIVERIES_LOG, "rb");
   if (!fp) return;
@@ -63,12 +66,36 @@ void dc_drain_deliveries(DcAdapter *a) {
     while (fgets(line, sizeof(line), fp)) {
       char channel_id[128] = "";
       char text[DC_REPLY_MAX] = "";
+      long line_end = ftell(fp);
       size_t len = strlen(line);
+      int queue_rc = 0;
+      if (line_end < 0) break;
       if (len && line[len - 1] == '\n') line[len - 1] = '\0';
-      if (dc_delivery_for_us(a, line, channel_id, sizeof(channel_id), text, sizeof(text)))
-        (void)dc_queue_message_chunks(a, channel_id, text);
+      if (dc_delivery_for_us(a, line, channel_id, sizeof(channel_id), text,
+                             sizeof(text))) {
+        queue_rc = dc_queue_message_chunks(a, channel_id, text);
+        if (queue_rc == DC_QUEUE_FULL) {
+          if (!a->delivery_backpressure_narrated ||
+              a->delivery_backpressure_cursor != a->delivery_cursor) {
+            (void)rt_narrate(
+                "discord: delivery to channel %s deferred at log offset "
+                "%lld; outbound queue is full",
+                channel_id, a->delivery_cursor);
+            a->delivery_backpressure_cursor = a->delivery_cursor;
+            a->delivery_backpressure_narrated = 1;
+          }
+          break;
+        }
+        if (queue_rc != 0) {
+          (void)rt_narrate(
+              "discord: delivery to channel %s at log offset %lld could "
+              "not be queued; delivery skipped",
+              channel_id, a->delivery_cursor);
+        }
+      }
+      a->delivery_cursor = (long long)line_end;
+      a->delivery_backpressure_narrated = 0;
     }
   }
   fclose(fp);
-  a->delivery_cursor = total;
 }

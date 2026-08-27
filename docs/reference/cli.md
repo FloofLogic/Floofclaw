@@ -8,6 +8,7 @@ fclaw action list [-a|-h]
 fclaw action exec [-a|-h] --name <action> --args '<json-object>'
 fclaw action auth [-a|-h] --name <action> -- <action-owned arguments>
 fclaw operation complete [-a|-h] [--operation-id <id>] [--token <token>] (--result-file <json> | --status <s> [--text <t>])
+fclaw task cancel [-a|-h] <task_id>
 fclaw replay [-a|-h] <event_log.jsonl>
 fclaw view [-a|-h] [-f] [-d] <run_id|run_dir>
 fclaw usage [-a|-h] [--agent <id>] [--profile <id>]
@@ -224,7 +225,7 @@ instead of silently running under a default.
 
 ## `fclaw usage`
 
-Show LLM usage (tokens, latency, profile) from the current
+Show LLM usage (tokens, estimated USD, latency, profile) from the current
 `workspace/logs/llm_usage.jsonl` segment.
 
 ```bash
@@ -242,7 +243,10 @@ provider evidence remains under
 Default/`-a` output is the same versioned JSON aggregate served by `/v1/usage`,
 with no table text or terminal color. Rows are grouped by agent, profile,
 provider, and model and include provider-reported cached-input tokens when
-available.
+available. `estimated_usd` uses the dated `config/pricing.json` table and is
+`null` unless every matching call is priced; `priced_estimated_usd`,
+`priced_calls`, `unpriced_calls`, and `pricing_complete` make partial coverage
+explicit. These are estimates, not provider invoices.
 
 ## `fclaw cacheview`
 
@@ -431,9 +435,13 @@ cat workspace/logs/deliveries.jsonl                   # replies, with channel + 
 cat workspace/logs/rejected_events.jsonl              # refusals, with the exact field
 ```
 
-A producer that wants replies tails `workspace/logs/deliveries.jsonl` for its
-own channel, the same way `channels/message_deliver.sh` does. No channel
-adapter is required to receive a typed event's reply.
+An external integration that wants replies tails
+`workspace/logs/deliveries.jsonl` for its exact `channel` and `adapter_id`.
+That integration owns both directions: inbound publication, outbound
+delivery, durable cursor/recovery state, the last-mile transport, and its
+lifecycle under an OS supervisor. Core does not ship a shared
+transport-specific bridge, and no native channel adapter is required to
+receive a typed event's reply.
 
 ### `fclaw bus reserve`
 
@@ -478,6 +486,32 @@ Affair state lives at `workspace/memory/state/affairs.json`. See
 [Architecture: Affair Watcher](../architecture.md) and
 [the floofclaw floop](../concepts/floofclaw_floop.md) for the lifecycle and current
 event-gated call contract.
+
+## `fclaw task cancel <task_id>`
+
+Cancel one exact open task from the operator CLI:
+
+```bash
+./bin/fclaw task cancel -a task_run_947_000008
+./bin/fclaw task cancel -h task_run_947_000008
+```
+
+The command accepts only a task whose current status is `open`. An unknown ID
+fails as `task_not_found`; a `working`, `blocked`, or already-terminal task
+fails as `task_not_open`. A successful command applies the canonical
+`task_canceled` transition through the task reducer, preserves the task's work
+contract and artifacts, and writes `task canceled by operator: <task_id>` to
+`workspace/logs/narration.jsonl`.
+
+This is a control path for an inert durable task. It does not cancel a live
+run or external worker, create a run, or edit an existing run's event log.
+Verify that the target has no live operation before using it for cleanup.
+
+Agent output is one object:
+
+```json
+{"ok":true,"command":"task.cancel","task_id":"task_run_947_000008","status":"canceled"}
+```
 
 ## `fclaw gateway …`
 

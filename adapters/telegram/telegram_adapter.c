@@ -268,68 +268,207 @@ done:
   return rc;
 }
 
-/* One message from the getUpdates batch. Returns 1 when published. */
-static int tg_publish_message(TgAdapter *a, const JsonRef *msg) {
-  char text[TG_TEXT_MAX] = "";
-  char chat_id[64] = "", chat_type[32] = "", user_id[64] = "";
-  char message_id[64] = "";
-  char context_id[128] = "";
-  char etext[TG_TEXT_MAX * 2], echat[128], ectx[256], eadapter[128];
-  char payload[TG_TEXT_MAX * 2 + 1024];
-  char bus_id[BUS_ID_MAX];
-  JsonRef chat, from;
-  long long numeric = 0;
-  int is_bot = 0;
+static int tg_add_media(TgInboundMessage *out, const char *file_id,
+                        const char *id, const char *filename,
+                        const char *media_type, long long size) {
+  static const char pending_url[] =
+      "https://api.telegram.org/file/botPENDING/pending";
+  TgInboundMedia *media;
+  FcMediaDescriptor descriptor;
+  char validation_error[128];
+  if (!out || !file_id || !file_id[0] || !id || !id[0] || !filename ||
+      !filename[0] || !media_type || !media_type[0] || size <= 0 ||
+      (uint64_t)size > TG_FILE_FETCH_MAX_BYTES ||
+      out->media_count >= TG_INBOUND_MEDIA_MAX ||
+      (uint64_t)size > FC_MEDIA_MAX_TOTAL_BYTES - out->media_bytes)
+    return -1;
+  media = &out->media[out->media_count];
+  if (snprintf(media->file_id, sizeof(media->file_id), "%s", file_id) >=
+          (int)sizeof(media->file_id) ||
+      snprintf(media->id, sizeof(media->id), "%s", id) >=
+          (int)sizeof(media->id) ||
+      snprintf(media->filename, sizeof(media->filename), "%s", filename) >=
+          (int)sizeof(media->filename) ||
+      snprintf(media->media_type, sizeof(media->media_type), "%s",
+               media_type) >= (int)sizeof(media->media_type))
+    return -1;
+  memset(&descriptor, 0, sizeof(descriptor));
+  descriptor.id = media->id;
+  descriptor.filename = media->filename;
+  descriptor.media_type = media->media_type;
+  descriptor.size_bytes = (uint64_t)size;
+  descriptor.source_url = pending_url;
+  if (fc_media_manifest_validate_descriptor(
+          &descriptor, validation_error, sizeof(validation_error)) != 0)
+    return -1;
+  media->size_bytes = (uint64_t)size;
+  out->media_bytes += media->size_bytes;
+  out->media_count++;
+  return 0;
+}
 
-  if (json_ref_object_get_string(msg, "text", text, sizeof(text)) != 0 ||
-      !text[0])
-    return 0; /* non-text update: not v1 traffic */
-  if (json_ref_object_get_object(msg, "chat", &chat) != 0) return 0;
-  if (json_ref_object_get_long(&chat, "id", &numeric) != 0) return 0;
-  snprintf(chat_id, sizeof(chat_id), "%lld", numeric);
-  (void)json_ref_object_get_string(&chat, "type", chat_type,
-                                   sizeof(chat_type));
+int tg_parse_inbound_message(const JsonRef *msg, TgInboundMessage *out) {
+  JsonRef chat, from, photo, document;
+  long long numeric = 0;
+  if (!msg || !out || msg->type != JSON_REF_OBJECT) return -1;
+  memset(out, 0, sizeof(*out));
+  if (json_ref_object_get_string(msg, "caption", out->text,
+                                 sizeof(out->text)) != 0)
+    (void)json_ref_object_get_string(msg, "text", out->text,
+                                     sizeof(out->text));
+  if (json_ref_object_get_object(msg, "chat", &chat) != 0 ||
+      json_ref_object_get_long(&chat, "id", &numeric) != 0)
+    return -1;
+  snprintf(out->chat_id, sizeof(out->chat_id), "%lld", numeric);
+  (void)json_ref_object_get_string(&chat, "type", out->chat_type,
+                                   sizeof(out->chat_type));
   if (json_ref_object_get_object(msg, "from", &from) == 0) {
-    (void)json_ref_object_get_bool(&from, "is_bot", &is_bot);
+    (void)json_ref_object_get_bool(&from, "is_bot", &out->author_is_bot);
     if (json_ref_object_get_long(&from, "id", &numeric) == 0)
-      snprintf(user_id, sizeof(user_id), "%lld", numeric);
+      snprintf(out->user_id, sizeof(out->user_id), "%lld", numeric);
   }
   if (json_ref_object_get_long(msg, "message_id", &numeric) == 0)
-    snprintf(message_id, sizeof(message_id), "%lld", numeric);
+    snprintf(out->message_id, sizeof(out->message_id), "%lld", numeric);
 
-  if (is_bot && !a->allow_bots) {
+  if (json_ref_object_get_array(msg, "photo", &photo) == 0) {
+    size_t count = json_ref_array_size(&photo);
+    JsonRef largest;
+    char file_id[TG_FILE_ID_MAX] = "";
+    char unique_id[FC_MEDIA_ID_MAX] = "";
+    char filename[FC_MEDIA_FILENAME_MAX] = "";
+    long long size = 0;
+    if (count == 0U ||
+        json_ref_array_get(&photo, count - 1U, &largest) != 0 ||
+        largest.type != JSON_REF_OBJECT ||
+        json_ref_object_get_string(&largest, "file_id", file_id,
+                                   sizeof(file_id)) != 0 ||
+        json_ref_object_get_string(&largest, "file_unique_id", unique_id,
+                                   sizeof(unique_id)) != 0 ||
+        json_ref_object_get_long(&largest, "file_size", &size) != 0 ||
+        snprintf(filename, sizeof(filename), "telegram-photo-%s.jpg",
+                 unique_id) >= (int)sizeof(filename) ||
+        tg_add_media(out, file_id, unique_id, filename, "image/jpeg", size) !=
+            0)
+      return -1;
+  }
+
+  if (json_ref_object_get_object(msg, "document", &document) == 0) {
+    char file_id[TG_FILE_ID_MAX] = "";
+    char unique_id[FC_MEDIA_ID_MAX] = "";
+    char filename[FC_MEDIA_FILENAME_MAX] = "";
+    char media_type[FC_MEDIA_TYPE_MAX] = "application/octet-stream";
+    long long size = 0;
+    if (json_ref_object_get_string(&document, "file_id", file_id,
+                                   sizeof(file_id)) != 0 ||
+        json_ref_object_get_string(&document, "file_unique_id", unique_id,
+                                   sizeof(unique_id)) != 0 ||
+        json_ref_object_get_long(&document, "file_size", &size) != 0)
+      return -1;
+    if (json_ref_object_get_string(&document, "file_name", filename,
+                                   sizeof(filename)) != 0 &&
+        snprintf(filename, sizeof(filename), "telegram-document-%s.bin",
+                 unique_id) >= (int)sizeof(filename))
+      return -1;
+    (void)json_ref_object_get_string(&document, "mime_type", media_type,
+                                     sizeof(media_type));
+    if (tg_add_media(out, file_id, unique_id, filename, media_type, size) != 0)
+      return -1;
+  }
+  return (out->text[0] || out->media_count > 0U) ? 0 : 1;
+}
+
+static int tg_publish_inbound(TgAdapter *a, const TgInboundMessage *msg) {
+  char context_id[128] = "";
+  char etext[TG_TEXT_MAX * 2], echat[128], ectx[256], eadapter[128];
+  char payload[TG_TEXT_MAX * 2 + FC_MEDIA_REF_JSON_SIZE + 1024];
+  char bus_id[BUS_ID_MAX];
+  int n;
+  if (!a || !msg) return -1;
+  if (msg->author_is_bot && !a->allow_bots) {
     (void)rt_narrate("telegram: dropped a bot-authored message in chat %s",
-                     chat_id);
+                     msg->chat_id);
     return 0;
   }
-  if (!tg_chat_allowed(a, chat_type, chat_id)) {
+  if (!tg_chat_allowed(a, msg->chat_type, msg->chat_id)) {
     (void)rt_narrate(
         "telegram: dropped a message from unallowed %s chat %s; fix: add it "
         "to channels.telegram.allowed_chat_ids (or set allow_dms)",
-        chat_type[0] ? chat_type : "unknown", chat_id);
+        msg->chat_type[0] ? msg->chat_type : "unknown", msg->chat_id);
     return 0;
   }
-  tg_context_id(chat_type, chat_id, user_id, context_id, sizeof(context_id));
+  tg_context_id(msg->chat_type, msg->chat_id, msg->user_id, context_id,
+                sizeof(context_id));
   if (!context_id[0]) return 0;
 
-  if (json_escape(text, etext, sizeof(etext)) != 0 ||
-      json_escape(chat_id, echat, sizeof(echat)) != 0 ||
+  if (json_escape(msg->text, etext, sizeof(etext)) != 0 ||
+      json_escape(msg->chat_id, echat, sizeof(echat)) != 0 ||
       json_escape(context_id, ectx, sizeof(ectx)) != 0 ||
       json_escape(a->module_id_buf, eadapter, sizeof(eadapter)) != 0)
-    return 0;
-  if (snprintf(payload, sizeof(payload),
-               "{\"text\":\"%s\",\"adapter_id\":\"%s\","
-               "\"context_id\":\"%s\","
-               "\"ref\":{\"chat_id\":\"%s\",\"message_id\":\"%s\"}}",
-               etext, eadapter, ectx, echat, message_id) >=
-      (int)sizeof(payload))
-    return 0;
+    return -1;
+  if (msg->media_count > 0U) {
+    FcMediaDescriptor descriptors[TG_INBOUND_MEDIA_MAX];
+    FcMediaManifestRef media_ref;
+    char media_json[FC_MEDIA_REF_JSON_SIZE];
+    char error[192] = "";
+    for (size_t i = 0; i < msg->media_count; ++i) {
+      descriptors[i].id = msg->media[i].id;
+      descriptors[i].filename = msg->media[i].filename;
+      descriptors[i].media_type = msg->media[i].media_type;
+      descriptors[i].size_bytes = msg->media[i].size_bytes;
+      descriptors[i].source_url = msg->media[i].source_url;
+    }
+    if (fc_media_manifest_write(descriptors, msg->media_count, &media_ref,
+                                error, sizeof(error)) != 0 ||
+        fc_media_manifest_ref_json(&media_ref, media_json,
+                                   sizeof(media_json)) != 0) {
+      (void)rt_narrate("telegram: media message rejected: %s",
+                       error[0] ? error : "manifest reference failed");
+      return -1;
+    }
+    n = snprintf(payload, sizeof(payload),
+                 "{\"text\":\"%s\",\"media\":%s,\"adapter_id\":\"%s\","
+                 "\"context_id\":\"%s\","
+                 "\"ref\":{\"chat_id\":\"%s\",\"message_id\":\"%s\"}}",
+                 etext, media_json, eadapter, ectx, echat, msg->message_id);
+  } else {
+    n = snprintf(payload, sizeof(payload),
+                 "{\"text\":\"%s\",\"adapter_id\":\"%s\","
+                 "\"context_id\":\"%s\","
+                 "\"ref\":{\"chat_id\":\"%s\",\"message_id\":\"%s\"}}",
+                 etext, eadapter, ectx, echat, msg->message_id);
+  }
+  if (n < 0 || (size_t)n >= sizeof(payload)) return -1;
   if (bus_publish("telegram", "user_message", payload, bus_id,
                   sizeof(bus_id)) != 0) {
     (void)rt_narrate("telegram: failed to publish inbound message");
     return -1;
   }
   return 1;
+}
+
+/* Returns 2 when file metadata must resolve before publication, 1 when
+ * published, 0 when judged-and-dropped, and -1 when publication failed. */
+static int tg_handle_message(TgAdapter *a, const JsonRef *msg,
+                             long long update_id) {
+  TgInboundMessage parsed;
+  int rc = tg_parse_inbound_message(msg, &parsed);
+  if (rc != 0) {
+    if (rc < 0)
+      (void)rt_narrate("telegram: dropped malformed or oversized media message");
+    return 0;
+  }
+  if ((parsed.author_is_bot && !a->allow_bots) ||
+      !tg_chat_allowed(a, parsed.chat_type, parsed.chat_id))
+    return tg_publish_inbound(a, &parsed);
+  if (parsed.media_count > 0U) {
+    if (a->pending.active) return -1;
+    memset(&a->pending, 0, sizeof(a->pending));
+    a->pending.active = 1;
+    a->pending.update_id = update_id;
+    a->pending.message = parsed;
+    return 2;
+  }
+  return tg_publish_inbound(a, &parsed);
 }
 
 /* Parse one getUpdates body and publish what it carries. */
@@ -357,16 +496,189 @@ static void tg_consume_updates(TgAdapter *a, const char *body) {
     if (json_ref_object_get_long(&item, "update_id", &update_id) != 0)
       continue;
     if (json_ref_object_get_object(&item, "message", &message) == 0) {
-      if (tg_publish_message(a, &message) < 0) {
+      int handled = tg_handle_message(a, &message, update_id);
+      if (handled < 0) {
         /* Publication failed: stop here and retry this update, rather than
          * acking past a message that never reached the bus. */
         break;
       }
+      if (handled == 2) break;
     }
     if (update_id >= highest) highest = update_id;
     /* The offset acks server-side; advance only past published work. */
     tg_offset_store(a, highest + 1);
   }
+}
+
+static int tg_file_path_is_safe(const char *path) {
+  const char *component;
+  if (!path || !path[0] || path[0] == '/' ||
+      strlen(path) >= FC_MEDIA_SOURCE_URL_MAX)
+    return 0;
+  component = path;
+  for (const char *p = path;; ++p) {
+    unsigned char ch = (unsigned char)*p;
+    if (ch == '/' || ch == '\0') {
+      size_t len = (size_t)(p - component);
+      if (len == 0U || (len == 1U && component[0] == '.') ||
+          (len == 2U && component[0] == '.' && component[1] == '.'))
+        return 0;
+      if (ch == '\0') break;
+      component = p + 1;
+      continue;
+    }
+    if (ch <= 32U || ch == 127U || ch == '\\' || ch == '?' || ch == '#')
+      return 0;
+  }
+  return 1;
+}
+
+static int tg_token_is_url_safe(const char *token) {
+  if (!token || !token[0] || strchr(token, '/') || strchr(token, '\\') ||
+      strchr(token, '?') || strchr(token, '#'))
+    return 0;
+  for (const char *p = token; *p; ++p) {
+    unsigned char ch = (unsigned char)*p;
+    if (ch <= 32U || ch == 127U) return 0;
+  }
+  return 1;
+}
+
+int tg_source_url_is_trusted(const char *url, const char *token) {
+  char prefix[FC_MEDIA_SOURCE_URL_MAX];
+  size_t prefix_len;
+  if (!url || !tg_token_is_url_safe(token)) return 0;
+  if (snprintf(prefix, sizeof(prefix),
+               "https://api.telegram.org/file/bot%s/", token) >=
+      (int)sizeof(prefix))
+    return 0;
+  prefix_len = strlen(prefix);
+  return strncmp(url, prefix, prefix_len) == 0 &&
+         tg_file_path_is_safe(url + prefix_len);
+}
+
+static int tg_adapter_source_url_is_trusted(const TgAdapter *a,
+                                            const char *url,
+                                            const char *token) {
+  char prefix[FC_MEDIA_SOURCE_URL_MAX];
+  size_t prefix_len;
+  const char *tg_test = getenv("FCLAW_TELEGRAM_TEST_ALLOW_LOOPBACK");
+  const char *media_test = getenv("FCLAW_MEDIA_TEST_ALLOW_LOOPBACK");
+  if (!a || !a->api_plain) return tg_source_url_is_trusted(url, token);
+  if (!tg_test || strcmp(tg_test, "1") != 0 || !media_test ||
+      strcmp(media_test, "1") != 0 || !tg_token_is_url_safe(token) ||
+      snprintf(prefix, sizeof(prefix), "http://%s/file/bot%s/",
+               a->api_host_header, token) >= (int)sizeof(prefix))
+    return 0;
+  prefix_len = strlen(prefix);
+  return strncmp(url, prefix, prefix_len) == 0 &&
+         tg_file_path_is_safe(url + prefix_len);
+}
+
+static int tg_build_file_request(TgAdapter *a) {
+  TgInboundMedia *media;
+  char token[8192];
+  char path[8704];
+  char escaped[TG_FILE_ID_MAX * 2];
+  char body[TG_FILE_ID_MAX * 2 + 32];
+  int rc = -1;
+  if (!a || !a->pending.active ||
+      a->pending.resolve_index >= a->pending.message.media_count)
+    return -1;
+  media = &a->pending.message.media[a->pending.resolve_index];
+  memset(token, 0, sizeof(token));
+  if (tg_resolve_token(a, token, sizeof(token)) != 0) goto done;
+  if (snprintf(path, sizeof(path), "/bot%s/getFile", token) >=
+          (int)sizeof(path) ||
+      json_escape(media->file_id, escaped, sizeof(escaped)) != 0 ||
+      snprintf(body, sizeof(body), "{\"file_id\":\"%s\"}", escaped) >=
+          (int)sizeof(body))
+    goto done;
+  rc = fc_http1_build_request(a->file.tx, sizeof(a->file.tx), "POST", path,
+                              a->api_host_header,
+                              "floofclaw/" FCLAW_VERSION, NULL,
+                              "application/json", body);
+  if (rc == 0) a->file.tx_len = strlen(a->file.tx);
+  secret_store_zero(path, sizeof(path));
+done:
+  secret_store_zero(token, sizeof(token));
+  return rc;
+}
+
+static int tg_resolve_file_result(TgAdapter *a, const char *body) {
+  JsonRef root, result;
+  TgInboundMedia *media;
+  FcMediaDescriptor descriptor;
+  char token[8192];
+  char file_path[FC_MEDIA_SOURCE_URL_MAX] = "";
+  char validation_error[192];
+  long long file_size = 0;
+  uint64_t new_total = 0U;
+  int ok = 0;
+  int rc = -1;
+  if (!a || !body || !a->pending.active ||
+      a->pending.resolve_index >= a->pending.message.media_count ||
+      json_ref_top_object(body, &root) != 0 ||
+      json_ref_object_get_bool(&root, "ok", &ok) != 0 || !ok ||
+      json_ref_object_get_object(&root, "result", &result) != 0 ||
+      json_ref_object_get_string(&result, "file_path", file_path,
+                                 sizeof(file_path)) != 0 ||
+      !tg_file_path_is_safe(file_path))
+    return -1;
+  media = &a->pending.message.media[a->pending.resolve_index];
+  if (json_ref_object_get_long(&result, "file_size", &file_size) == 0) {
+    if (file_size <= 0 || (uint64_t)file_size > TG_FILE_FETCH_MAX_BYTES)
+      return -1;
+    media->size_bytes = (uint64_t)file_size;
+  }
+  for (size_t i = 0; i < a->pending.message.media_count; ++i) {
+    if (a->pending.message.media[i].size_bytes >
+        FC_MEDIA_MAX_TOTAL_BYTES - new_total)
+      return -1;
+    new_total += a->pending.message.media[i].size_bytes;
+  }
+  memset(token, 0, sizeof(token));
+  if (tg_resolve_token(a, token, sizeof(token)) != 0) goto done;
+  if (a->api_plain) {
+    if (snprintf(media->source_url, sizeof(media->source_url),
+                 "http://%s/file/bot%s/%s", a->api_host_header, token,
+                 file_path) >= (int)sizeof(media->source_url))
+      goto done;
+  } else if (snprintf(media->source_url, sizeof(media->source_url),
+                      "https://api.telegram.org/file/bot%s/%s", token,
+                      file_path) >= (int)sizeof(media->source_url)) {
+    goto done;
+  }
+  if (!tg_adapter_source_url_is_trusted(a, media->source_url, token))
+    goto done;
+  memset(&descriptor, 0, sizeof(descriptor));
+  descriptor.id = media->id;
+  descriptor.filename = media->filename;
+  descriptor.media_type = media->media_type;
+  descriptor.size_bytes = media->size_bytes;
+  descriptor.source_url = media->source_url;
+  if (fc_media_manifest_validate_descriptor(
+          &descriptor, validation_error, sizeof(validation_error)) != 0)
+    goto done;
+  a->pending.message.media_bytes = new_total;
+  rc = 0;
+done:
+  secret_store_zero(token, sizeof(token));
+  return rc;
+}
+
+static int tg_publish_pending(TgAdapter *a) {
+  int rc;
+  long long next;
+  if (!a || !a->pending.active ||
+      a->pending.resolve_index < a->pending.message.media_count)
+    return -1;
+  rc = tg_publish_inbound(a, &a->pending.message);
+  if (rc != 1) return -1;
+  next = a->pending.update_id + 1;
+  memset(&a->pending, 0, sizeof(a->pending));
+  tg_offset_store(a, next);
+  return 0;
 }
 
 /* ----- reactor module ----- */
@@ -382,6 +694,8 @@ static int tg_collect_fds(FcReactorModule *m, FcPollSet *ps) {
   TgAdapter *a = (TgAdapter *)m->state;
   if (a->poll.fd >= 0 && a->poll.want)
     (void)fc_pollset_add(ps, a->poll.fd, a->poll.want, m, &a->poll);
+  if (a->file.fd >= 0 && a->file.want)
+    (void)fc_pollset_add(ps, a->file.fd, a->file.want, m, &a->file);
   if (a->send.fd >= 0 && a->send.want)
     (void)fc_pollset_add(ps, a->send.fd, a->send.want, m, &a->send);
   return 0;
@@ -435,19 +749,75 @@ static void tg_drive_poll(TgAdapter *a, int revents, uint64_t now_ms) {
   tg_conn_close(&a->poll);
 }
 
+static void tg_drive_file(TgAdapter *a, int revents, uint64_t now_ms) {
+  FcHttp1Response resp;
+  FcHttp1Status status;
+  int rc, closed;
+  if (!a || a->file.state == TG_CONN_IDLE) return;
+  if (tg_conn_drive(a, &a->file, revents, now_ms, "getFile") < 0) return;
+  if (a->file.state != TG_CONN_READING || !(revents & POLLIN)) return;
+  rc = tg_read(&a->file);
+  if (rc < 0) {
+    tg_conn_close(&a->file);
+    a->file.retry_after_ms = now_ms + TG_RETRY_MS;
+    return;
+  }
+  closed = rc > 0;
+  status = fc_http1_parse_response(a->file.rx, a->file.rx_len, a->body,
+                                   TG_BODY_MAX, &resp);
+  if (status == FC_HTTP1_NEED_MORE && !closed) return;
+  if (status != FC_HTTP1_DONE || resp.status != 200 ||
+      tg_resolve_file_result(a, a->body) != 0) {
+    (void)rt_narrate(
+        "telegram: getFile did not return safe downloadable metadata; retrying");
+    tg_conn_close(&a->file);
+    a->file.retry_after_ms = now_ms + TG_RETRY_MS;
+    return;
+  }
+  tg_conn_close(&a->file);
+  a->file.retry_after_ms = 0;
+  a->pending.resolve_index++;
+  if (a->pending.resolve_index >= a->pending.message.media_count &&
+      tg_publish_pending(a) != 0)
+    a->file.retry_after_ms = now_ms + TG_RETRY_MS;
+}
+
 static int tg_on_fd(FcReactorModule *m, int fd, int events, void *tag) {
   TgAdapter *a = (TgAdapter *)m->state;
   uint64_t now = fc_now_ms();
   (void)fd;
   if (tag == &a->poll) tg_drive_poll(a, events, now);
+  else if (tag == &a->file) tg_drive_file(a, events, now);
   else if (tag == &a->send) tg_drive_send(a, events, now);
   return 0;
 }
 
 static int tg_tick(FcReactorModule *m, uint64_t now_ms) {
   TgAdapter *a = (TgAdapter *)m->state;
+  /* A media-bearing update is not acknowledged until each getFile response
+   * has produced a trusted private manifest and bus publication succeeds.
+   * Do not issue another long poll while that update owns the offset. */
+  if (a->pending.active &&
+      a->pending.resolve_index >= a->pending.message.media_count &&
+      now_ms >= a->file.retry_after_ms) {
+    if (tg_publish_pending(a) != 0)
+      a->file.retry_after_ms = now_ms + TG_RETRY_MS;
+  }
+  if (a->pending.active &&
+      a->pending.resolve_index < a->pending.message.media_count &&
+      a->file.state == TG_CONN_IDLE && now_ms >= a->file.retry_after_ms) {
+    if (tg_conn_start(a, &a->file, now_ms) == 0 &&
+        a->file.state == TG_CONN_TCP && tg_build_file_request(a) != 0) {
+      (void)rt_narrate(
+          "telegram: could not build getFile; fix: set the bot token with "
+          "`fclaw auth set-stdin %s`", a->token_key);
+      tg_conn_close(&a->file);
+      a->file.retry_after_ms = now_ms + TG_RETRY_MS;
+    }
+  }
   /* Inbound: re-issue the long poll whenever nothing is in flight. */
-  if (a->poll.state == TG_CONN_IDLE && now_ms >= a->poll_next_ms) {
+  if (!a->pending.active && a->poll.state == TG_CONN_IDLE &&
+      now_ms >= a->poll_next_ms) {
     if (tg_conn_start(a, &a->poll, now_ms) == 0 &&
         a->poll.state == TG_CONN_TCP) {
       if (tg_build_poll_request(a) != 0) {
@@ -466,6 +836,13 @@ static int tg_tick(FcReactorModule *m, uint64_t now_ms) {
     tg_conn_close(&a->poll);
     a->poll.retry_after_ms = now_ms + TG_RETRY_MS;
   }
+  if (a->file.state == TG_CONN_READING &&
+      net_progress_timed_out(a->file.read_started_ms, now_ms,
+                             TG_PROGRESS_TIMEOUT_MS)) {
+    (void)rt_narrate("telegram: getFile made no progress; retrying");
+    tg_conn_close(&a->file);
+    a->file.retry_after_ms = now_ms + TG_RETRY_MS;
+  }
   /* Outbound: pick up new deliveries, then push the queue. */
   tg_drain_deliveries(a);
   if (a->send.state == TG_CONN_IDLE && tg_send_pending(a))
@@ -483,7 +860,9 @@ static int tg_tick(FcReactorModule *m, uint64_t now_ms) {
 static uint64_t tg_next_deadline(FcReactorModule *m, uint64_t now_ms) {
   TgAdapter *a = (TgAdapter *)m->state;
   uint64_t next = FC_NO_DEADLINE;
-  if (a->poll.state == TG_CONN_IDLE)
+  if (a->pending.active && a->file.state == TG_CONN_IDLE)
+    next = a->file.retry_after_ms > now_ms ? a->file.retry_after_ms : now_ms;
+  else if (!a->pending.active && a->poll.state == TG_CONN_IDLE)
     next = a->poll_next_ms > now_ms ? a->poll_next_ms : now_ms;
   if (a->out_count > 0 || a->send.state != TG_CONN_IDLE) return now_ms;
   return next;
@@ -493,6 +872,7 @@ static void tg_shutdown(FcReactorModule *m) {
   TgAdapter *a = (TgAdapter *)m->state;
   if (!a) return;
   tg_conn_close(&a->poll);
+  tg_conn_close(&a->file);
   tg_conn_close(&a->send);
 }
 
@@ -504,6 +884,7 @@ static int tg_load_config(TgAdapter *a) {
   int enabled = 0;
   memset(a, 0, sizeof(*a));
   a->poll.fd = -1;
+  a->file.fd = -1;
   a->send.fd = -1;
   a->tls_verify = 1;
   snprintf(a->api_host, sizeof(a->api_host), "%s", TG_HOST);
@@ -614,11 +995,13 @@ static FcReactorModule *tg_create(struct RtScheduler *sched,
     return NULL;
   }
   a->poll.rx = (char *)calloc(1, TG_RX_MAX);
+  a->file.rx = (char *)calloc(1, TG_RX_MAX);
   a->send.rx = (char *)calloc(1, TG_RX_MAX);
   a->body = (char *)calloc(1, TG_BODY_MAX);
   module = (FcReactorModule *)calloc(1, sizeof(*module));
-  if (!a->poll.rx || !a->send.rx || !a->body || !module) {
-    free(a->poll.rx); free(a->send.rx); free(a->body); free(module); free(a);
+  if (!a->poll.rx || !a->file.rx || !a->send.rx || !a->body || !module) {
+    free(a->poll.rx); free(a->file.rx); free(a->send.rx); free(a->body);
+    free(module); free(a);
     if (startup_error) *startup_error = 1;
     return NULL;
   }
@@ -641,8 +1024,10 @@ static void tg_destroy(FcReactorModule *module) {
   a = (TgAdapter *)module->state;
   if (a) {
     tg_conn_close(&a->poll);
+    tg_conn_close(&a->file);
     tg_conn_close(&a->send);
     free(a->poll.rx);
+    free(a->file.rx);
     free(a->send.rx);
     free(a->body);
     free(a);
@@ -675,6 +1060,7 @@ TgAdapter *tg_test_adapter_new(int allow_dms, int allow_bots,
   int i;
   if (!a) return NULL;
   a->poll.fd = -1;
+  a->file.fd = -1;
   a->send.fd = -1;
   a->enabled = 1;
   a->tls_verify = 1;
@@ -696,6 +1082,7 @@ TgAdapter *tg_test_adapter_new(int allow_dms, int allow_bots,
 void tg_test_adapter_free(TgAdapter *a) {
   if (!a) return;
   free(a->poll.rx);
+  free(a->file.rx);
   free(a->send.rx);
   free(a->body);
   free(a);

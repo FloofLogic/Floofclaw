@@ -40,13 +40,21 @@
           "safe",
           "dangerous"
         ],
-        "description": "Permission mode. Defaults to safe."
+        "description": "Permission mode for this start. Defaults to safe and cannot exceed the deployment's actions.manage_claude.max_permission_mode ceiling."
       }
     }
   },
   "exec": [
     "runtime",
     "fc_manage_claude()"
+  ],
+  "config": [
+    {
+      "name": "MAX_PERMISSION_MODE",
+      "key": "max_permission_mode",
+      "kind": "permission_mode_ceiling",
+      "required": false
+    }
   ],
   "timeout_ms": 0,
   "contract": "managed_operation",

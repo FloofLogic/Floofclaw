@@ -38,6 +38,7 @@
  *   harness_cli_tools(argc, argv, &out, &rc)
  *   harness_cli_channel(argc, argv, &out, &rc)
  *   harness_cli_usage(argc, argv, &out, &rc)
+ *   harness_cli_task(argc, argv, &out, &rc)
  *   harness_cli_replay(event_log_path, &state_out)
  *       — run an fclaw subcommand in-process, capture stdout, get its
  *         exit code. Replaces test_run_fclaw("view ...").
@@ -140,6 +141,7 @@ int harness_cli_cacheview(int argc, char **argv, char **stdout_out, int *exit_co
 int harness_cli_tools    (int argc, char **argv, char **stdout_out, int *exit_code);
 int harness_cli_channel  (int argc, char **argv, char **stdout_out, int *exit_code);
 int harness_cli_usage    (int argc, char **argv, char **stdout_out, int *exit_code);
+int harness_cli_task     (int argc, char **argv, char **stdout_out, int *exit_code);
 
 /* `fclaw replay <event-log-path>` — runs `rt_reduce_event_log_text`
  * over the file contents and returns the resulting state.json blob.

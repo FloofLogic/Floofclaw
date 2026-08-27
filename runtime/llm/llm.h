@@ -12,6 +12,12 @@
 #define LLM_RESP_MAX   65536
 #define LLM_PROMPT_MAX 65536
 
+/* Output tokens are not bytes, but four response bytes per requested token is
+ * the smallest safe local budget against the fixed 64 KiB response buffer.
+ * The transport still enforces LLM_RESP_MAX on the actual wire response. */
+#define LLM_DEFAULT_MAX_OUTPUT_TOKENS 4096
+#define LLM_MAX_OUTPUT_TOKENS         (LLM_RESP_MAX / 4)
+
 #define LLM_ERR_MODEL_OUTPUT_TOO_LARGE  -2
 
 #define LLM_MEDIA_ID_MAX       128
@@ -46,20 +52,19 @@ typedef struct {
   char id[LLM_ID_MAX];
   char provider[LLM_ID_MAX];
   char model[LLM_NAME_MAX];
-  char effort[LLM_ID_MAX];   /* optional; Gemini maps it to
-                              * thinkingConfig.thinkingLevel and OpenAI
-                              * Responses to reasoning.effort. Other current
-                              * transports load but do not send it. */
+  char effort[LLM_ID_MAX];   /* optional provider-native reasoning control */
+  int max_output_tokens;     /* 1..LLM_MAX_OUTPUT_TOKENS; defaults to 4096 */
 } LlmProfile;
 
 typedef struct {
   char id[LLM_ID_MAX];
-  char kind[LLM_ID_MAX];           /* "mock" | "http" | "openai_compat" | "openai_responses" | "gemini_key" */
-  char url[LLM_PATH_MAX];          /* http/openai_compat/openai_responses/gemini_key only */
-  char auth_endpoint[LLM_ID_MAX];  /* optional http/openai_compat/openai_responses/gemini_key auth route */
+  char kind[LLM_ID_MAX];           /* "mock" | "http" | "openai_chat" | "openai_compat" | "openai_responses" | "gemini_key" */
+  char url[LLM_PATH_MAX];          /* HTTP provider kinds only */
+  char auth_endpoint[LLM_ID_MAX];  /* optional HTTP-provider auth route */
   char auth_env[LLM_ID_MAX];       /* optional env-var fallback for auth */
   int rpm_limit;                   /* <= 0 blocks immediately, < 0 means unlimited */
   int daily_limit;                 /* <= 0 blocks immediately, < 0 means unlimited */
+  double daily_usd_limit;          /* 0 blocks; < 0 means no local cost cap */
 } LlmProvider;
 
 typedef struct {
@@ -106,6 +111,8 @@ typedef struct {
  * config/model_profiles.json and config/llm_registry.json; both are
  * overridable via the FCLAW_MODEL_PROFILES / FCLAW_LLM_REGISTRY env vars. */
 int llm_load_profile(const char *profile_id, LlmProfile *out);
+int llm_load_profile_with_error(const char *profile_id, LlmProfile *out,
+                                char *err, size_t err_len);
 int llm_load_provider(const char *provider_id, LlmProvider *out);
 
 /* Resolve a profile through its provider and authentication preconditions.

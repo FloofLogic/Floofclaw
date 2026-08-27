@@ -8,6 +8,8 @@ BUILD_REVISION ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown
 # its own library detection once instead of inheriting an already-augmented
 # set and appending a second copy of everything.
 FCLAW_BASE_CFLAGS := $(CFLAGS)
+FCLAW_BASE_LDFLAGS := $(LDFLAGS)
+BUILD_PROFILE ?= o2
 
 # Everything below is appended with `override`. A plain `+=` after a
 # command-line `CFLAGS=...` is silently discarded by make, which would drop
@@ -64,7 +66,6 @@ ifeq ($(strip $(OPENSSL_CFLAGS)),)
 endif
 endif
 override CFLAGS  += $(OPENSSL_CFLAGS)
-override LDFLAGS += $(OPENSSL_LIBS)
 
 # Optional libcurl — enables real HTTP LLM transport (runtime/llm/call.c).
 # Without it, the LLM call path returns -1 for every current non-mock provider
@@ -77,7 +78,6 @@ CURL_LIBS   ?= $(shell curl-config --libs 2>/dev/null || pkg-config --libs libcu
 endif
 ifneq ($(strip $(CURL_LIBS)),)
   override CFLAGS  += -DFCLAW_HAVE_LIBCURL $(CURL_CFLAGS)
-  override LDFLAGS += $(CURL_LIBS)
 else ifeq ($(strip $(MOCK_ONLY)),1)
   $(info FloofClaw: MOCK_ONLY=1 — building without libcurl or OpenSSL.)
   $(info   Mock providers and local execution work; every network provider and TLS channel refuses to start.)
@@ -90,6 +90,7 @@ brew install curl (macOS). If your headers are elsewhere, pass \
 CURL_CFLAGS='-I.../include' CURL_LIBS='-L.../lib -lcurl'. To build the \
 mock-only runtime deliberately, run: make MOCK_ONLY=1)
 endif
+override LDFLAGS += $(CURL_LIBS) $(OPENSSL_LIBS)
 
 SUPPORT_SRC = \
 	runtime/fjson_repair/repair.c \
@@ -119,6 +120,7 @@ LLM_SRC = \
 	runtime/llm/profile.c \
 	runtime/llm/mock.c \
 	runtime/llm/usage.c \
+	runtime/llm/pricing.c \
 	runtime/llm/normalize.c \
 	runtime/llm/call.c \
 	runtime/llm/provider_limit.c \
@@ -244,6 +246,7 @@ RUNTIME_SRC = \
 	runtime/task_json.c \
 	runtime/task_archive.c \
 	runtime/task_projection.c \
+	runtime/task_cli.c \
 	runtime/agents.c \
 	runtime/native_agents/noop.c \
 	runtime/native_agents/memory.c \
@@ -306,6 +309,7 @@ RUNTIME_HDRS = \
 	runtime/secure/auth_targets.h \
 	runtime/secure/auth.h \
 	runtime/llm/llm.h \
+	runtime/llm/pricing.h \
 	runtime/llm/request.h \
 	runtime/llm/media.h \
 	runtime/llm/provider_limit.h \
@@ -399,7 +403,8 @@ FORCE:
 
 bin/fclaw: $(RUNTIME_SRC) $(RUNTIME_HDRS)
 	@mkdir -p bin
-	$(CC) $(CFLAGS) $(LDFLAGS) $(RUNTIME_SRC) -o $@
+	$(CC) $(CFLAGS) $(RUNTIME_SRC) $(LDFLAGS) -o $@
+	@printf 'profile=%s\nadapters=%s\n' '$(BUILD_PROFILE)' '$(ADAPTER_NAMES)' > bin/fclaw.build
 
 # The gateway binary the shell gates drive when they need every channel
 # compiled in, whatever FCLAW_ADAPTERS selected for bin/fclaw. Same rule as
@@ -408,31 +413,31 @@ bin/fclaw: $(RUNTIME_SRC) $(RUNTIME_HDRS)
 RUNTIME_ALL_SRC := $(filter-out $(ADAPTER_SRC) $(ADAPTER_REGISTRY),$(RUNTIME_SRC)) $(ADAPTER_ALL_SRC) $(ADAPTER_REGISTRY_ALL)
 bin/fclaw_test_all: $(RUNTIME_ALL_SRC) $(RUNTIME_HDRS)
 	@mkdir -p bin
-	$(CC) $(CFLAGS) $(LDFLAGS) $(RUNTIME_ALL_SRC) -o $@
+	$(CC) $(CFLAGS) $(RUNTIME_ALL_SRC) $(LDFLAGS) -o $@
 
-bin/fclaw_unit_tests: $(UNIT_TEST_SRC) runtime/fjson_repair/repair.c runtime/support/json.c runtime/support/fsutil.c runtime/support/duration.c runtime/support/heap_guard.c runtime/support/reconnect_backoff.c runtime/support/http1.c runtime/support/net_tls.c runtime/llm/normalize.c runtime/llm/profile.c runtime/llm/request.c runtime/llm/stream.c runtime/llm/provider_limit.c runtime/llm/usage.c runtime/secure/auth.c runtime/secure/auth_targets.c runtime/secure/secret_store.c runtime/secure/action_secret_broker.c
+bin/fclaw_unit_tests: $(UNIT_TEST_SRC) runtime/fjson_repair/repair.c runtime/support/json.c runtime/support/fsutil.c runtime/support/duration.c runtime/support/heap_guard.c runtime/support/reconnect_backoff.c runtime/support/http1.c runtime/support/net_tls.c runtime/llm/normalize.c runtime/llm/profile.c runtime/llm/request.c runtime/llm/stream.c runtime/llm/provider_limit.c runtime/llm/pricing.c runtime/llm/usage.c runtime/secure/auth.c runtime/secure/auth_targets.c runtime/secure/secret_store.c runtime/secure/action_secret_broker.c
 	@mkdir -p bin
-	$(CC) $(CFLAGS) $(LDFLAGS) -Itests \
+	$(CC) $(CFLAGS) -Itests \
 		-DTEST_REGISTRY_INC='"test_registry_unit.inc"' \
 		-DDEFAULT_BUDGET_MS=100 \
-		$(UNIT_TEST_SRC) runtime/fjson_repair/repair.c runtime/support/json.c runtime/support/fsutil.c runtime/support/duration.c runtime/support/heap_guard.c runtime/support/reconnect_backoff.c runtime/support/http1.c runtime/support/net_tls.c runtime/llm/normalize.c runtime/llm/profile.c runtime/llm/request.c runtime/llm/stream.c runtime/llm/provider_limit.c runtime/llm/usage.c runtime/secure/auth.c runtime/secure/auth_targets.c runtime/secure/secret_store.c runtime/secure/action_secret_broker.c runtime/action_coerce.c -o $@
+		$(UNIT_TEST_SRC) runtime/fjson_repair/repair.c runtime/support/json.c runtime/support/fsutil.c runtime/support/duration.c runtime/support/heap_guard.c runtime/support/reconnect_backoff.c runtime/support/http1.c runtime/support/net_tls.c runtime/llm/normalize.c runtime/llm/profile.c runtime/llm/request.c runtime/llm/stream.c runtime/llm/provider_limit.c runtime/llm/pricing.c runtime/llm/usage.c runtime/secure/auth.c runtime/secure/auth_targets.c runtime/secure/secret_store.c runtime/secure/action_secret_broker.c runtime/action_coerce.c $(LDFLAGS) -o $@
 
 bin/fclaw_integration_tests: $(INTEGRATION_TEST_SRC) $(INTEGRATION_RUNTIME_SRC) $(RUNTIME_HDRS)
 	@mkdir -p bin
-	$(CC) $(CFLAGS) $(LDFLAGS) -Itests \
+	$(CC) $(CFLAGS) -Itests \
 		-DTEST_REGISTRY_INC='"test_registry_integration.inc"' \
 		-DDEFAULT_BUDGET_MS=300 \
-		$(INTEGRATION_TEST_SRC) $(INTEGRATION_RUNTIME_SRC) -o $@
+		$(INTEGRATION_TEST_SRC) $(INTEGRATION_RUNTIME_SRC) $(LDFLAGS) -o $@
 
 bin/fclaw_chaos_check: tests/chaos/check.c runtime/state.c runtime/support/json.c runtime/support/fsutil.c runtime/support/heap_guard.c runtime/runtime.h runtime/support/json.h runtime/support/fsutil.h runtime/support/heap_guard.h
 	@mkdir -p bin
-	$(CC) $(CFLAGS) $(LDFLAGS) tests/chaos/check.c runtime/state.c \
-		runtime/support/json.c runtime/support/fsutil.c runtime/support/heap_guard.c -o $@
+	$(CC) $(CFLAGS) tests/chaos/check.c runtime/state.c \
+		runtime/support/json.c runtime/support/fsutil.c runtime/support/heap_guard.c $(LDFLAGS) -o $@
 
 bin/fclaw_thrash_driver: tests/thrash/driver.c runtime/bus/bus.c runtime/support/json.c runtime/support/fsutil.c runtime/support/heap_guard.c runtime/runtime.h runtime/runtime_kernel.h runtime/bus/bus.h runtime/support/json.h runtime/support/fsutil.h runtime/support/heap_guard.h
 	@mkdir -p bin
-	$(CC) $(CFLAGS) $(LDFLAGS) tests/thrash/driver.c runtime/bus/bus.c \
-		runtime/support/json.c runtime/support/fsutil.c runtime/support/heap_guard.c -o $@
+	$(CC) $(CFLAGS) tests/thrash/driver.c runtime/bus/bus.c \
+		runtime/support/json.c runtime/support/fsutil.c runtime/support/heap_guard.c $(LDFLAGS) -o $@
 
 bin/fclaw_local_client_probe: tests/local_client_probe.c
 	@mkdir -p bin
@@ -442,27 +447,30 @@ unit: bin/fclaw_unit_tests
 	./tests/run_in_isolated_copy.sh ./bin/fclaw_unit_tests
 
 integration: build bin/fclaw_integration_tests
-	./tests/run_in_isolated_copy.sh ./bin/fclaw_integration_tests
+	./tests/run_integration_parallel.sh
 	./tests/test_fixture_isolation.sh
 
-test: unit integration bin/fclaw_local_client_probe bin/fclaw_test_all
-	./tests/run_in_isolated_copy.sh bash ./tests/test_cli_output_modes.sh
-	./tests/run_in_isolated_copy.sh bash ./tests/test_version_contract.sh
-	./tests/run_in_isolated_copy.sh ./tests/test_local_client_api.sh
-	./tests/run_in_isolated_copy.sh bash ./tests/test_action_cli.sh
-	./tests/run_in_isolated_copy.sh bash ./tests/test_config_cli.sh
-	./tests/run_in_isolated_copy.sh bash ./tests/test_bus_typed_ingress.sh
+test:
+	$(MAKE) -j4 build bin/fclaw_unit_tests bin/fclaw_integration_tests bin/fclaw_local_client_probe bin/fclaw_test_all
+	./tests/run_in_isolated_copy.sh ./bin/fclaw_unit_tests
+	./tests/run_integration_parallel.sh
+	./tests/test_fixture_isolation.sh
+	./tests/run_contracts_parallel.sh
+	./tests/smoke_lookup_and_poem.sh
+
+# These contracts deliberately rebuild with different feature selections.
+# Keep them out of the sub-minute developer loop, but in release and deep
+# robustness gates through test-full.
+test-build-contracts:
 	./tests/run_in_isolated_copy.sh bash ./tests/test_mock_only_build_contract.sh
 	./tests/run_in_isolated_copy.sh bash ./tests/test_adapter_selection.sh
-	./tests/run_in_isolated_copy.sh bash ./tests/test_web_read_action.sh
-	./tests/run_in_isolated_copy.sh bash ./tests/test_tokenwatch_app.sh
-	./tests/run_in_isolated_copy.sh bash ./tests/test_managed_handle_restart.sh
-	./tests/run_in_isolated_copy.sh bash ./tests/test_manage_hermes_completion.sh
-	./tests/run_in_isolated_copy.sh bash ./tests/test_telegram_transport.sh
-	./tests/run_in_isolated_copy.sh bash ./tests/test_mcp_generation.sh
-	./tests/run_in_isolated_copy.sh bash ./tests/test_action_sandbox.sh
 	./tests/run_in_isolated_copy.sh ./tests/test_android_arm64_build_contract.sh
-	./tests/smoke_lookup_and_poem.sh
+	./tests/run_in_isolated_copy.sh bash ./tests/test_release_small_build_contract.sh
+	./tests/run_in_isolated_copy.sh bash ./tests/test_release_packaging.sh
+
+test-full:
+	$(MAKE) test
+	$(MAKE) test-build-contracts
 
 test-small-stack:
 	@bash -c 'ulimit -s 1024; exec $(MAKE) test'
@@ -470,8 +478,10 @@ test-small-stack:
 # Built from the base flags, not the augmented ones: the sub-make appends
 # its own detected defines and libraries with `override`, so re-passing them
 # here would define FCLAW_BUILD_REVISION twice with two different values.
-SANITIZER_CFLAGS = $(filter-out -O%,$(FCLAW_BASE_CFLAGS)) -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined
-SANITIZER_LDFLAGS = -fsanitize=address,undefined
+ASAN_CFLAGS = $(filter-out -O%,$(FCLAW_BASE_CFLAGS)) -O1 -g -fno-omit-frame-pointer -fsanitize=address
+ASAN_LDFLAGS = -fsanitize=address
+UBSAN_CFLAGS = $(filter-out -O%,$(FCLAW_BASE_CFLAGS)) -O1 -g -fno-omit-frame-pointer -fsanitize=undefined -fno-sanitize-recover=undefined
+UBSAN_LDFLAGS = -fsanitize=undefined -fno-sanitize-recover=undefined
 
 # libFuzzer needs a clang that ships the fuzzer runtime. Apple clang
 # does NOT; install real LLVM (`brew install llvm`) and build with
@@ -543,13 +553,20 @@ thrash: build bin/fclaw_integration_tests bin/fclaw_thrash_driver
 
 asan:
 	$(MAKE) clean
-	$(MAKE) test CFLAGS='$(SANITIZER_CFLAGS)' LDFLAGS='$(SANITIZER_LDFLAGS)'
+	@status=0; \
+	  FCLAW_TEST_BUDGET_SCALE=4 $(MAKE) test \
+	    CFLAGS='$(ASAN_CFLAGS)' LDFLAGS='$(ASAN_LDFLAGS)' || status=$$?; \
+	  if [ $$status -ne 0 ]; then $(MAKE) clean; exit $$status; fi
 
 ubsan:
 	$(MAKE) clean
-	$(MAKE) test CFLAGS='$(SANITIZER_CFLAGS)' LDFLAGS='$(SANITIZER_LDFLAGS)'
+	@status=0; \
+	  FCLAW_TEST_BUDGET_SCALE=4 $(MAKE) test \
+	    CFLAGS='$(UBSAN_CFLAGS)' LDFLAGS='$(UBSAN_LDFLAGS)' || status=$$?; \
+	  if [ $$status -ne 0 ]; then $(MAKE) clean; exit $$status; fi
 
 robustness:
+	$(MAKE) test-build-contracts
 	$(MAKE) asan
 	$(MAKE) ubsan
 	$(MAKE) clean
@@ -560,7 +577,7 @@ robustness:
 	$(MAKE) thrash
 	$(MAKE) clean
 	$(MAKE) build
-	@printf 'robustness: PASS asan ubsan test-small-stack fuzz chaos disk-full thrash\n'
+	@printf 'robustness: PASS test-build-contracts asan ubsan test-small-stack fuzz chaos disk-full thrash\n'
 
 live-smoke: build
 	./tests/live_provider_smoke.sh
@@ -570,6 +587,7 @@ clean:
 	rm -f $(FUZZ_BINS)
 	rm -f bin/actioncore bin/llm-call bin/jf bin/fclaw_setup bin/fclaw_auth
 	rm -f bin/.DS_Store
+	rm -f bin/fclaw.build
 
 # Strip the production binary. `make metrics` copies and strips without
 # modifying the developer binary and is the canonical release measurement.
@@ -581,6 +599,29 @@ release: build
 	@ls -la bin/fclaw
 	@printf '\nsize bin/fclaw:\n'
 	@size bin/fclaw 2>/dev/null || true
+
+# The distributed binary favors minimum auditable surface and ships every
+# built-in adapter. Section GC is platform spelling only; the profile and
+# 900 KiB stripped ceiling are otherwise identical on supported hosts.
+RELEASE_SMALL_ADAPTERS ?= all
+RELEASE_SMALL_MAX_BYTES ?= 921600
+ifeq ($(shell uname -s),Darwin)
+RELEASE_SMALL_GC_LDFLAG = -Wl,-dead_strip
+else
+RELEASE_SMALL_GC_LDFLAG = -Wl,--gc-sections
+endif
+RELEASE_SMALL_CFLAGS = $(filter-out -O%,$(FCLAW_BASE_CFLAGS)) -Oz -flto -ffunction-sections -fdata-sections
+RELEASE_SMALL_LDFLAGS = $(FCLAW_BASE_LDFLAGS) -flto $(RELEASE_SMALL_GC_LDFLAG)
+
+release-small:
+	$(MAKE) clean
+	$(MAKE) build BUILD_PROFILE=release-small FCLAW_ADAPTERS='$(RELEASE_SMALL_ADAPTERS)' CFLAGS='$(RELEASE_SMALL_CFLAGS)' LDFLAGS='$(RELEASE_SMALL_LDFLAGS)'
+	strip bin/fclaw
+	@bytes=$$(wc -c < bin/fclaw | tr -d ' '); \
+	  if [ "$$bytes" -gt '$(RELEASE_SMALL_MAX_BYTES)' ]; then \
+	    printf 'release-small: %s bytes exceeds %s-byte gate\n' "$$bytes" '$(RELEASE_SMALL_MAX_BYTES)' >&2; exit 1; \
+	  fi; \
+	  printf 'release-small: PASS %s bytes <= %s adapters=%s\n' "$$bytes" '$(RELEASE_SMALL_MAX_BYTES)' '$(RELEASE_SMALL_ADAPTERS)'
 
 metrics: build
 	./scripts/metrics.sh
@@ -595,10 +636,12 @@ help:
 	@printf '%s\n' \
 	  'make build          Build bin/fclaw' \
 	  'make test           Run the routine hermetic release gate' \
+	  'make test-full      Add rebuild/feature-selection contracts' \
 	  'make metrics        Print reproducible release measurements' \
 	  'make public-check   Check a public source checkout' \
 	  'make release-check  Assemble and fully test the public candidate' \
+	  'make release-small  Build the stripped all-adapter size-gated binary' \
 	  'make robustness     Run the long major-release/deep-engine gate' \
 	  'make clean          Remove generated binaries'
 
-.PHONY: all build unit integration test test-small-stack asan ubsan fuzz-build fuzz chaos disk-full thrash robustness live-smoke release metrics public-check release-check help clean
+.PHONY: all build unit integration test test-build-contracts test-full test-small-stack asan ubsan fuzz-build fuzz chaos disk-full thrash robustness live-smoke release release-small metrics public-check release-check help clean

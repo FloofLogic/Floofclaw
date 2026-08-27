@@ -157,7 +157,10 @@ static int replay_run_log(RtRun *r, int *out_inbound, int *out_terminal,
   if (!r || !out_inbound || !out_terminal || !out_terminal_state) return -1;
   r->ctx.next_event = 1;
   r->ctx.next_delivery = 1;
-  rt_event_log_path(&r->ctx, path, sizeof(path));
+  if (rt_event_log_path(&r->ctx, path, sizeof(path)) != 0) {
+    if (err) snprintf(err, err_len, "recovery: event log path is too long");
+    return -1;
+  }
   if (fs_truncate_incomplete_line(path) != 0) {
     if (err) snprintf(err, err_len, "recovery: torn-tail repair failed for %s", path);
     return -1;

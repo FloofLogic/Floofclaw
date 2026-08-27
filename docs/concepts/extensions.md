@@ -191,6 +191,13 @@ channel adapter instead when you are connecting a human conversation surface,
 and write an action when you want FloofClaw to *cause* an effect rather than
 be told about one.
 
+An external integration may still implement a conversation without becoming
+a native adapter: publish `user_message` with a conversation context and an
+opaque reply `ref`, then consume only deliveries matching its exact `channel`
+and `adapter_id`. It owns that complete boundary—publication, delivery,
+cursor/recovery state, last-mile transport, and OS supervision. Core does not
+ship a partial email, iMessage, or other transport bridge.
+
 See [`fclaw bus publish --type`](../reference/cli.md#--type-typed-event-ingress)
 for the full flag, bound, and exit-code contract, and
 [gating a custom event kind](floops.md#gating-a-custom-event-kind) for the

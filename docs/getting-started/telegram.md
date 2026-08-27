@@ -117,12 +117,35 @@ memory and its own serialization lane:
 Nothing recalls another conversation's history: what someone says in a DM is
 not visible from a group.
 
+## Attachments and model media
+
+Telegram photo-only, document-only, and caption-plus-media messages use the
+same `user_message` path as text. For a Telegram photo, FloofClaw selects the
+largest rendition in `message.photo[]`; for a document, it keeps Telegram's
+filename and MIME type. The caption becomes the model-visible text. Bot API
+downloads are limited to 20 MiB per file.
+
+Telegram returns only a `file_id` with the update. Before acknowledging that
+update, the adapter resolves it through `getFile`, restricts the result to
+Telegram's exact `https://api.telegram.org/file/bot…/` download path, and
+publishes a private content-addressed manifest. The token-bearing URL is never
+put on the bus or in gateway/run artifacts. The bounded LLM child—not the
+gateway reactor—downloads the bytes, with redirects disabled and the declared
+size and MIME type checked. A crash before publication leaves the offset
+unchanged, so Telegram replays the update rather than losing it.
+
+Media capability remains provider-dependent. Gemini profiles accept images,
+PDFs, audio, and video through the generic media contract; OpenAI-style
+profiles accept images. An unsupported provider/MIME pairing or a failed file
+resolution fails visibly rather than silently continuing with text alone.
+
 ## What v1 does not do
 
 Stated so you do not go looking:
 
-- **Media** — inbound photos, documents, and voice notes are ignored. Only
-  text messages become events.
+- **Other Telegram media types** — photos and documents are supported;
+  stickers, voice notes, video notes, and Telegram media groups are not yet
+  assembled into richer turns.
 - **Editing and typing indicators** — replies are plain `sendMessage`.
 - **Inline keyboards and callbacks** — not wired.
 - **Webhooks** — long polling only. No public URL or TLS termination
@@ -137,6 +160,11 @@ and a missing token each say so by name.
 
 **`could not build getUpdates`.** The token is not in the auth store under
 the configured `token_key`. Re-run the `auth set-stdin` step.
+
+**A photo or document turn fails before a model response.** Check the run's
+agent stderr and `workspace/logs/narration.jsonl`. An oversized file, a failed
+or unsafe `getFile` result, or a provider/MIME pair without a native
+representation is rejected rather than silently omitting the attachment.
 
 **Rate limited.** The adapter honours Telegram's own `retry_after` and keeps
 the message queued; it does not drop replies to back off.

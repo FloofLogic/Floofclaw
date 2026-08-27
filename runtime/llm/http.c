@@ -518,7 +518,8 @@ int llm_http_call(const LlmProfile *profile, const LlmProvider *provider,
       if (extract_rc == 0)
         snprintf(model_text, sizeof(model_text), "%s",
                  gemini_stream->model_text);
-    } else if (strcmp(provider->kind, "openai_compat") == 0) {
+    } else if (strcmp(provider->kind, "openai_chat") == 0 ||
+               strcmp(provider->kind, "openai_compat") == 0) {
       extract_rc = extract_openai_compat_text(resp.buf ? resp.buf : "", model_text, sizeof(model_text));
     } else if (strcmp(provider->kind, "openai_responses") == 0) {
       extract_rc = extract_openai_responses_text(resp.buf ? resp.buf : "", model_text, sizeof(model_text));

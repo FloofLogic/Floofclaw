@@ -64,7 +64,13 @@
   "actions": {
     "manage_codex": {
       "_allowed_project_root_note": "Optional absolute existing directory. Only calls with root=project use it; workspace remains the default.",
-      "allowed_project_root": "/absolute/app-private/projects"
+      "allowed_project_root": "/absolute/app-private/projects",
+      "_max_permission_mode_note": "Deployment ceiling for model-selected worker permissions. Keep safe unless this worker is explicitly trusted to bypass sandboxing and approvals.",
+      "max_permission_mode": "safe"
+    },
+    "manage_claude": {
+      "_max_permission_mode_note": "Deployment ceiling for model-selected worker permissions. Keep safe unless this worker is explicitly trusted to bypass permission checks.",
+      "max_permission_mode": "safe"
     }
   },
   "channels": {

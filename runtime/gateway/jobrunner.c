@@ -63,6 +63,33 @@ static void unlink_job(RtJobRunner *r, RtJob *job) {
   }
 }
 
+static int out_partial_path(const RtJob *job, char *out, size_t out_len) {
+  if (!job || !out) return -1;
+  return snprintf(out, out_len, "%s.partial", job->out_path) >= (int)out_len ? -1 : 0;
+}
+
+/* Close the drained stdout artifact and move it into its final name. Every
+ * close path takes this route except a launch failure, which unlinks.
+ * One child owns its output file itself: the llm executor's
+ * `internal agent-llm --out <out_path>` writes the response there and prints
+ * nothing on stdout, so an empty tee must never replace a file that already
+ * exists -- that is the child's work, not a torn artifact. */
+static void finalize_out_file(RtJob *job) {
+  char partial[PATH_MAX];
+  struct stat st;
+  if (!job || !job->out_file) return;
+  fflush(job->out_file);
+  fclose(job->out_file);
+  job->out_file = NULL;
+  if (out_partial_path(job, partial, sizeof(partial)) != 0) return;
+  if (stat(partial, &st) == 0 && st.st_size == 0 &&
+      access(job->out_path, F_OK) == 0) {
+    (void)unlink(partial);
+    return;
+  }
+  (void)rename(partial, job->out_path);
+}
+
 static void close_pipes(RtJob *job) {
   if (!job) return;
   if (job->stdout_fd >= 0) { close(job->stdout_fd); job->stdout_fd = -1; }
@@ -73,7 +100,7 @@ static void close_pipes(RtJob *job) {
     free(job->secret_broker);
     job->secret_broker = NULL;
   }
-  if (job->out_file) { fflush(job->out_file); fclose(job->out_file); job->out_file = NULL; }
+  finalize_out_file(job);
   if (job->err_file) { fflush(job->err_file); fclose(job->err_file); job->err_file = NULL; }
 }
 
@@ -131,6 +158,7 @@ int rt_jobrunner_launch(RtJobRunner *r,
                         size_t stdout_cap,
                         size_t stderr_cap,
                         RtJob **out_job) {
+  char out_partial[PATH_MAX];
   RtJob *job;
   pid_t pid;
   int p_out[2] = {-1, -1};
@@ -163,8 +191,13 @@ int rt_jobrunner_launch(RtJobRunner *r,
   job->stdout_cap = stdout_cap > 0 ? stdout_cap : JOB_OUTPUT_CAP_STDOUT_DEFAULT;
   job->stderr_cap = stderr_cap > 0 ? stderr_cap : JOB_OUTPUT_CAP_STDERR_DEFAULT;
 
-  /* Open tee files first so we fail before forking on disk errors. */
-  job->out_file = fopen(out_path, "wb");
+  /* Open tee files first so we fail before forking on disk errors. The
+   * stdout artifact is drained into a .partial sibling and renamed into
+   * place when the job finalizes, so a gateway killed mid-drain leaves no
+   * torn .json under workspace/runs -- only a stray .partial that the next
+   * attempt truncates. */
+  if (out_partial_path(job, out_partial, sizeof(out_partial)) != 0) goto fail;
+  job->out_file = fopen(out_partial, "wb");
   job->err_file = fopen(err_path, "wb");
   if (!job->out_file || !job->err_file) goto fail;
 
@@ -275,7 +308,10 @@ fail:
   if (p_progress[1] >= 0) close(p_progress[1]);
   if (p_secret[0] >= 0) close(p_secret[0]);
   if (p_secret[1] >= 0) close(p_secret[1]);
-  if (job->out_file) { fclose(job->out_file); job->out_file = NULL; }
+  if (job->out_file) {
+    fclose(job->out_file); job->out_file = NULL;
+    if (out_partial_path(job, out_partial, sizeof(out_partial)) == 0) (void)unlink(out_partial);
+  }
   if (job->err_file) { fclose(job->err_file); job->err_file = NULL; }
   if (job->secret_broker) {
     action_secret_broker_close(job->secret_broker);
@@ -402,11 +438,11 @@ static void drain_pending(RtJobRunner *r, RtJob *job) {
     if (rc == 1) {
       close(job->stdout_fd); job->stdout_fd = -1;
       job->stdout_eof = 1;
-      if (job->out_file) { fflush(job->out_file); fclose(job->out_file); job->out_file = NULL; }
+      finalize_out_file(job);
     } else if (rc < 0) {
       close(job->stdout_fd); job->stdout_fd = -1;
       job->stdout_eof = 1;
-      if (job->out_file) { fflush(job->out_file); fclose(job->out_file); job->out_file = NULL; }
+      finalize_out_file(job);
     }
   }
   if (job->stderr_fd >= 0 && !job->stderr_eof) {

@@ -51,13 +51,6 @@ int rt_agent_normalize_output(RtContext *ctx, const RtStep *step,
                               long long bound_work_rev,
                               const char *output_json,
                               char *out, size_t out_len);
-/* Returns 0 when the configured contract accepts this decision, 1 when the
- * contract does not apply to the current event, and -1 with a specific reason
- * when the entire response must be withheld and repaired. */
-int rt_agent_validate_output_contract(const RtContext *ctx,
-                                      const RtAgentMeta *agent_meta,
-                                      const char *output_json,
-                                      char *reason, size_t reason_len);
 int rt_agent_normalize_affair_output(RtContext *ctx, const RtStep *step,
                                      const char *bound_task_id,
                                      const char *output_json,

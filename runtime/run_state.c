@@ -105,7 +105,8 @@ int rt_run_persist_state(RtRun *r) {
                "\"last_error\":%s}",
                r->ctx.run_id, context, profile, rt_run_status_name(r->state), r->advance,
                event_id, type, jobs, r->phase_index, last_error) >= (int)sizeof(r->ctx.run_state_json)) return -1;
-  snprintf(path, sizeof(path), "%s/runstate.json", r->ctx.run_dir);
+  if (fs_join(path, sizeof(path), r->ctx.run_dir, "runstate.json") != 0)
+    return -1;
   return fs_write_text_atomic(path, r->ctx.run_state_json);
 }
 

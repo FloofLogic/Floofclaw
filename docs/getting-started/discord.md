@@ -104,6 +104,20 @@ diagnostic. In daemon mode, verify it with:
 grep "discord: READY" workspace/logs/gateway.log
 ```
 
+Session transitions and failures are also written to
+`workspace/logs/narration.jsonl`. A fresh session says `via IDENTIFY`; a
+recovered session says `via RESUME`. Every reconnect line carries its cause,
+including the WebSocket close code/reason, server-requested RECONNECT,
+invalid-session resumability, a missed heartbeat ACK, or a transport failure.
+REST 429 responses honor Discord's `Retry-After` and retain the delivery at
+the queue head, so rate limiting does not drop or reorder replies; excessive
+delays clamp to 24 hours. If the bounded outbound ring cannot fit every chunk
+of a reply, the delivery-log cursor stays put and narration names the deferred
+channel instead of sending a prefix or skipping later replies. Once a POST is
+fully written, a lost, malformed, or timed-out response has an ambiguous
+outcome: FloofClaw retries it once, then drops it with narration rather than
+risk an unbounded stream of duplicate messages.
+
 Stop the attached gateway with Ctrl-C. A real test message is deliberately a
 human/operator verification: send it in the allowed channel and mention the
 bot when `require_mention_in_guild` is true. Automated checks must not send to
@@ -166,7 +180,8 @@ unsupported pairing fails visibly instead of continuing with text alone.
 | An attachment turn fails before a model response | Check the run's agent stderr and provider metadata. Oversized input, an expired/invalid Discord CDN download, or a provider/MIME pair without a native representation is rejected rather than silently omitting the attachment. |
 | No proactive review appears | Set `home_channel_id`, or ensure `allowed_channel_ids[0]` is a writable channel. |
 | TLS/OpenSSL startup error | Install OpenSSL 3, then run `make clean && make -j4`; do not disable verification for Discord. |
-| HTTP 401/403 in diagnostics | Reset the bot token and store the replacement, then verify the bot's channel permissions. |
+| A reply never arrives and `workspace/logs/narration.jsonl` shows `discord: REST post to channel <id> failed status=401` (or `403 code=50001 message=Missing Access`) `; reply dropped` | Discord refused the post permanently, so the reply was dropped rather than retried. 401: reset the bot token and store the replacement. 403: give the bot View Channel and Send Messages in that channel. A `status=5xx … after one retry` line means Discord failed twice in a row; the reply is lost, the next one is attempted normally. |
+| Narration says a REST post had `ambiguous completion` | Discord may have accepted the POST but its response could not be proven. FloofClaw retries once; a second ambiguous result is dropped to bound possible duplicates. Check the channel before resending manually. |
 
 The permanent safety convention is in
 [Discord and IRC — channel conventions](../discord_and_irc.md): Discord is a

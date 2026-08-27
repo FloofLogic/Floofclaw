@@ -10,7 +10,7 @@
 - `loops/`, `agents/` — test fixture fallback paths populated by tests, not production configuration in a fresh checkout.
 - `actions/` — outside-world capabilities. Every directory holding an `action.json` is discovered recursively at startup. Bundled shared capabilities live under `actions/common/` and runtime primitives under `actions/core/`; other top-level action areas are local installation surface and ignored by Git. Subprocess actions also have `run.sh`. There is no registration list — copying a directory in installs it, and a `_` prefix (`actions/_github`) unloads one without deleting it. `web_read/_pluck` is build source, and its leading underscore keeps the scanner out. `actions/mcp/` is generated: `scripts/mcp_sync.sh` writes one action per tool from the servers in `config/mcp.json`, and only the shared `_bridge.sh` is tracked.
 - `adapters/` — channel adapters, one self-contained source directory each (`adapters/discord/`, `adapters/irc/`, `adapters/telegram/`, `adapters/ws/`). Each exports a `const FcAdapter fc_adapter_<name>` (`runtime/gateway/adapter.h`); the build discovers the directories and generates the registry, so adding one is: copy the directory, `make`, restart. Statically linked into the same single binary — nothing is dynamically loaded.
-- `tests/` — fast C invariant tests plus bash-driven smokes. `make unit` runs the C suite; `make test` runs the full suite.
+- `tests/` — fast C invariant tests plus bash-driven smokes. `make unit` runs the unit binary; `make test` runs the routine suite; `make test-full` adds rebuild contracts.
 - `workspace/` — runtime artifacts (event logs, runs, bus, deliveries). Gitignored.
 - `docs/` — documentation for the current runtime (this tree).
 - `app/` — optional local inspection UIs such as `runtime_flow`; not on the runtime hot path.
@@ -73,6 +73,7 @@ runtime/
 ├── task_state.c                 — task reducer, lifecycle state
 ├── task_artifacts.c             — task artifact normalization
 ├── task_projection.c            — task projection for processor input
+├── task_cli.c                   — `fclaw task cancel` operator transition
 ├── affair_state.c               — affair reducer + watcher helpers (load/write/list_due)
 ├── affair_cli.c                 — `fclaw affair create|list|pause|resume|close|review|schedule`
 ├── operation_state.c            — durable managed-operation state (ids, completion tokens, deadlines)
@@ -131,9 +132,10 @@ runtime/
 │   ├── http.c                   — libcurl easy mode (blocking, runs inside child)
 │   ├── mock.c                   — deterministic fixtures
 │   ├── normalize.c              — strict event normalization around raw model text
+│   ├── pricing.c                — dated token-price lookup and USD estimates
 │   ├── profile.c                — provider/profile resolution
 │   ├── request.c                — provider request construction
-│   ├── provider_limit.c         — local RPM/daily caps
+│   ├── provider_limit.c         — local RPM/daily-call/daily-USD caps
 │   └── usage.c                  — token + latency tracking
 │
 ├── fjson_repair/
@@ -179,7 +181,7 @@ runtime/
   - `llm_usage.jsonl` — provider usage and latency records
   - `deliveries.jsonl` — channel delivery records
   - `rejected_events.jsonl` — envelopes rejected at intake
-  - `provider_limits/<provider>.json` — local RPM/daily limit state
+  - `provider_limits/<provider>.json` — local RPM/daily-call/daily-USD reservation state, replaced atomically under the sibling `<provider>.json.lock` (never rewritten in place)
   - `channels/<channel>.log` — per-channel transcript
 - `workspace/memory/memory.jsonl` — durable append-only memory records
 - `workspace/memory/memory.json` — derived recent memory state for listen-based agent input
@@ -247,7 +249,7 @@ registry leaves Git status unchanged.
 
 ## Key properties
 
-- `make test` runs 37 unit cases, 177 integration cases, fixture-isolation and
+- `make test` runs 41 unit cases, 192 integration cases, fixture-isolation and
   public-interface contract probes, and one hermetic, mock-provider-backed
   smoke using local fixtures only.
 - `FCLAW_LIVE_SMOKE=1 make live-smoke` checks the opt-in real-provider path

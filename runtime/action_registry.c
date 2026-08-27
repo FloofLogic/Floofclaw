@@ -306,6 +306,9 @@ static int load_action_contract(const char *area_id, const char *dir,
                 RT_ACTION_CONFIG_EXISTING_DIRECTORY;
           else if (strcmp(kind, "string") == 0)
             def->config_kinds[def->config_count] = RT_ACTION_CONFIG_STRING;
+          else if (strcmp(kind, "permission_mode_ceiling") == 0)
+            def->config_kinds[def->config_count] =
+                RT_ACTION_CONFIG_PERMISSION_MODE_CEILING;
           else {
             snprintf(err, err_len, "%s: config entry %zu has unknown kind %s",
                      manifest, i, kind);
@@ -457,6 +460,10 @@ static int cache_typed_config(RtActionRegistry *reg, RtActionDef *def,
         snprintf(err, err_len,
                  "%s: actions.%s.%s must name an existing directory; fix the deployment config",
                  def->manifest_path, def->id, key);
+      else if (kind == RT_ACTION_CONFIG_PERMISSION_MODE_CEILING)
+        snprintf(err, err_len,
+                 "%s: actions.%s.%s must be safe or dangerous",
+                 def->manifest_path, def->id, key);
       else
         snprintf(err, err_len,
                  "%s: actions.%s.%s must be a non-empty string",
@@ -468,6 +475,10 @@ static int cache_typed_config(RtActionRegistry *reg, RtActionDef *def,
         if (kind == RT_ACTION_CONFIG_EXISTING_DIRECTORY)
           snprintf(err, err_len,
                    "%s: actions.%s.%s is required and must name an existing directory",
+                   def->manifest_path, def->id, key);
+        else if (kind == RT_ACTION_CONFIG_PERMISSION_MODE_CEILING)
+          snprintf(err, err_len,
+                   "%s: actions.%s.%s is required and must be safe or dangerous",
                    def->manifest_path, def->id, key);
         else
           snprintf(err, err_len,
@@ -485,6 +496,15 @@ static int cache_typed_config(RtActionRegistry *reg, RtActionDef *def,
                  def->manifest_path, def->id, key);
         return -1;
       }
+    } else if (kind == RT_ACTION_CONFIG_PERMISSION_MODE_CEILING) {
+      if (strcmp(configured, "safe") != 0 &&
+          strcmp(configured, "dangerous") != 0) {
+        snprintf(err, err_len,
+                 "%s: actions.%s.%s must be safe or dangerous",
+                 def->manifest_path, def->id, key);
+        return -1;
+      }
+      snprintf(canonical, sizeof(canonical), "%s", configured);
     } else {
       snprintf(canonical, sizeof(canonical), "%s", configured);
     }

@@ -164,7 +164,8 @@ int telegram_refuses_malformed_getupdates_replies(void) {
   rc |= expect(envelope_count() == 0, "a non-JSON body publishes nothing");
   rc |= expect(tg_test_offset(a) == 0, "and does not advance the offset");
 
-  /* An update with no text (a photo, a join event) is skipped, not fatal. */
+  /* An update with neither text nor supported media (for example a join
+   * event) is skipped, not fatal. */
   tg_test_consume_updates(
       a, "{\"ok\":true,\"result\":[{\"update_id\":41,\"message\":"
          "{\"message_id\":1,\"chat\":{\"id\":-1001,\"type\":\"supergroup\"}}}]}");

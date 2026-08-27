@@ -2,11 +2,7 @@
   "id": "main_claw",
   "executor": "llm",
   "model": { "ref": "default_gemini_flash" },
-  "_note": "warning: no autocomplete_message_task_on_send here, on purpose: this agent does the work itself, so a reply is not an answer. It must close each input task with task.update state:completed (the output_contract enforces it) or the 32-slot task store fills and the bot can chat but never act. The engine closes a task only when a run fails. Read docs/concepts/task-feature.md, 'Who closes an input task'.",
-  "output_contract": {
-    "kind": "task_action_or_finalize",
-    "repair_attempts": 2
-  },
+  "_note": "warning: no autocomplete_message_task_on_send here, on purpose: this agent does the work itself, so a reply is not necessarily an answer. It must close each finished input task with task.update state:completed or the 32-slot task store fills and the bot can chat but never act. The engine closes a task only when a run fails. Read docs/concepts/task-feature.md, 'Who closes an input task'.",
   "actions": ["all_actions"],
   "listen": [
     "event",

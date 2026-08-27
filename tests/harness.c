@@ -259,6 +259,10 @@ int harness_cli_usage(int argc, char **argv, char **stdout_out, int *exit_code) 
   return capture_stdout(rt_usage_main, argc, argv, stdout_out, exit_code);
 }
 
+int harness_cli_task(int argc, char **argv, char **stdout_out, int *exit_code) {
+  return capture_stdout(rt_task_main, argc, argv, stdout_out, exit_code);
+}
+
 int harness_cli_gateway(int argc, char **argv, char **stdout_out, int *exit_code) {
   return capture_stdout(rt_gateway_main, argc, argv, stdout_out, exit_code);
 }
