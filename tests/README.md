@@ -2,9 +2,9 @@
 
 The routine suite is hermetic, offline, and intentionally contract-focused:
 
-- `bin/fclaw_unit_tests`: 41 fast C checks for parser, provider, filesystem,
+- `bin/fclaw_unit_tests`: 49 fast C checks for parser, provider, filesystem,
   reconnect, TLS, and allocation-boundary contracts.
-- `bin/fclaw_integration_tests`: 193 in-process checks across the scheduler,
+- `bin/fclaw_integration_tests`: 200 in-process checks across the scheduler,
   reducers, recovery, channels, provider limits, durable operations, and hard
   capacity boundaries.
 - `tests/test_local_client_api.sh`: an isolated loopback lifecycle probe for
@@ -37,7 +37,7 @@ driver refuses any unregistered `tests/test_*.sh`. The Makefile also exposes
 focused sanitizer, small-stack, fuzz, chaos, disk-full, and thrash targets.
 
 `make robustness` composes those expensive proofs on macOS and takes roughly
-20–23 minutes. It is required only before a major version release or after
+roughly an hour. It is required only before a major version release or after
 deep engine surgery, never for ordinary docs, config, or feature work. There
 is no formal soak gate; `scripts/rss_soak.sh` is available for ad-hoc
 observation.

@@ -29,12 +29,15 @@
 typedef enum {
   IRC_DISABLED,
   IRC_DISCONNECTED,
+  IRC_RESOLVING,
   IRC_CONNECTING,
   IRC_TLS_HANDSHAKE,  /* only reached when use_tls is set */
   IRC_REGISTERING,
   IRC_READY,
   IRC_FAILED
 } IrcState;
+
+#define IRC_RESOLVE_TIMEOUT_MS 30000ULL
 
 /* Unified return from the read/write helpers so the rest of the
  * adapter doesn't branch on TLS vs raw socket at every call site. */
@@ -70,6 +73,8 @@ typedef struct {
   /* state */
   IrcState state;
   int      sock_fd;
+  NetResolve *resolve;             /* in-flight async DNS lookup (IRC_RESOLVING) */
+  uint64_t resolve_deadline_ms;
   FcTls   *tls;       /* non-NULL once handshake starts; freed on close */
   short    tls_want;  /* POLLIN/POLLOUT hint from the last fc_tls_* call */
   uint64_t state_entered_ms;
@@ -158,6 +163,7 @@ static void irc_schedule_dns_reconnect(IrcAdapter *a, uint64_t now_ms) {
  * error path so the cleanup stays in one place. */
 static void irc_close_conn(IrcAdapter *a, uint64_t now_ms) {
   if (!a) return;
+  if (a->resolve) { net_resolve_free(a->resolve); a->resolve = NULL; }
   if (a->tls) { fc_tls_free(a->tls); a->tls = NULL; }
   if (a->sock_fd >= 0) { net_close(a->sock_fd); a->sock_fd = -1; }
   a->rxbuf_len = 0;
@@ -567,9 +573,9 @@ static void drain_deliveries(IrcAdapter *a) {
   fp = fopen(DELIVERIES_LOG, "rb");
   if (!fp) return;
   if (fseek(fp, a->delivery_cursor, SEEK_SET) == 0) {
-    char line[8192];
+    char line[RT_XL];
     while (fgets(line, sizeof(line), fp)) {
-      char target[256] = "", text[IRC_LINE_MAX * 4] = "";
+      char target[256] = "", text[RT_MESSAGE_TEXT_MAX + 1] = "";
       size_t llen = strlen(line);
       if (llen > 0 && line[llen - 1] == '\n') line[llen - 1] = '\0';
       if (line_to_delivery_for_us(line, a, target, sizeof(target), text, sizeof(text))) {
@@ -630,9 +636,41 @@ static int irc_init(FcReactorModule *adapter) {
   return 0;
 }
 
+/* Drive an in-flight name resolution. Advances to IRC_CONNECTING on
+ * success or falls into the shared reconnect backoff on failure, matching
+ * the old synchronous net_connect_nb outcomes. */
+static void irc_drive_resolve(IrcAdapter *a, uint64_t now_ms) {
+  int fd = -1;
+  int rc;
+  if (!a || a->state != IRC_RESOLVING || !a->resolve) return;
+  if (now_ms >= a->resolve_deadline_ms) {
+    net_resolve_free(a->resolve);
+    a->resolve = NULL;
+    irc_schedule_dns_reconnect(a, now_ms);
+    set_state(a, IRC_DISCONNECTED, now_ms);
+    return;
+  }
+  rc = net_resolve_connect(a->resolve, &fd);
+  if (rc == 1) return; /* still resolving */
+  net_resolve_free(a->resolve);
+  a->resolve = NULL;
+  if (rc == 0) {
+    a->sock_fd = fd;
+    set_state(a, IRC_CONNECTING, now_ms);
+    return;
+  }
+  if (rc == NET_CONNECT_DNS_FAILED) irc_schedule_dns_reconnect(a, now_ms);
+  else irc_schedule_reconnect(a, now_ms);
+  set_state(a, IRC_DISCONNECTED, now_ms);
+}
+
 static int irc_collect_fds(FcReactorModule *adapter, FcPollSet *ps) {
   IrcAdapter *a = (IrcAdapter *)adapter->state;
   if (!a) return 0;
+  if (a->state == IRC_RESOLVING && a->resolve) {
+    int rfd = net_resolve_fd(a->resolve);
+    return rfd >= 0 ? fc_pollset_add(ps, rfd, POLLIN, adapter, NULL) : 0;
+  }
   if (a->state == IRC_CONNECTING) {
     return fc_pollset_add(ps, a->sock_fd, POLLOUT, adapter, NULL);
   }
@@ -665,6 +703,8 @@ static int irc_on_fd(FcReactorModule *adapter, int fd, int revents, void *tag) {
   (void)fd; (void)tag;
   if (!a) return 0;
   now = fc_now_ms();
+
+  if (a->state == IRC_RESOLVING) { irc_drive_resolve(a, now); return 0; }
 
   if (a->state == IRC_CONNECTING) {
     if (revents & (POLLOUT | POLLERR | POLLHUP)) {
@@ -775,17 +815,16 @@ static int irc_tick(FcReactorModule *adapter, uint64_t now_ms) {
     irc_close_conn(a, now_ms);
   }
   if (a->state == IRC_DISCONNECTED && now_ms >= a->next_reconnect_ms) {
-    int fd = -1;
-    int connect_rc = net_connect_nb(a->server, a->port, &fd);
-    if (connect_rc == 0 && fd >= 0) {
-      a->sock_fd = fd;
-      set_state(a, IRC_CONNECTING, now_ms);
-    } else if (connect_rc == NET_CONNECT_DNS_FAILED) {
-      irc_schedule_dns_reconnect(a, now_ms);
-    } else {
+    if (a->resolve) { net_resolve_free(a->resolve); a->resolve = NULL; }
+    a->resolve = net_resolve_begin(a->server, a->port);
+    if (!a->resolve) {
       irc_schedule_reconnect(a, now_ms);
+    } else {
+      set_state(a, IRC_RESOLVING, now_ms);
+      a->resolve_deadline_ms = now_ms + IRC_RESOLVE_TIMEOUT_MS;
     }
   }
+  if (a->state == IRC_RESOLVING) irc_drive_resolve(a, now_ms);
   if (a->state == IRC_READY) {
     (void)fc_reconnect_backoff_maybe_reset(&a->reconnect_backoff, now_ms);
     if (a->last_rx_ms) {
@@ -811,6 +850,7 @@ static uint64_t irc_next_deadline(FcReactorModule *adapter, uint64_t now_ms) {
   if (!a || a->state == IRC_DISABLED) return FC_NO_DEADLINE;
   if (a->rxbuf_len > 0 && a->partial_line_started_ms > 0)
     return a->partial_line_started_ms + IRC_PARSE_PROGRESS_TIMEOUT_MS;
+  if (a->state == IRC_RESOLVING) return a->resolve_deadline_ms;
   if (a->state == IRC_DISCONNECTED && a->next_reconnect_ms > 0) {
     return a->next_reconnect_ms;
   }
@@ -829,6 +869,7 @@ static uint64_t irc_next_deadline(FcReactorModule *adapter, uint64_t now_ms) {
 static void irc_shutdown_cb(FcReactorModule *adapter) {
   IrcAdapter *a = (IrcAdapter *)adapter->state;
   if (!a) return;
+  if (a->resolve) { net_resolve_free(a->resolve); a->resolve = NULL; }
   if (a->sock_fd >= 0) {
     /* Best-effort QUIT then close. */
     (void)send_line(a, "QUIT :bye");

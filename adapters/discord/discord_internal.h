@@ -9,6 +9,7 @@
 #include "discord_adapter.h"
 #include "../../runtime/bus/media_manifest.h"
 #include "../../runtime/runtime.h"
+#include "../../runtime/support/net.h"
 #include "../../runtime/support/net_tls.h"
 #include "../../runtime/support/reconnect_backoff.h"
 
@@ -37,11 +38,13 @@
 #define DC_REST_AMBIGUOUS_RETRY_MAX 1U
 #define DC_REST_RETRY_AFTER_MAX_MS 86400000ULL
 #define DC_PARSE_PROGRESS_TIMEOUT_MS 30000ULL
+#define DC_RESOLVE_TIMEOUT_MS 30000ULL
 #define DC_DELIVERIES_LOG  "workspace/logs/deliveries.jsonl"
 
 typedef enum {
   DC_DISABLED = 0,
   DC_DISCONNECTED,
+  DC_RESOLVING,
   DC_TCP_CONNECTING,
   DC_TLS_HANDSHAKE,
   DC_WS_HANDSHAKE,
@@ -50,6 +53,7 @@ typedef enum {
 
 typedef enum {
   DC_REST_IDLE = 0,
+  DC_REST_RESOLVING,
   DC_REST_TCP_CONNECTING,
   DC_REST_TLS_HANDSHAKE,
   DC_REST_WRITING,
@@ -100,6 +104,8 @@ typedef struct {
 
   DcGatewayState gw_state;
   int gw_fd;
+  NetResolve *gw_resolve;
+  uint64_t gw_resolve_deadline_ms;
   FcTls *gw_tls;
   short gw_want;
   uint64_t next_reconnect_ms;
@@ -126,6 +132,8 @@ typedef struct {
   int out_count;
 
   DcRestState rest_state;
+  NetResolve *rest_resolve;
+  uint64_t rest_resolve_deadline_ms;
   int rest_fd;
   FcTls *rest_tls;
   short rest_want;
@@ -165,6 +173,8 @@ int dc_queue_message_chunks(DcAdapter *a, const char *channel_id,
 void dc_close_gateway(DcAdapter *a);
 void dc_close_gateway_with_cause(DcAdapter *a, const char *cause);
 int  dc_gateway_start_connect(DcAdapter *a, uint64_t now_ms);
+void dc_drive_resolve(DcAdapter *a, uint64_t now_ms);
+void dc_drive_rest_resolve(DcAdapter *a, uint64_t now_ms);
 int  dc_gw_flush(DcAdapter *a);
 int  dc_queue_ws_frame(DcAdapter *a, unsigned char opcode,
                        const char *payload, size_t payload_len);

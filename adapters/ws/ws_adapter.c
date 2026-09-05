@@ -91,8 +91,8 @@ typedef struct {
   char origin_event_id[RT_SMALL];
   char run_id[RT_SMALL];
   char delivery_id[RT_SMALL];
-  char final_body[RT_LARGE];
-  char stream_body[RT_LARGE];
+  char final_body[RT_MESSAGE_TEXT_MAX + 1];
+  char stream_body[RT_MESSAGE_TEXT_MAX + 1];
   size_t stream_len;
   char pending[1024];
   size_t pending_len;
@@ -791,7 +791,7 @@ static void flush_pending(WsAdapter *a, WsInflight *f) {
 
 static void send_done(WsAdapter *a, WsInflight *f) {
   char ecorr[RT_MED], erun[RT_MED], edelivery[RT_MED];
-  char ebody[RT_LARGE * 2], json[RT_LARGE * 2 + 768];
+  char ebody[RT_MESSAGE_ESCAPED_MAX + 1], json[RT_MESSAGE_ESCAPED_MAX + 768];
   if (!f ||
       json_escape(f->corr_id, ecorr, sizeof(ecorr)) != 0 ||
       json_escape(f->run_id, erun, sizeof(erun)) != 0 ||
@@ -822,7 +822,7 @@ static int replay_after_delivery(WsAdapter *a, WsConn *c,
     JsonRef root, delivery, ref;
     char did[RT_SMALL] = "", ch[RT_SMALL] = "", aid[RT_SMALL] = "";
     char session[RT_SMALL] = "", corr[RT_SMALL] = "", run_id[RT_SMALL] = "";
-    char body[RT_LARGE] = "";
+    char body[RT_MESSAGE_TEXT_MAX + 1] = "";
     if (len >= sizeof(line)) len = sizeof(line) - 1;
     memcpy(line, p, len); line[len] = '\0';
     if (json_ref_first_object(line, &root) == 0 &&
@@ -1014,7 +1014,7 @@ static void handle_hello(WsAdapter *a, WsConn *c, const JsonRef *root) {
 
 static void handle_message(WsAdapter *a, WsConn *c, const JsonRef *root) {
   char corr[RT_SMALL] = "", ctx[RT_SMALL] = "chat_main";
-  char body[RT_LARGE] = "", ebody[RT_LARGE * 2], eaid[RT_MED];
+  char body[RT_MESSAGE_TEXT_MAX + 1] = "", ebody[RT_LARGE * 2], eaid[RT_MED];
   char esession[RT_MED], ecorr[RT_MED], ectx[RT_MED];
   char payload[RT_LARGE * 2 + 1024], origin[BUS_ID_MAX];
   WsInflight *f;
@@ -1279,7 +1279,7 @@ static void drain_deliveries(WsAdapter *a) {
   fp = fopen(WS_DELIVERIES_LOG, "rb");
   if (!fp) return;
   if (fseek(fp, a->delivery_cursor, SEEK_SET) == 0) {
-    char line[RT_LARGE * 3];
+    char line[RT_XL];
     while (fgets(line, sizeof(line), fp)) {
       size_t len = strlen(line);
       if (len && line[len - 1] == '\n') line[len - 1] = '\0';

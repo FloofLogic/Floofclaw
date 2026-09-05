@@ -53,18 +53,21 @@ static void state_init(ProviderLimitState *state, const LlmProvider *provider) {
   snprintf(state->provider_id, sizeof(state->provider_id), "%s", provider->id);
 }
 
+/* Windows only roll forward. A clock stepped backwards across midnight (or
+ * a minute boundary) keeps counting against the later window it already
+ * opened, so a backwards step can never grant a second allowance. */
 static void state_roll_windows(ProviderLimitState *state, time_t now) {
   char day_key[16];
   long long minute_key;
   if (!state) return;
   if (current_day_key(now, day_key, sizeof(day_key)) != 0) day_key[0] = '\0';
   minute_key = (long long)(now / 60);
-  if (day_key[0] == '\0' || strcmp(state->day_key, day_key) != 0) {
+  if (day_key[0] == '\0' || strcmp(state->day_key, day_key) < 0) {
     snprintf(state->day_key, sizeof(state->day_key), "%s", day_key);
     state->day_count = 0;
     state->day_usd_reserved_micros = 0;
   }
-  if (state->minute_key != minute_key) {
+  if (state->minute_key < minute_key) {
     state->minute_key = minute_key;
     state->minute_count = 0;
   }
@@ -282,6 +285,12 @@ static int reserve_at(const LlmProvider *provider, const char *logs_root,
   state.minute_count++;
   if (enforce_usd) state.day_usd_reserved_micros += request_usd_micros;
   if (write_state_atomic(state_path, &state) != 0) goto fail;
+  if (enforce_usd && usage_out) {
+    usage_out->budget_outcome = LLM_BUDGET_KEPT;
+    usage_out->budget_reserved_micros = request_usd_micros;
+    snprintf(usage_out->budget_day_key, sizeof(usage_out->budget_day_key),
+             "%s", state.day_key);
+  }
   rc = LLM_PROVIDER_LIMIT_OK;
   goto done;
 
@@ -328,7 +337,19 @@ int llm_provider_limit_reserve_request_at(
   if (provider->daily_usd_limit == 0.0)
     return reserve_at(provider, logs_root, now, 1, 0, usage_out,
                       raw_response_out, raw_response_out_len);
-  if (request->media_count > 0U) {
+  if (llm_pricing_catalog_load(&catalog) != 0) {
+    /* Not the same thing as an unlisted model: the table itself is missing
+     * or malformed, and every capped call fails until it is fixed. */
+    fprintf(stderr,
+            "llm: pricing table %s is missing or malformed; daily_usd cap on "
+            "%s rejects every call until it loads\n",
+            llm_pricing_path(), provider->id);
+    set_block_reason(usage_out, "daily_usd_pricing_unavailable");
+    build_budget_block_json(provider, "daily_usd_pricing_unavailable", 0, 0,
+                            raw_response_out, raw_response_out_len);
+    return LLM_PROVIDER_LIMIT_BLOCKED_USD;
+  }
+  if (request->media_count > 0U && catalog.media_input_tokens_per_item <= 0) {
     set_block_reason(usage_out, "daily_usd_unpriced_media");
     build_budget_block_json(provider, "daily_usd_unpriced_media", 0, 0,
                             raw_response_out, raw_response_out_len);
@@ -337,17 +358,24 @@ int llm_provider_limit_reserve_request_at(
   text_len = strlen(request->text);
   if (text_len > (size_t)(LLONG_MAX - 1024)) return -1;
   /* One token per input byte plus a fixed serializer allowance deliberately
-   * over-reserves ordinary text. A hard local ceiling values safety over
-   * perfect utilization, and a crash leaves this reservation intact. */
+   * over-reserves ordinary text, and each media item takes the table's
+   * per-item allowance. A hard local ceiling values safety over perfect
+   * utilization: a crash leaves this reservation intact, and a completed
+   * call settles it to the provider's reported usage. */
   input_token_ceiling = (long long)text_len + 1024;
+  if (request->media_count > 0U) {
+    long long media_tokens =
+        (long long)request->media_count * catalog.media_input_tokens_per_item;
+    if (media_tokens < 0 || media_tokens > LLONG_MAX - input_token_ceiling)
+      return -1;
+    input_token_ceiling += media_tokens;
+  }
   output_token_ceiling = profile->max_output_tokens > 0
                              ? profile->max_output_tokens
                              : LLM_DEFAULT_MAX_OUTPUT_TOKENS;
-  if (llm_pricing_catalog_load(&catalog) != 0) price_rc = -1;
-  else
-    price_rc = llm_pricing_max_cost_micros(
-        &catalog, provider->id, profile->model, input_token_ceiling,
-        output_token_ceiling, &request_micros);
+  price_rc = llm_pricing_max_cost_micros(
+      &catalog, provider->id, profile->model, input_token_ceiling,
+      output_token_ceiling, &request_micros);
   if (price_rc != 0) {
     set_block_reason(usage_out, "daily_usd_unpriced");
     build_budget_block_json(provider, "daily_usd_unpriced", 0, 0,
@@ -356,6 +384,95 @@ int llm_provider_limit_reserve_request_at(
   }
   return reserve_at(provider, logs_root, now, 1, request_micros, usage_out,
                     raw_response_out, raw_response_out_len);
+}
+
+/* Replace the reservation in the day ledger with `actual_micros`. If the day
+ * rolled between reservation and settlement, the reservation already left
+ * with the old day, so only the actual cost is charged to the new one. */
+static int adjust_reserved(const LlmProvider *provider, const char *logs_root,
+                           time_t now, const char *reserved_day_key,
+                           long long reserved_micros, long long actual_micros) {
+  ProviderLimitState state;
+  char dir_path[LIMIT_PATH_MAX];
+  char state_path[LIMIT_PATH_MAX];
+  char lock_path[LIMIT_PATH_MAX];
+  char *text = NULL;
+  int fd = -1;
+  int rc = -1;
+  const char *root = default_logs_root(logs_root);
+
+  if (!provider || !provider->id[0] || reserved_micros < 0 ||
+      actual_micros < 0)
+    return -1;
+  if (build_limit_paths(root, provider->id, dir_path, sizeof(dir_path),
+                        state_path, sizeof(state_path)) != 0) return -1;
+  if (snprintf(lock_path, sizeof(lock_path), "%s.lock", state_path) >=
+      (int)sizeof(lock_path)) return -1;
+  fd = open_lock_file(lock_path);
+  if (fd < 0) return -1;
+
+  state_init(&state, provider);
+  if (fs_read_text(state_path, &text, 0) != 0 && errno != ENOENT) goto done;
+  if (parse_state_text(text, &state) != 0) goto done;
+  if (strcmp(state.provider_id, provider->id) != 0 || state.day_count < 0 ||
+      state.day_usd_reserved_micros < 0 || state.minute_count < 0)
+    goto done;
+  state_roll_windows(&state, now);
+  if (reserved_day_key && strcmp(state.day_key, reserved_day_key) == 0) {
+    state.day_usd_reserved_micros -= reserved_micros;
+    if (state.day_usd_reserved_micros < 0) state.day_usd_reserved_micros = 0;
+  }
+  if (actual_micros > LLONG_MAX - state.day_usd_reserved_micros)
+    state.day_usd_reserved_micros = LLONG_MAX;
+  else
+    state.day_usd_reserved_micros += actual_micros;
+  if (write_state_atomic(state_path, &state) != 0) goto done;
+  rc = 0;
+
+done:
+  free(text);
+  (void)flock(fd, LOCK_UN);
+  close(fd);
+  return rc;
+}
+
+int llm_provider_limit_settle_request_at(const LlmProvider *provider,
+                                         const LlmProfile *profile,
+                                         const char *logs_root, time_t now,
+                                         LlmUsage *usage) {
+  LlmPricingCatalog catalog;
+  long long actual_micros = 0;
+  int usage_reported;
+  if (!provider || !profile || !usage) return -1;
+  if (usage->budget_outcome != LLM_BUDGET_KEPT) return 0;
+  usage_reported = usage->input_tokens > 0 || usage->output_tokens > 0;
+  if (!usage_reported && usage->request_dispatched) return 0;
+  if (usage_reported) {
+    if (llm_pricing_catalog_load(&catalog) != 0 ||
+        llm_pricing_usage_micros(
+            &catalog, provider->id, profile->model, usage->input_tokens,
+            usage->output_tokens, usage->provider_cached_input_tokens,
+            usage->provider_cached_input_tokens_reported,
+            usage->provider_cache_creation_input_tokens,
+            usage->provider_cache_creation_input_tokens_reported,
+            &actual_micros) != 0)
+      return -1;
+  }
+  if (adjust_reserved(provider, logs_root, now, usage->budget_day_key,
+                      usage->budget_reserved_micros, actual_micros) != 0)
+    return -1;
+  usage->budget_settled_micros = actual_micros;
+  usage->budget_outcome =
+      usage_reported ? LLM_BUDGET_SETTLED : LLM_BUDGET_RELEASED;
+  return 0;
+}
+
+int llm_provider_limit_settle_request(const LlmProvider *provider,
+                                      const LlmProfile *profile,
+                                      const char *logs_root,
+                                      LlmUsage *usage) {
+  return llm_provider_limit_settle_request_at(provider, profile, logs_root,
+                                              time(NULL), usage);
 }
 
 int llm_provider_limit_reserve_request(

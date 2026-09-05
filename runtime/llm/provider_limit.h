@@ -36,4 +36,21 @@ int llm_provider_limit_reserve_request_at(
     LlmUsage *usage_out, char *raw_response_out,
     size_t raw_response_out_len);
 
+/* Close out the dollar reservation a request made, once its outcome is
+ * known. Reported usage replaces the reservation with the priced actual
+ * cost; a request that provably never reached the provider (see
+ * LlmUsage.request_dispatched) returns its reservation; anything else
+ * keeps it. The outcome and amounts are recorded in usage. Returns 0 when
+ * the ledger reflects the decision, -1 when it could not be updated (the
+ * reservation then stands). */
+int llm_provider_limit_settle_request(const LlmProvider *provider,
+                                      const LlmProfile *profile,
+                                      const char *logs_root,
+                                      LlmUsage *usage);
+
+int llm_provider_limit_settle_request_at(const LlmProvider *provider,
+                                         const LlmProfile *profile,
+                                         const char *logs_root, time_t now,
+                                         LlmUsage *usage);
+
 #endif

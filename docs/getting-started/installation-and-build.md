@@ -97,7 +97,7 @@ artifact.
 Expected output (current branch):
 
 ```text
-fclaw 0.30.0
+fclaw 0.31.0
 ```
 
 Then run the routine suite:
@@ -113,7 +113,7 @@ enabling the bundled actions — run the guided wizard from the checkout root:
 ./scripts/onboard.sh
 ```
 
-It currently runs 41 unit cases, 192 integration cases, auxiliary contract
+It currently runs 49 unit cases, 200 integration cases, auxiliary contract
 probes, and the end-to-end smoke:
 
 - `tests/smoke_lookup_and_poem.sh` — runs a mock-backed lookup-and-poem prompt

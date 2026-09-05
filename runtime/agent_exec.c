@@ -371,25 +371,68 @@ cleanup:
   return rc;
 }
 
+/* Keys the runtime stamps on the payloads it builds from call args
+ * directly: task_created, task_updated, and the memory_* kinds take the
+ * args object as the payload itself, so a model must not forge these
+ * there. An ordinary action_request nests args under "args", beside the
+ * runtime's own correlation fields, so an action may name an argument
+ * event_id (a calendar event, say) without touching them -- Truly
+ * run_180 lost a gcal get to this list being applied to every call. */
+static int runtime_payload_key(const char *key) {
+  return strcmp(key, "event_id") == 0 || strcmp(key, "run_id") == 0 ||
+         strcmp(key, "request_id") == 0 || strcmp(key, "job_id") == 0 ||
+         strcmp(key, "source") == 0 || strcmp(key, "created_by") == 0 ||
+         strcmp(key, "work_rev") == 0;
+}
+
+enum call_args_reject {
+  CALL_ARGS_OK = 0,
+  CALL_ARGS_NOT_OBJECT,
+  CALL_ARGS_RUNTIME_KEY,
+  CALL_ARGS_BAD_TASK_ID,
+  CALL_ARGS_ALLOC
+};
+
+/* args_are_payload: the call's args become a runtime payload verbatim
+ * (task.create, task.update, memory.*), so runtime-owned keys are refused;
+ * a nested action_request keeps them as ordinary action arguments.
+ * bound_controller: the runtime stamps this call's work_rev and
+ * trigger_event_id from the trusted work binding, so the model may not
+ * assert either inside args. On NULL, *why says which rule failed and
+ * bad_key names a refused key. */
 static char *normalize_call_args_dup(const JsonRef *args_ref,
-                                     char *task_id, size_t task_len) {
+                                     char *task_id, size_t task_len,
+                                     int args_are_payload,
+                                     int bound_controller,
+                                     enum call_args_reject *why,
+                                     char *bad_key, size_t bad_key_len) {
   size_t cursor = 0, pos = 0, cap = 0;
   char key[RT_SMALL];
   JsonRef value;
   int first = 1;
   char *args_no_task = NULL;
-  if (!args_ref || args_ref->type != JSON_REF_OBJECT) return NULL;
+  enum call_args_reject reason = CALL_ARGS_ALLOC;
+  if (bad_key && bad_key_len) bad_key[0] = '\0';
+  if (why) *why = CALL_ARGS_OK;
+  if (!args_ref || args_ref->type != JSON_REF_OBJECT) {
+    if (why) *why = CALL_ARGS_NOT_OBJECT;
+    return NULL;
+  }
   if (task_id && task_len) task_id[0] = '\0';
   if (dyn_append_text(&args_no_task, &cap, &pos, "{") != 0) goto fail;
   while (json_ref_object_iter(args_ref, &cursor, key, sizeof(key), &value) == 1) {
-    if (strcmp(key, "event_id") == 0 || strcmp(key, "run_id") == 0 ||
-        strcmp(key, "request_id") == 0 || strcmp(key, "job_id") == 0 ||
-        strcmp(key, "source") == 0 || strcmp(key, "created_by") == 0 ||
-        strcmp(key, "work_rev") == 0)
+    if ((args_are_payload && runtime_payload_key(key)) ||
+        (bound_controller && (strcmp(key, "work_rev") == 0 ||
+                              strcmp(key, "trigger_event_id") == 0))) {
+      if (bad_key && bad_key_len) snprintf(bad_key, bad_key_len, "%s", key);
+      reason = CALL_ARGS_RUNTIME_KEY;
       goto fail;
+    }
     if (strcmp(key, "task_id") == 0) {
-      if (!task_id || json_ref_string_copy(&value, task_id, task_len) != 0 || !task_id[0])
+      if (!task_id || json_ref_string_copy(&value, task_id, task_len) != 0 || !task_id[0]) {
+        reason = CALL_ARGS_BAD_TASK_ID;
         goto fail;
+      }
       continue;
     }
     if (dyn_append_json_pair(&args_no_task, &cap, &pos, key, &value, first) != 0)
@@ -399,6 +442,7 @@ static char *normalize_call_args_dup(const JsonRef *args_ref,
   if (dyn_append_text(&args_no_task, &cap, &pos, "}") != 0) goto fail;
   return args_no_task;
 fail:
+  if (why) *why = reason;
   fc_xfree(args_no_task);
   return NULL;
 }
@@ -622,9 +666,27 @@ int rt_agent_normalize_output(RtContext *ctx, const RtStep *step,
       return -1;
     }
     if (json_ref_object_get(&call, "args", &args_ref) == 0) {
-      args_raw = normalize_call_args_dup(&args_ref, task_id, sizeof(task_id));
+      enum call_args_reject why = CALL_ARGS_OK;
+      char bad_key[RT_SMALL] = "";
+      int args_are_payload = strcmp(name, "task.create") == 0 ||
+                             strcmp(name, "task.update") == 0 ||
+                             strncmp(name, "memory.", strlen("memory.")) == 0;
+      args_raw = normalize_call_args_dup(&args_ref, task_id, sizeof(task_id),
+                                         args_are_payload,
+                                         agent_meta && agent_meta->bind_task_open_work,
+                                         &why, bad_key, sizeof(bad_key));
       if (!args_raw) {
-        rt_log_rejected_agent_event(step->target, "invalid_agent_call", "call args must be object");
+        char detail[RT_MED];
+        if (why == CALL_ARGS_RUNTIME_KEY)
+          snprintf(detail, sizeof(detail),
+                   "call args must not carry the runtime key \"%s\"", bad_key);
+        else if (why == CALL_ARGS_BAD_TASK_ID)
+          snprintf(detail, sizeof(detail),
+                   "call args task_id must be a non-empty string");
+        else
+          snprintf(detail, sizeof(detail), "call args must be object");
+        if (why != CALL_ARGS_ALLOC)
+          rt_log_rejected_agent_event(step->target, "invalid_agent_call", detail);
         return -1;
       }
     } else {
@@ -716,6 +778,32 @@ int rt_agent_normalize_output(RtContext *ctx, const RtStep *step,
        * for any action call and REJECTS if inference fails. That
        * breaks result_manager on operation_result runs. */
       const char *action_name = strcmp(name, "message.send") == 0 ? "message" : name;
+      /* The reply path carries RT_MESSAGE_TEXT_MAX bytes and fc_message
+       * refuses more; refusing here instead hands the model a repair turn
+       * that says how much to cut, before anything is committed. */
+      if (strcmp(action_name, "message") == 0) {
+        JsonRef aroot, mref;
+        if (json_ref_top_object(args_raw, &aroot) == 0 &&
+            json_ref_object_get(&aroot, "message", &mref) == 0 &&
+            mref.type == JSON_REF_STRING) {
+          size_t bytes = 0;
+          char *text = json_ref_string_dup(&mref);
+          if (text) {
+            bytes = strlen(text);
+            fc_xfree(text);
+          }
+          if (bytes > RT_MESSAGE_TEXT_MAX) {
+            char detail[RT_MED];
+            snprintf(detail, sizeof(detail),
+                     "message is %zu bytes; a message delivers at most %d "
+                     "bytes, so shorten it",
+                     bytes, RT_MESSAGE_TEXT_MAX);
+            fc_xfree(args_raw);
+            rt_log_rejected_agent_event(step->target, "invalid_agent_call", detail);
+            return -1;
+          }
+        }
+      }
       infer_missing_task_id(ctx, bound_task_id, task_id, sizeof(task_id));
       if (task_id[0] && json_escape(task_id, etask, sizeof(etask)) != 0) {
         fc_xfree(args_raw);
@@ -762,11 +850,32 @@ int rt_agent_normalize_output(RtContext *ctx, const RtStep *step,
         fc_xfree(args_raw);
         return -1;
       }
-      if ((!task_id[0] && !unbound_ok) ||
-          (task_id[0] &&
-           !rt_task_reference_in_context(ctx->context_id, task_id))) {
+      if (!task_id[0] && !unbound_ok) {
+        /* No task could be bound at all. A working-memory note is
+         * best-effort bookkeeping: a completed work outcome archives its
+         * task before the result turn runs, so the note has nothing to
+         * attach to -- drop it and keep the rest of the turn rather than
+         * failing the user-facing reply. Any other action here genuinely
+         * needs a task. This is only the "nothing to bind" case; a note
+         * that NAMES a task in another context is refused below. */
         fc_xfree(args_raw);
-        rt_log_rejected_agent_event(step->target, "invalid_agent_call", "action call requires existing task_id");
+        if (is_sidecar) {
+          (void)rt_narrate("working_memory note dropped for %s: no live task to attach it to",
+                           step->target[0] ? step->target : "(agent)");
+          continue;
+        }
+        rt_log_rejected_agent_event(step->target, "invalid_agent_call",
+                                    "action call requires existing task_id");
+        return -1;
+      }
+      if (task_id[0] &&
+          !rt_task_reference_in_context(ctx->context_id, task_id)) {
+        /* A NAMED task that is not in this context is a boundary
+         * violation (another conversation's task), refused even for a
+         * best-effort sidecar. */
+        fc_xfree(args_raw);
+        rt_log_rejected_agent_event(step->target, "invalid_agent_call",
+                                    "action call requires existing task_id");
         return -1;
       }
       n = snprintf(item, sizeof(item),

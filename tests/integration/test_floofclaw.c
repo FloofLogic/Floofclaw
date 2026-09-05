@@ -5159,3 +5159,479 @@ done:
   fx_restore_env("LLM_MOCK_RESPONSE_PATHS", saved_paths);
   return rc;
 }
+
+/* The call normalizer refused every args key the runtime stamps on the
+ * payloads it builds itself (event_id, run_id, request_id, job_id, source,
+ * created_by, work_rev) on every call, and called the refusal "call args
+ * must be object". An action_request nests args beside those fields, so an
+ * action whose schema names an argument event_id could never be called
+ * from any agent on any floop -- Truly run_180 lost a gcal get that way.
+ * The names stay reserved where args become the payload verbatim. */
+static int write_argkeys_fixture(void) {
+  int rc = test_write_file("actions/testfx/argkeys_echo/action.json",
+      "{\"id\":\"argkeys_echo\",\"description\":\"echoes runtime-named args\","
+      "\"outside_world\":false,"
+      "\"args_schema\":{\"type\":\"object\",\"additionalProperties\":false,"
+      "\"properties\":{\"event_id\":{\"type\":\"string\"},"
+      "\"source\":{\"type\":\"string\"},\"run_id\":{\"type\":\"string\"}}},"
+      "\"exec\":[\"bash\",\"run.sh\"],\"timeout_ms\":30000}\n");
+  rc |= write_exec("actions/testfx/argkeys_echo/run.sh",
+      "#!/usr/bin/env bash\n"
+      "args=$(cat)\n"
+      "ev=$(printf '%s' \"$args\" | sed -E 's/.*\"event_id\":\"([^\"]*)\".*/\\1/')\n"
+      "src=$(printf '%s' \"$args\" | sed -E 's/.*\"source\":\"([^\"]*)\".*/\\1/')\n"
+      "printf '{\"events\":[],\"result\":{\"text\":\"ARGKEYS_RECEIVED event_id=%s source=%s\"},\"error\":null}\\n' \"$ev\" \"$src\"\n");
+  rc |= test_write_file("actions/registry.json",
+      "{\"version\":1,\"areas\":["
+      "{\"id\":\"core\",\"path\":\"core\",\"enabled\":true,"
+      "\"description\":\"Runtime core actions shipped with FloofClaw.\"},"
+      "{\"id\":\"common\",\"path\":\"common\",\"enabled\":true,"
+      "\"description\":\"Common actions shipped with FloofClaw.\"},"
+      "{\"id\":\"testfx\",\"path\":\"testfx\",\"enabled\":true,"
+      "\"description\":\"Runtime-named argument fixtures.\"}"
+      "]}\n");
+  rc |= test_write_file("floops/argkeys/loop.json",
+      "{\"version\":1,\"name\":\"argkeys\","
+      "\"description\":\"runtime-named argument fixture\","
+      "\"one_pass\":true,\"serialize_contexts\":true,\"retry_attempts\":0,"
+      "\"steps\":["
+      "{\"id\":\"handler\",\"type\":\"agent\",\"agent\":\"handler\","
+      "\"gate\":\"event_kind:user_message\"},"
+      "{\"id\":\"dispatch\",\"type\":\"builtin\",\"builtin\":\"action_runner\"},"
+      "{\"id\":\"tail\",\"type\":\"agent\",\"agent\":\"memory\",\"non_critical\":true}"
+      "]}\n");
+  rc |= test_write_file("floops/argkeys/agents/handler/agent.json",
+      "{\"id\":\"handler\",\"executor\":\"llm\",\"model\":{\"ref\":\"responses\"},"
+      "\"actions\":[\"argkeys_echo\",\"message\"],\"listen\":[\"event\"]}\n");
+  rc |= test_write_file("floops/argkeys/agents/memory/agent.json",
+      "{\"id\":\"memory\",\"executor\":\"native\",\"capabilities\":[\"memory\"],"
+      "\"recent\":20,\"listen\":[\"memory\"]}\n");
+  rc |= test_write_file("workspace/fixtures/argkeys_profiles.json",
+      "{\"version\":1,\"profiles\":["
+      "{\"id\":\"responses\",\"provider\":\"mock\",\"model\":\"mock-1\"}]}\n");
+  rc |= test_write_file("workspace/fixtures/argkeys_action_call.json",
+      "{\"calls\":[{\"name\":\"argkeys_echo\",\"args\":{"
+      "\"event_id\":\"evt_123\",\"source\":\"calendar\",\"run_id\":\"run_zzz\"}}]}\n");
+  rc |= test_write_file("workspace/fixtures/argkeys_forged_payload.json",
+      "{\"calls\":[{\"name\":\"task.create\",\"args\":{"
+      "\"event_id\":\"evt_123\",\"text\":\"forged correlation\"}}]}\n");
+  rc |= test_write_file("workspace/fixtures/argkeys_reply.json",
+      "{\"calls\":[{\"name\":\"message\",\"args\":{"
+      "\"message\":\"ARGKEYS_PAYLOAD_REFUSED_OK\"}}]}\n");
+  (void)setenv("FCLAW_MODEL_PROFILES",
+               "workspace/fixtures/argkeys_profiles.json", 1);
+  return rc;
+}
+
+static char *read_first_action_call_artifact(const char *run_id,
+                                             const char *suffix) {
+  char dir[512], path[1024];
+  DIR *d;
+  struct dirent *f;
+  char *out = NULL;
+  snprintf(dir, sizeof(dir), "workspace/runs/%s/action_calls", run_id);
+  d = opendir(dir);
+  if (!d) return NULL;
+  while ((f = readdir(d)) != NULL) {
+    size_t n = strlen(f->d_name), s = strlen(suffix);
+    if (n < s || strcmp(f->d_name + n - s, suffix) != 0) continue;
+    snprintf(path, sizeof(path), "%s/%s", dir, f->d_name);
+    (void)test_read_file(path, &out);
+    break;
+  }
+  closedir(d);
+  return out;
+}
+
+int action_args_may_use_runtime_key_names_but_payloads_may_not(void) {
+  char *saved_profiles = fx_capture_env("FCLAW_MODEL_PROFILES");
+  char *saved_paths = fx_capture_env("LLM_MOCK_RESPONSE_PATHS");
+  HarnessGateway *g = NULL;
+  char *logs = NULL, *received = NULL, *sent = NULL, *event_log = NULL;
+  char *rejected = NULL, *rejection = NULL, *deliveries = NULL;
+  int rc = 0;
+
+  /* An action argument that happens to share a runtime key's name is an
+   * ordinary argument: it reaches the action verbatim under args. */
+  rc |= fx_reset();
+  rc |= write_argkeys_fixture();
+  (void)setenv("LLM_MOCK_RESPONSE_PATHS",
+               "workspace/fixtures/argkeys_action_call.json", 1);
+  g = harness_gateway_init("argkeys");
+  rc |= expect(g != NULL, "runtime-named argument fixture floop loads");
+  if (!g) goto done;
+  rc |= expect(harness_gateway_publish(g, "tests", "fetch the event") == 0,
+               "publish a request the agent answers with a runtime-named argument");
+  rc |= expect(drive_until_file_contains(g, "workspace/runs/run_001/event_log.jsonl",
+                                         "\"type\":\"run_done\"", 8000) == 0,
+               "the run carrying the action call retires");
+  drive_for_ms(g, 200);
+  harness_gateway_close(g);
+  g = NULL;
+  sent = read_first_action_call_artifact("run_001", ".input.json");
+  received = read_first_action_call_artifact("run_001", ".output.json");
+  (void)test_read_file("workspace/runs/run_001/event_log.jsonl", &event_log);
+  (void)test_read_file("workspace/logs/rejected_events.jsonl", &rejected);
+  rc |= expect(access("workspace/runs/run_001/agent_outputs/001_handler.json.rejected.json",
+                      F_OK) != 0,
+               "a runtime-named action argument is not rejected");
+  rc |= expect_no_substr(rejected ? rejected : "", "invalid_agent_call",
+                         "no invalid_agent_call is logged for the action call");
+  rc |= expect_substr(event_log ? event_log : "",
+                      "\"action\":\"argkeys_echo\",\"args\":{\"event_id\":\"evt_123\","
+                      "\"source\":\"calendar\",\"run_id\":\"run_zzz\"}",
+                      "the action_request nests the arguments verbatim under args");
+  rc |= expect_substr(sent ? sent : "", "\"args\":{\"event_id\":\"evt_123\"",
+                      "the action receives event_id as its own argument");
+  rc |= expect_substr(sent ? sent : "", "\"run_id\":\"run_001\"",
+                      "the request envelope still carries the runtime's own run_id");
+  rc |= expect_substr(received ? received : "",
+                      "ARGKEYS_RECEIVED event_id=evt_123 source=calendar",
+                      "the action saw the argument values it was given");
+  rc |= expect_no_substr(event_log ? event_log : "", "\"type\":\"run_failed\"",
+                         "the action call completes without failure");
+
+  /* Where args become a runtime payload verbatim, the runtime's names are
+   * still refused, and the refusal says which key. */
+  free(rejected);
+  rejected = NULL;
+  rc |= fx_reset();
+  rc |= write_argkeys_fixture();
+  (void)setenv("LLM_MOCK_RESPONSE_PATHS",
+               "workspace/fixtures/argkeys_forged_payload.json:"
+               "workspace/fixtures/argkeys_reply.json", 1);
+  g = harness_gateway_init("argkeys");
+  rc |= expect(g != NULL, "fixture floop loads for the forged payload");
+  if (!g) goto done;
+  rc |= expect(harness_gateway_publish(g, "tests", "forge a task") == 0,
+               "publish a request the agent answers with a forged task payload");
+  rc |= expect(drive_until_file_contains(g, "workspace/logs/deliveries.jsonl",
+                                         "ARGKEYS_PAYLOAD_REFUSED_OK", 12000) == 0,
+               "the agent repairs the refused payload and replies");
+  drive_for_ms(g, 200);
+done:
+  if (g) harness_gateway_close(g);
+  logs = read_all_run_logs();
+  (void)test_read_file("workspace/logs/deliveries.jsonl", &deliveries);
+  (void)test_read_file(
+      "workspace/runs/run_001/agent_outputs/001_handler.json.rejected.json",
+      &rejection);
+  (void)test_read_file("workspace/logs/rejected_events.jsonl", &rejected);
+  rc |= expect_substr(rejection ? rejection : "",
+                      "call args must not carry the runtime key \\\"event_id\\\"",
+                      "a forged task payload is refused by the key's name");
+  rc |= expect_substr(rejected ? rejected : "",
+                      "call args must not carry the runtime key",
+                      "the refusal is logged as an invalid_agent_call");
+  rc |= expect_no_substr(logs ? logs : "", "forged correlation",
+                         "the forged payload never becomes a task");
+  rc |= expect(count_substr(deliveries ? deliveries : "",
+                            "ARGKEYS_PAYLOAD_REFUSED_OK") == 1,
+               "the repaired reply is delivered exactly once");
+  free(rejection);
+  free(rejected);
+  free(deliveries);
+  free(event_log);
+  free(received);
+  free(sent);
+  free(logs);
+  fx_restore_env("LLM_MOCK_RESPONSE_PATHS", saved_paths);
+  fx_restore_env("FCLAW_MODEL_PROFILES", saved_profiles);
+  return rc;
+}
+
+/* ===== reply and result ceilings ================================== */
+
+/* A fake worker whose final text is as long as the test says; the
+ * runner, not the worker, decides what reaches the model. */
+static int write_long_final_fake_codex(void) {
+  return write_exec("workspace/fixtures/fake_codex.sh",
+      "#!/usr/bin/env bash\n"
+      "set -euo pipefail\n"
+      "out=\"\"\n"
+      "while [ \"$#\" -gt 0 ]; do case \"$1\" in\n"
+      "  -o) out=\"$2\"; shift 2 ;;\n"
+      "  -C) shift 2 ;;\n"
+      "  *) shift ;;\n"
+      "esac; done\n"
+      "cat >/dev/null\n"
+      "mkdir -p \"$(dirname \"$out\")\"\n"
+      "n=\"${FCLAW_TEST_FAKE_FINAL_BYTES:-6100}\"\n"
+      "{ head -c \"$n\" /dev/zero | tr '\\0' 'x'; "
+      "printf '\\nEND-OF-FINAL-%s\\n' \"$n\"; } > \"$out\"\n");
+}
+
+static char *run_long_final_worker(const char *final_bytes, int *rc_out) {
+  HarnessGateway *g;
+  char *logs = NULL;
+  int rc = 0;
+  rc |= fx_reset();
+  rc |= write_fatest_floop();
+  rc |= write_manager_mocks();
+  rc |= write_long_final_fake_codex();
+  (void)setenv("FCLAW_TEST_FAKE_FINAL_BYTES", final_bytes, 1);
+  (void)setenv("LLM_MOCK_RESPONSE_PATHS",
+               "workspace/fixtures/m1_user_create.json:"
+               "workspace/fixtures/m3_result_stale.json", 1);
+  g = harness_gateway_init("fatest");
+  rc |= expect(g != NULL, "fatest floop loads for the long final text");
+  if (g) {
+    rc |= expect(harness_gateway_publish(g, "tests",
+                 "put this youtube playlist on my spotify") == 0,
+                 "publish the work request");
+    rc |= expect(drive_until_file_contains(g, "workspace/runs/run_002/event_log.jsonl",
+                                           "\"type\":\"operation_result\"", 12000) == 0,
+                 "the worker's result returns as its own run");
+    drive_for_ms(g, 200);
+    harness_gateway_close(g);
+  }
+  logs = read_all_run_logs();
+  if (getenv("FCLAW_TEST_DEBUG_DUMP")) {
+    char name[128];
+    char *ops = NULL, *narration = NULL, *steps = NULL;
+    (void)test_read_file("workspace/memory/state/operations.json", &ops);
+    (void)test_read_file("workspace/memory/state/work_steps.json", &steps);
+    (void)test_read_file("workspace/logs/narration.jsonl", &narration);
+    snprintf(name, sizeof(name), "longfinal_%s_logs.jsonl", final_bytes);
+    debug_dump_write(name, logs);
+    snprintf(name, sizeof(name), "longfinal_%s_ops.json", final_bytes);
+    debug_dump_write(name, ops);
+    snprintf(name, sizeof(name), "longfinal_%s_steps.json", final_bytes);
+    debug_dump_write(name, steps);
+    snprintf(name, sizeof(name), "longfinal_%s_narration.jsonl", final_bytes);
+    debug_dump_write(name, narration);
+    {
+      char cmd[512];
+      snprintf(cmd, sizeof(cmd),
+               "{ for d in workspace/logs/codex_ops/*; do echo \"== $d\"; "
+               "ls -la \"$d\"; cat \"$d/state.json\"; echo; cat \"$d/stderr.log\"; "
+               "cat \"$d/exit_code\"; echo; wc -c \"$d/final.txt\"; done; "
+               "echo '== bus'; ls -la workspace/bus/inbox workspace/bus/processed; "
+               "echo '== rejected'; cat workspace/logs/rejected_events.jsonl; "
+               "echo '== gateway.log'; tail -20 workspace/logs/gateway.log; } "
+               "> \"$FCLAW_TEST_DEBUG_DUMP/longfinal_%s_worker.txt\" 2>&1",
+               final_bytes);
+      (void)system(cmd);
+    }
+    free(steps);
+    free(narration);
+    free(ops);
+  }
+  *rc_out |= rc;
+  return logs;
+}
+
+/* Scraps relayed a 6,159-byte campsite list cut mid-URL at 4,095 bytes as
+ * if it were complete (run_1729): the runner copied final.txt through an
+ * RT_LARGE buffer while every later stage allowed 8,192. The result now
+ * keeps the operation-result ceiling intact, and a longer final text is
+ * cut on a byte boundary the reader can see. */
+int managed_worker_final_text_keeps_the_result_ceiling_and_marks_a_cut(void) {
+  char *saved_profiles = fx_capture_env("FCLAW_MODEL_PROFILES");
+  char *saved_paths = fx_capture_env("LLM_MOCK_RESPONSE_PATHS");
+  char *saved_codex = fx_capture_env("FCLAW_CODEX_BIN");
+  char *saved_bytes = fx_capture_env("FCLAW_TEST_FAKE_FINAL_BYTES");
+  char *saved_cfg = NULL;
+  char *logs = NULL;
+  char *needle = NULL;
+  int rc = 0;
+
+  rc |= test_config_enable_all(&saved_cfg);
+  (void)setenv("FCLAW_MODEL_PROFILES", "workspace/fixtures/model_profiles.json", 1);
+  (void)setenv("FCLAW_CODEX_BIN", "workspace/fixtures/fake_codex.sh", 1);
+
+  needle = (char *)malloc(8001);
+  rc |= expect(needle != NULL, "needle allocated");
+  if (!needle) goto done;
+
+  /* 6,100 bytes: over the old 4,095-byte cut, under the 8,192 ceiling. */
+  logs = run_long_final_worker("6100", &rc);
+  memset(needle, 'x', 6100);
+  needle[6100] = '\0';
+  rc |= expect_substr(logs ? logs : "", needle,
+                      "a 6,100-byte final text reaches the operation_result intact");
+  rc |= expect_substr(logs ? logs : "", "END-OF-FINAL-6100",
+                      "the final text's last line survives");
+  rc |= expect_no_substr(logs ? logs : "", "truncated by FloofClaw",
+                         "a final text under the ceiling is not marked as cut");
+  free(logs);
+  logs = NULL;
+
+  /* 20,000 bytes (20,019 with the fake's last line): cut at the ceiling,
+   * and the cut says so. */
+  logs = run_long_final_worker("20000", &rc);
+  memset(needle, 'x', 8000);
+  needle[8000] = '\0';
+  rc |= expect_substr(logs ? logs : "", needle,
+                      "a long final text keeps at least 8,000 of its bytes");
+  rc |= expect_substr(logs ? logs : "", "[truncated by FloofClaw: ",
+                      "the cut is marked in the text the model reads");
+  rc |= expect_substr(logs ? logs : "", " of 20019 bytes shown]",
+                      "the marker names the file's real length");
+  rc |= expect_no_substr(logs ? logs : "", "END-OF-FINAL-20000",
+                         "the text past the ceiling is gone, not hidden");
+
+done:
+  free(needle);
+  free(logs);
+  fx_restore_env("FCLAW_TEST_FAKE_FINAL_BYTES", saved_bytes);
+  fx_restore_env("FCLAW_CODEX_BIN", saved_codex);
+  fx_restore_env("LLM_MOCK_RESPONSE_PATHS", saved_paths);
+  fx_restore_env("FCLAW_MODEL_PROFILES", saved_profiles);
+  test_config_restore(saved_cfg);
+  return rc;
+}
+
+static char *repeated_text(char fill, size_t n, const char *tail) {
+  size_t tail_len = tail ? strlen(tail) : 0;
+  char *s = (char *)malloc(n + 1);
+  if (!s) return NULL;
+  memset(s, fill, n);
+  if (tail_len && tail_len <= n) memcpy(s + n - tail_len, tail, tail_len);
+  s[n] = '\0';
+  return s;
+}
+
+static int write_calls_reply_fixture(const char *path, const char *message) {
+  size_t cap = strlen(message) + 256;
+  char *fixture = (char *)malloc(cap);
+  int rc;
+  if (!fixture) return -1;
+  snprintf(fixture, cap,
+           "{\"calls\":[{\"name\":\"message\",\"args\":{\"message\":\"%s\"}},"
+           "{\"name\":\"task.update\",\"args\":{\"task_id\":\"__TASK_ID__\","
+           "\"state\":\"completed\"}}]}\n",
+           message);
+  rc = test_write_file(path, fixture);
+  free(fixture);
+  return rc;
+}
+
+/* Every copy on the reply path carried RT_LARGE; a reply over 4,095 bytes
+ * would have been recorded as delivered with empty text. */
+int message_reply_of_six_kib_is_delivered_intact(void) {
+  char *saved_profiles = fx_capture_env("FCLAW_MODEL_PROFILES");
+  char *saved_paths = fx_capture_env("LLM_MOCK_RESPONSE_PATHS");
+  char *message = repeated_text('a', 6000, "END-6K");
+  char *deliveries = NULL;
+  char response[RT_MESSAGE_TEXT_MAX + 1] = "";
+  char run_id[64] = "";
+  int rc = 0, run_rc;
+
+  rc |= fx_reset();
+  rc |= expect(message != NULL, "6,000-byte reply allocated");
+  rc |= write_calls_reply_fixture("workspace/fixtures/reply_6k.json",
+                                  message ? message : "");
+  (void)setenv("FCLAW_MODEL_PROFILES", "tests/fixtures/smoke/model_profiles_mock.json", 1);
+  (void)setenv("LLM_MOCK_RESPONSE_PATHS", "workspace/fixtures/reply_6k.json", 1);
+  run_rc = harness_run("tests", "openclaw", "give me the long version",
+                       response, sizeof(response), run_id, sizeof(run_id));
+  rc |= expect(run_rc == 0, "a 6,000-byte reply completes the run");
+  rc |= expect(strlen(response) == 6000, "the reply arrives at its full length");
+  rc |= expect_substr(response, "END-6K", "the reply's last bytes are delivered");
+  (void)test_read_file("workspace/logs/deliveries.jsonl", &deliveries);
+  rc |= expect_substr(deliveries ? deliveries : "", "END-6K",
+                      "the delivery ledger carries the whole reply");
+  rc |= expect_no_substr(deliveries ? deliveries : "", "\"text\":\"\"",
+                         "no delivery is recorded with empty text");
+  free(deliveries);
+  free(message);
+  fx_restore_env("LLM_MOCK_RESPONSE_PATHS", saved_paths);
+  fx_restore_env("FCLAW_MODEL_PROFILES", saved_profiles);
+  return rc;
+}
+
+/* Over the ceiling, the normalizer refuses the call with the byte count so
+ * the repair turn can shorten it; nothing is committed or delivered until
+ * the model does. */
+int message_reply_over_the_ceiling_is_refused_and_repaired(void) {
+  char *saved_profiles = fx_capture_env("FCLAW_MODEL_PROFILES");
+  char *saved_paths = fx_capture_env("LLM_MOCK_RESPONSE_PATHS");
+  char *message = repeated_text('b', 9000, "END-9K");
+  char *deliveries = NULL, *rejected = NULL;
+  char response[RT_MESSAGE_TEXT_MAX + 1] = "";
+  char run_id[64] = "";
+  int rc = 0, run_rc;
+
+  rc |= fx_reset();
+  rc |= expect(message != NULL, "9,000-byte reply allocated");
+  rc |= write_calls_reply_fixture("workspace/fixtures/reply_9k.json",
+                                  message ? message : "");
+  rc |= write_calls_reply_fixture("workspace/fixtures/reply_short.json",
+                                  "SHORT-OK after shortening");
+  (void)setenv("FCLAW_MODEL_PROFILES", "tests/fixtures/smoke/model_profiles_mock.json", 1);
+  (void)setenv("LLM_MOCK_RESPONSE_PATHS",
+               "workspace/fixtures/reply_9k.json:"
+               "workspace/fixtures/reply_short.json", 1);
+  run_rc = harness_run("tests", "openclaw", "give me the long version",
+                       response, sizeof(response), run_id, sizeof(run_id));
+  rc |= expect(run_rc == 0, "the repaired reply completes the run");
+  rc |= expect_substr(response, "SHORT-OK", "the shortened reply is what arrives");
+  (void)test_read_file("workspace/logs/rejected_events.jsonl", &rejected);
+  rc |= expect_substr(rejected ? rejected : "",
+                      "message is 9000 bytes; a message delivers at most 8192 bytes",
+                      "the refusal names the byte count and the ceiling");
+  (void)test_read_file("workspace/logs/deliveries.jsonl", &deliveries);
+  rc |= expect_no_substr(deliveries ? deliveries : "", "END-9K",
+                         "the over-long reply is never delivered");
+  rc |= expect_no_substr(deliveries ? deliveries : "", "\"text\":\"\"",
+                         "no delivery is recorded with empty text");
+  rc |= expect(count_substr(deliveries ? deliveries : "", "SHORT-OK") == 1,
+               "the shortened reply is delivered exactly once");
+  free(rejected);
+  free(deliveries);
+  free(message);
+  fx_restore_env("LLM_MOCK_RESPONSE_PATHS", saved_paths);
+  fx_restore_env("FCLAW_MODEL_PROFILES", saved_profiles);
+  return rc;
+}
+
+/* The conversational adapter (hello, companion) skips the calls
+ * normalizer, so fc_message is the last guard: it fails the action with
+ * the ceiling named instead of delivering an empty message as success. */
+int conversational_reply_over_the_ceiling_fails_loudly(void) {
+  char *saved_path = fx_capture_env("LLM_MOCK_RESPONSE_PATH");
+  char *saved_paths = fx_capture_env("LLM_MOCK_RESPONSE_PATHS");
+  char *message = repeated_text('c', 9000, "END-9K");
+  char *fixture = NULL, *log = NULL, *deliveries = NULL;
+  HarnessGateway *g = NULL;
+  int rc = 0;
+
+  rc |= fx_reset();
+  rc |= expect(message != NULL, "9,000-byte conversational reply allocated");
+  fixture = (char *)malloc(9200);
+  if (fixture && message) {
+    snprintf(fixture, 9200, "{\"message\":\"%s\"}\n", message);
+    rc |= test_write_file("workspace/fixtures/conversational_9k.json", fixture);
+  }
+  (void)unsetenv("LLM_MOCK_RESPONSE_PATHS");
+  (void)setenv("LLM_MOCK_RESPONSE_PATH", "workspace/fixtures/conversational_9k.json", 1);
+  g = harness_gateway_init("hello");
+  rc |= expect(g != NULL, "hello floop loads");
+  if (g) {
+    rc |= expect(harness_gateway_publish(g, "tests", "hi") == 0,
+                 "publish a request the speaker answers with too much");
+    rc |= expect(drive_until_file_contains(g, "workspace/runs/run_001/event_log.jsonl",
+                                           "\"type\":\"action_failed\"", 5000) == 0,
+                 "the message action fails instead of succeeding empty");
+    drive_for_ms(g, 200);
+    harness_gateway_close(g);
+  }
+  (void)test_read_file("workspace/runs/run_001/event_log.jsonl", &log);
+  rc |= expect_substr(log ? log : "", "\"action\":\"message\"",
+                      "the failed action is the message");
+  rc |= expect_substr(log ? log : "", "a message delivers at most 8192 bytes",
+                      "the failure names the ceiling");
+  (void)test_read_file("workspace/logs/deliveries.jsonl", &deliveries);
+  rc |= expect_no_substr(deliveries ? deliveries : "", "\"text\":\"\"",
+                         "no empty delivery is recorded");
+  rc |= expect_no_substr(deliveries ? deliveries : "", "END-9K",
+                         "the over-long reply is not delivered");
+  free(deliveries);
+  free(log);
+  free(fixture);
+  free(message);
+  fx_restore_env("LLM_MOCK_RESPONSE_PATH", saved_path);
+  fx_restore_env("LLM_MOCK_RESPONSE_PATHS", saved_paths);
+  return rc;
+}

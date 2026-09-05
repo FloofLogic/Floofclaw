@@ -154,7 +154,7 @@ void tg_drive_send(TgAdapter *a, int revents, uint64_t now_ms) {
   if (a->send.state == TG_CONN_IDLE) {
     if (a->out_count <= 0 || now_ms < a->send.retry_after_ms) return;
     if (tg_conn_start(a, &a->send, now_ms) != 0 ||
-        a->send.state != TG_CONN_TCP)
+        a->send.state != TG_CONN_RESOLVING)
       return;
     if (tg_build_send_request(a, &a->outq[a->out_head]) != 0) {
       (void)rt_narrate(

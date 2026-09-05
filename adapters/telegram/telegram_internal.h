@@ -1,9 +1,11 @@
 #ifndef FCLAW_TELEGRAM_INTERNAL_H
 #define FCLAW_TELEGRAM_INTERNAL_H
 
+#include "../../runtime/runtime.h"
 #include "../../runtime/gateway/adapter.h"
 #include "../../runtime/bus/media_manifest.h"
 #include "../../runtime/support/json.h"
+#include "../../runtime/support/net.h"
 #include "../../runtime/support/net_tls.h"
 #include "../../runtime/support/reconnect_backoff.h"
 
@@ -27,12 +29,13 @@
 #define TG_RX_MAX          262144   /* getUpdates can return a batch */
 #define TG_TX_MAX          16384
 #define TG_BODY_MAX        262144
-#define TG_TEXT_MAX        8192
+#define TG_TEXT_MAX        (RT_MESSAGE_TEXT_MAX + 1) /* one whole reply */
 #define TG_MESSAGE_CHUNK   4096     /* Telegram's own sendMessage cap */
 #define TG_OUT_QUEUE_MAX   64
 #define TG_ALLOWED_MAX     16
 #define TG_RETRY_MS        5000ULL
 #define TG_PROGRESS_TIMEOUT_MS 90000ULL  /* > the 50s poll it must outlive */
+#define TG_RESOLVE_TIMEOUT_MS  30000ULL
 #define TG_OFFSET_PATH     ".fclaw/run/telegram_offset"
 #define TG_DELIVERIES_LOG  "workspace/logs/deliveries.jsonl"
 #define TG_FILE_ID_MAX     256
@@ -41,6 +44,7 @@
 
 typedef enum {
   TG_CONN_IDLE = 0,
+  TG_CONN_RESOLVING,
   TG_CONN_TCP,
   TG_CONN_TLS,
   TG_CONN_WRITING,
@@ -54,6 +58,8 @@ typedef enum {
 typedef struct {
   TgConnState state;
   int fd;
+  NetResolve *resolve;          /* in-flight async DNS lookup (TG_CONN_RESOLVING) */
+  uint64_t resolve_deadline_ms;
   int plain;
   FcTls *tls;
   short want;

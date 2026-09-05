@@ -799,6 +799,16 @@ normal `action_runner` executes it and records an `action_succeeded` event.
 Channels and CLIs should deliver visible output from message deliveries, not
 from raw agent text.
 
+A message carries at most `RT_MESSAGE_TEXT_MAX` (8,192) bytes of UTF-8.
+Every copy on the reply path — the intrinsic, the terminal event's delivery
+fragment, the `deliveries.jsonl` line, each adapter's tailer, the CLI
+channel — is sized for that ceiling. A longer text is refused twice, never
+shortened: the normalizer rejects the call with the byte count so a repair
+turn can cut it, and `fc_message` fails the action with the same limit if
+one reaches it anyway. Managed-worker final text has its own ceiling,
+`RT_OPERATION_RESULT_TEXT_MAX` (8,192); a longer worker result is cut on a
+UTF-8 boundary and ends with a line saying how much was shown.
+
 ## Builtins
 
 Initial builtin:
@@ -1464,7 +1474,7 @@ The tests should preserve these guarantees:
 
 Test style:
 
-- keep `make test` centered on 41 unit checks, 192 integration checks, and one
+- keep `make test` centered on 44 unit checks, 195 integration checks, and one
   representative hermetic, mock-provider-backed smoke, with focused shell
   probes for public CLI, app, recovery, and portability contracts
 - test contracts rather than implementation trivia, using unit/integration

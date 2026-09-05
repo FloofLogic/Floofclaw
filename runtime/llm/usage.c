@@ -7,6 +7,16 @@
 #include <string.h>
 #include <time.h>
 
+const char *llm_budget_outcome_name(LlmBudgetOutcome outcome) {
+  switch (outcome) {
+    case LLM_BUDGET_KEPT: return "kept";
+    case LLM_BUDGET_SETTLED: return "settled";
+    case LLM_BUDGET_RELEASED: return "released";
+    case LLM_BUDGET_NONE: break;
+  }
+  return "none";
+}
+
 void llm_extract_usage(const char *provider_kind, const char *response_json,
                        LlmUsage *usage_out) {
   JsonRef root, usage, details;
@@ -15,6 +25,8 @@ void llm_extract_usage(const char *provider_kind, const char *response_json,
   long long total_tokens = 0;
   long long input_tokens = 0;
   long long output_tokens = 0;
+  long long thought_tokens = 0;
+  long long cache_creation_tokens = 0;
   if (!provider_kind || !usage_out || !response_json) return;
   if (json_ref_first_object(response_json, &root) != 0) return;
   if (strcmp(provider_kind, "gemini_key") == 0) {
@@ -22,6 +34,10 @@ void llm_extract_usage(const char *provider_kind, const char *response_json,
     (void)json_ref_object_get_long(&usage, "promptTokenCount", &input_tokens);
     (void)json_ref_object_get_long(&usage, "candidatesTokenCount", &output_tokens);
     (void)json_ref_object_get_long(&usage, "totalTokenCount", &total_tokens);
+    /* Gemini bills thinking as output but reports it beside candidates. */
+    if (json_ref_object_get_long(&usage, "thoughtsTokenCount",
+                                 &thought_tokens) == 0 && thought_tokens > 0)
+      output_tokens += thought_tokens;
     usage_out->input_tokens = input_tokens;
     usage_out->output_tokens = output_tokens;
     usage_out->total_tokens = total_tokens ? total_tokens : input_tokens + output_tokens;
@@ -54,19 +70,31 @@ void llm_extract_usage(const char *provider_kind, const char *response_json,
                                  &usage_out->provider_cached_input_tokens) == 0)
       usage_out->provider_cached_input_tokens_reported = 1;
   } else {
+    /* Anthropic's input_tokens is the uncached remainder only; the whole
+     * prompt is that plus both cache counters. Fold them in so the ledger's
+     * input_tokens means the same thing on every provider. */
     (void)json_ref_object_get_long(&usage, "input_tokens", &input_tokens);
     (void)json_ref_object_get_long(&usage, "output_tokens", &output_tokens);
+    if (json_ref_object_get_long(&usage, "cache_read_input_tokens",
+                                 &usage_out->provider_cached_input_tokens) == 0) {
+      usage_out->provider_cached_input_tokens_reported = 1;
+      if (usage_out->provider_cached_input_tokens > 0)
+        input_tokens += usage_out->provider_cached_input_tokens;
+    }
+    if (json_ref_object_get_long(&usage, "cache_creation_input_tokens",
+                                 &cache_creation_tokens) == 0) {
+      usage_out->provider_cache_creation_input_tokens = cache_creation_tokens;
+      usage_out->provider_cache_creation_input_tokens_reported = 1;
+      if (cache_creation_tokens > 0) input_tokens += cache_creation_tokens;
+    }
     usage_out->input_tokens = input_tokens;
     usage_out->output_tokens = output_tokens;
     usage_out->total_tokens = input_tokens + output_tokens;
-    if (json_ref_object_get_long(&usage, "cache_read_input_tokens",
-                                 &usage_out->provider_cached_input_tokens) == 0)
-      usage_out->provider_cached_input_tokens_reported = 1;
   }
 }
 
 int llm_usage_record_parse(const char *json, LlmUsageRecord *out) {
-  JsonRef root, cached;
+  JsonRef root, cached, created;
   if (!json || !out) return -1;
   memset(out, 0, sizeof(*out));
   if (json_ref_top_object(json, &root) != 0 ||
@@ -106,11 +134,22 @@ int llm_usage_record_parse(const char *json, LlmUsageRecord *out) {
       out->input_tokens < 0 || out->output_tokens < 0 ||
       out->total_tokens < 0 || out->duration_ms < 0)
     return -1;
-  if (json_ref_is_null(&cached)) return 0;
-  if (json_ref_get_long(&cached, &out->provider_cached_input_tokens) != 0 ||
-      out->provider_cached_input_tokens < 0)
-    return -1;
-  out->provider_cached_input_tokens_reported = 1;
+  if (!json_ref_is_null(&cached)) {
+    if (json_ref_get_long(&cached, &out->provider_cached_input_tokens) != 0 ||
+        out->provider_cached_input_tokens < 0)
+      return -1;
+    out->provider_cached_input_tokens_reported = 1;
+  }
+  /* Added in 0.31.0; records written before it simply never reported one. */
+  if (json_ref_object_get(&root, "provider_cache_creation_input_tokens",
+                          &created) == 0 &&
+      !json_ref_is_null(&created)) {
+    if (json_ref_get_long(&created,
+                          &out->provider_cache_creation_input_tokens) != 0 ||
+        out->provider_cache_creation_input_tokens < 0)
+      return -1;
+    out->provider_cache_creation_input_tokens_reported = 1;
+  }
   return 0;
 }
 
@@ -120,6 +159,7 @@ void llm_record_usage(const char *floop, const char *run_id, int call_seq,
   char ts[64];
   char line[1024];
   char cached_json[64];
+  char created_json[64];
   time_t now;
   struct tm tmv;
   if (!floop || !*floop || !run_id || !*run_id || call_seq < 1 ||
@@ -134,6 +174,11 @@ void llm_record_usage(const char *floop, const char *run_id, int call_seq,
              usage->provider_cached_input_tokens);
   else
     snprintf(cached_json, sizeof(cached_json), "null");
+  if (usage->provider_cache_creation_input_tokens_reported)
+    snprintf(created_json, sizeof(created_json), "%lld",
+             usage->provider_cache_creation_input_tokens);
+  else
+    snprintf(created_json, sizeof(created_json), "null");
   snprintf(line, sizeof(line),
            "{\"ts\":\"%s\",\"floop\":\"%s\",\"run_id\":\"%s\",\"call_seq\":%d,"
            "\"agent\":\"%s\",\"profile\":\"%s\",\"provider\":\"%s\","
@@ -141,14 +186,16 @@ void llm_record_usage(const char *floop, const char *run_id, int call_seq,
            "\"input_media_count\":%zu,\"input_media_bytes\":%llu,"
            "\"output_chars\":%lld,"
            "\"input_tokens\":%lld,\"output_tokens\":%lld,\"total_tokens\":%lld,"
-           "\"provider_cached_input_tokens\":%s,\"duration_ms\":%lld}\n",
+           "\"provider_cached_input_tokens\":%s,"
+           "\"provider_cache_creation_input_tokens\":%s,"
+           "\"duration_ms\":%lld}\n",
            ts, floop, run_id, call_seq,
            agent_id, profile->id, profile->provider, profile->model,
            usage->input_chars, usage->input_media_count,
            (unsigned long long)usage->input_media_bytes,
            usage->output_chars,
            usage->input_tokens, usage->output_tokens, usage->total_tokens,
-           cached_json,
+           cached_json, created_json,
            usage->duration_ms);
   (void)fs_mkdir_p("workspace/logs");
   (void)fs_append_text("workspace/logs/llm_usage.jsonl", line);

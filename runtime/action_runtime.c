@@ -102,14 +102,37 @@ static RuntimeActionFn runtime_action_lookup(const char *name) {
   return NULL;
 }
 
+/* The reply itself. A text the delivery path cannot carry is a failure
+ * that names the ceiling, never an empty or shortened delivery recorded
+ * as success: the runtime's word about what it delivered has to be true. */
 static int fc_message(RtRun *r, const char *rid, const RtActionDef *def,
                       const char *args, char *result, size_t result_len,
                       char *error, size_t error_len) {
-  char message_text[RT_LARGE] = "";
-  char escaped_text[RT_LARGE * 2];
+  char message_text[RT_MESSAGE_TEXT_MAX + 1] = "";
+  char escaped_text[RT_MESSAGE_ESCAPED_MAX + 1];
+  JsonRef root, value;
   (void)r; (void)rid; (void)def;
-  (void)rt_json_get_string(args && *args ? args : "{}", "message", message_text, sizeof(message_text));
-  if (json_escape(message_text, escaped_text, sizeof(escaped_text)) != 0) escaped_text[0] = '\0';
+  if (json_ref_first_object(args && *args ? args : "{}", &root) != 0 ||
+      json_ref_object_get(&root, "message", &value) != 0 ||
+      value.type != JSON_REF_STRING) {
+    snprintf(error, error_len, "{\"message\":\"message must be a string\"}");
+    return -1;
+  }
+  /* json_ref_string_copy refuses rather than truncates. */
+  if (json_ref_string_copy(&value, message_text, sizeof(message_text)) != 0) {
+    snprintf(error, error_len,
+             "{\"message\":\"message is longer than %d bytes or is not valid "
+             "text; a message delivers at most %d bytes, so shorten it\"}",
+             RT_MESSAGE_TEXT_MAX, RT_MESSAGE_TEXT_MAX);
+    return -1;
+  }
+  if (json_escape(message_text, escaped_text, sizeof(escaped_text)) != 0) {
+    snprintf(error, error_len,
+             "{\"message\":\"message escapes to more than %d bytes; "
+             "shorten it\"}",
+             RT_MESSAGE_ESCAPED_MAX);
+    return -1;
+  }
   snprintf(result, result_len, "{\"message\":\"%s\"}", escaped_text);
   snprintf(error, error_len, "null");
   return 0;

@@ -4,7 +4,7 @@
 
 <p>
   <img height="20" alt="C11" src="https://img.shields.io/badge/C-C11-A8B9CC?style=flat&amp;logo=c&amp;logoColor=white">
-  <img height="20" alt="Source build: about 544 KiB" src="https://img.shields.io/badge/source%20build-~544%20KiB-16A34A?style=flat">
+  <img height="20" alt="Source build: about 560 KiB" src="https://img.shields.io/badge/source%20build-~560%20KiB-16A34A?style=flat">
   <img height="20" alt="Platforms: macOS, Linux, Android ARM64" src="https://img.shields.io/badge/macOS%20%7C%20Linux%20%7C%20Android-2563EB?style=flat">
   <a href="LICENSE"><img height="20" alt="Apache 2.0 license" src="https://img.shields.io/badge/license-Apache%202.0-D22128?style=flat&amp;logo=apache&amp;logoColor=white"></a>
 </p>
@@ -22,7 +22,7 @@
 timers, API calls, and worker results into inspectable event-driven runs that
 survive restarts and continue until no work remains.
 
-**~544 KiB all-adapter optimized core · C11 · durable filesystem state · JSON/JSONL by
+**~560 KiB all-adapter optimized core · C11 · durable filesystem state · JSON/JSONL by
 default · macOS, Linux, and Android ARM64**
 
 ## 🚀 Quickstart
@@ -96,7 +96,7 @@ bash actions/common/web_read/build.sh
 
 **The engine is written entirely in C from scratch.** No Node, Python, JVM,
 framework, or language runtime sits underneath it. A package-manager-linked
-`make release-small` source build is about **544 KiB**; the downloadable macOS
+`make release-small` source build is about **560 KiB**; the downloadable macOS
 archive is about **4.34 MiB** because it embeds OpenSSL. Both use the macOS
 system libcurl. The mock-only build (`make MOCK_ONLY=1`) can omit both
 libraries.
@@ -127,7 +127,7 @@ and traced without treating an opaque “agent turn” as truth.
 
 ## 📏 Small enough to audit
 
-Measurements from 2026-08-25 on arm64 macOS with Apple clang 17. The binary is
+Measurements from 2026-09-04 on arm64 macOS with Apple clang 17. The binary is
 the stripped `release-small` artifact produced by
 `scripts/build_binary_archive.sh`, with static OpenSSL, system libcurl, and
 **all four adapters** (`discord irc telegram ws`), not the default `-O2`
@@ -137,10 +137,10 @@ and revision.
 
 | What | Measured result |
 | --- | ---: |
-| Downloadable macOS arm64 all-adapter executable (static OpenSSL) | **4,545,944 bytes (~4.34 MiB)** |
-| Runtime C/header source | **42,665 lines** |
+| Downloadable macOS arm64 all-adapter executable (static OpenSSL) | **4,546,024 bytes (~4.34 MiB)** |
+| Runtime C/header source | **43,932 lines** |
 | Full provider/TLS build libraries | **2** — libcurl and OpenSSL 3; `make MOCK_ONLY=1` omits both |
-| Mock-backed `hello` run | **~0.2 s** |
+| Mock-backed `hello` run | **~0.13 s** |
 | Idle isolated gateway RSS | **~8–10 MiB** |
 | Quiet supervision review | **exactly 1 model call** |
 
@@ -269,9 +269,9 @@ the dependency layout, API selection, and device smoke command.
 make test
 ```
 
-The routine offline gate runs 41 unit tests, 192 integration tests, fixture
+The routine offline gate runs 49 unit tests, 200 integration tests, fixture
 isolation, the local-client lifecycle probe, and a hermetic smoke with mock
-provider responses in under a minute. `make test-full` adds rebuild and
+provider responses in about a minute. `make test-full` adds rebuild and
 feature-selection contracts; release checks run it automatically.
 Major-version release preparation adds ASan, UBSan,
 small-stack, fuzz, chaos, disk-full/read-only, and thrash campaigns through

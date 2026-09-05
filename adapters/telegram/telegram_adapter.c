@@ -40,6 +40,7 @@ static short tg_want_events(FcTlsResult r) {
 
 void tg_conn_close(TgConn *c) {
   if (!c) return;
+  if (c->resolve) { net_resolve_free(c->resolve); c->resolve = NULL; }
   if (c->tls) { fc_tls_free(c->tls); c->tls = NULL; }
   if (c->fd >= 0) { net_close(c->fd); c->fd = -1; }
   c->state = TG_CONN_IDLE;
@@ -51,17 +52,21 @@ void tg_conn_close(TgConn *c) {
 }
 
 int tg_conn_start(TgAdapter *a, TgConn *c, uint64_t now_ms) {
-  int fd = -1;
   if (!a || !c || c->state != TG_CONN_IDLE || now_ms < c->retry_after_ms)
     return 0;
-  if (net_connect_nb(a->api_host, a->api_port, &fd) != 0 || fd < 0) {
+  /* Resolve api.telegram.org off the reactor thread. The caller builds the
+   * request into c->tx while it resolves; the connect happens in
+   * tg_conn_drive once the address is in. */
+  if (c->resolve) { net_resolve_free(c->resolve); c->resolve = NULL; }
+  c->resolve = net_resolve_begin(a->api_host, a->api_port);
+  if (!c->resolve) {
     c->retry_after_ms = now_ms + TG_RETRY_MS;
     return -1;
   }
-  c->fd = fd;
   c->plain = a->api_plain;
-  c->state = TG_CONN_TCP;
-  c->want = POLLOUT;
+  c->state = TG_CONN_RESOLVING;
+  c->resolve_deadline_ms = now_ms + TG_RESOLVE_TIMEOUT_MS;
+  c->want = POLLIN;
   c->rx_len = 0;
   return 0;
 }
@@ -142,6 +147,28 @@ int tg_read(TgConn *c) {
 int tg_conn_drive(TgAdapter *a, TgConn *c, int revents, uint64_t now_ms,
                   const char *what) {
   if (!a || !c) return -1;
+  if (c->state == TG_CONN_RESOLVING) {
+    int fd = -1;
+    int rc;
+    if (!c->resolve || now_ms >= c->resolve_deadline_ms) {
+      tg_conn_close(c); /* frees the resolve, returns to TG_CONN_IDLE */
+      c->retry_after_ms = now_ms + TG_RETRY_MS;
+      return -1;
+    }
+    rc = net_resolve_connect(c->resolve, &fd);
+    if (rc == 1) return 0; /* still resolving */
+    net_resolve_free(c->resolve);
+    c->resolve = NULL;
+    if (rc == 0) {
+      c->fd = fd;
+      c->state = TG_CONN_TCP;
+      c->want = POLLOUT;
+      return 0; /* connect in progress; wait for POLLOUT next pass */
+    }
+    tg_conn_close(c);
+    c->retry_after_ms = now_ms + TG_RETRY_MS;
+    return -1;
+  }
   if (c->state == TG_CONN_TCP && (revents & (POLLOUT | POLLERR | POLLHUP))) {
     if (net_check_connected(c->fd) != 1) {
       tg_conn_close(c);
@@ -690,14 +717,20 @@ static int tg_init(FcReactorModule *m) {
   return 0;
 }
 
+static void tg_collect_conn_fd(FcReactorModule *m, FcPollSet *ps, TgConn *c) {
+  if (c->state == TG_CONN_RESOLVING && c->resolve) {
+    int rfd = net_resolve_fd(c->resolve);
+    if (rfd >= 0) (void)fc_pollset_add(ps, rfd, POLLIN, m, c);
+  } else if (c->fd >= 0 && c->want) {
+    (void)fc_pollset_add(ps, c->fd, c->want, m, c);
+  }
+}
+
 static int tg_collect_fds(FcReactorModule *m, FcPollSet *ps) {
   TgAdapter *a = (TgAdapter *)m->state;
-  if (a->poll.fd >= 0 && a->poll.want)
-    (void)fc_pollset_add(ps, a->poll.fd, a->poll.want, m, &a->poll);
-  if (a->file.fd >= 0 && a->file.want)
-    (void)fc_pollset_add(ps, a->file.fd, a->file.want, m, &a->file);
-  if (a->send.fd >= 0 && a->send.want)
-    (void)fc_pollset_add(ps, a->send.fd, a->send.want, m, &a->send);
+  tg_collect_conn_fd(m, ps, &a->poll);
+  tg_collect_conn_fd(m, ps, &a->file);
+  tg_collect_conn_fd(m, ps, &a->send);
   return 0;
 }
 
@@ -807,7 +840,7 @@ static int tg_tick(FcReactorModule *m, uint64_t now_ms) {
       a->pending.resolve_index < a->pending.message.media_count &&
       a->file.state == TG_CONN_IDLE && now_ms >= a->file.retry_after_ms) {
     if (tg_conn_start(a, &a->file, now_ms) == 0 &&
-        a->file.state == TG_CONN_TCP && tg_build_file_request(a) != 0) {
+        a->file.state == TG_CONN_RESOLVING && tg_build_file_request(a) != 0) {
       (void)rt_narrate(
           "telegram: could not build getFile; fix: set the bot token with "
           "`fclaw auth set-stdin %s`", a->token_key);
@@ -819,7 +852,7 @@ static int tg_tick(FcReactorModule *m, uint64_t now_ms) {
   if (!a->pending.active && a->poll.state == TG_CONN_IDLE &&
       now_ms >= a->poll_next_ms) {
     if (tg_conn_start(a, &a->poll, now_ms) == 0 &&
-        a->poll.state == TG_CONN_TCP) {
+        a->poll.state == TG_CONN_RESOLVING) {
       if (tg_build_poll_request(a) != 0) {
         (void)rt_narrate(
             "telegram: could not build getUpdates; fix: set the bot token "
@@ -843,6 +876,10 @@ static int tg_tick(FcReactorModule *m, uint64_t now_ms) {
     tg_conn_close(&a->file);
     a->file.retry_after_ms = now_ms + TG_RETRY_MS;
   }
+  /* Advance any in-flight name resolution (also enforces its deadline). */
+  if (a->poll.state == TG_CONN_RESOLVING) (void)tg_conn_drive(a, &a->poll, 0, now_ms, "getUpdates");
+  if (a->file.state == TG_CONN_RESOLVING) (void)tg_conn_drive(a, &a->file, 0, now_ms, "getFile");
+  if (a->send.state == TG_CONN_RESOLVING) (void)tg_conn_drive(a, &a->send, 0, now_ms, "sendMessage");
   /* Outbound: pick up new deliveries, then push the queue. */
   tg_drain_deliveries(a);
   if (a->send.state == TG_CONN_IDLE && tg_send_pending(a))
@@ -865,6 +902,10 @@ static uint64_t tg_next_deadline(FcReactorModule *m, uint64_t now_ms) {
   else if (!a->pending.active && a->poll.state == TG_CONN_IDLE)
     next = a->poll_next_ms > now_ms ? a->poll_next_ms : now_ms;
   if (a->out_count > 0 || a->send.state != TG_CONN_IDLE) return now_ms;
+  if (a->poll.state == TG_CONN_RESOLVING && a->poll.resolve_deadline_ms < next)
+    next = a->poll.resolve_deadline_ms;
+  if (a->file.state == TG_CONN_RESOLVING && a->file.resolve_deadline_ms < next)
+    next = a->file.resolve_deadline_ms;
   return next;
 }
 

@@ -35,7 +35,10 @@ def current_usage_record(record):
     if record["call_seq"] < 1:
         return False
     cached = record.get("provider_cached_input_tokens", object())
-    return cached is None or nonnegative_int(cached)
+    if not (cached is None or nonnegative_int(cached)):
+        return False
+    created = record.get("provider_cache_creation_input_tokens", None)
+    return created is None or nonnegative_int(created)
 
 
 def current_cache_meta(meta):

@@ -267,12 +267,21 @@ static int parse_inbound_envelope(const char *path, ParsedEnvelope *out,
         PARSE_FAIL("invalid_field: payload.result.status");
     }
     /* Result payload overflow fails loudly at the boundary; it must
-     * never truncate silently into a smaller canonical result. */
+     * never truncate silently into a smaller canonical result. The span
+     * is the escaped form and the ceiling is on the decoded text the
+     * store carries, so decode before refusing: an escape-bearing text
+     * that fits must not be refused here after the publisher accepted it. */
     if (json_ref_object_get(&claim_result, "text", &status_ref) == 0 &&
         status_ref.type == JSON_REF_STRING &&
         (size_t)(status_ref.end - status_ref.start) >
-            RT_OPERATION_RESULT_TEXT_MAX)
-      PARSE_FAIL("result_payload_too_large");
+            RT_OPERATION_RESULT_TEXT_MAX) {
+      char *decoded = json_ref_string_dup(&status_ref);
+      size_t decoded_len = decoded ? strlen(decoded)
+                                   : (size_t)RT_OPERATION_RESULT_TEXT_MAX + 1U;
+      fc_xfree(decoded);
+      if (decoded_len > RT_OPERATION_RESULT_TEXT_MAX)
+        PARSE_FAIL("result_payload_too_large");
+    }
   } else if (out->is_affair_review) {
     if (json_ref_object_get_string(&payload, "affair_id", out->affair_id, sizeof(out->affair_id)) != 0 ||
         !out->affair_id[0])
@@ -1003,7 +1012,7 @@ void rt_ports_emit_message(RtRun *r,
                            const char *message_text,
                            char *out_fragment,
                            size_t out_fragment_len) {
-  char escaped_text[RT_LARGE * 2];
+  char escaped_text[RT_MESSAGE_ESCAPED_MAX + 1];
   char note[RT_XL];
   if (out_fragment && out_fragment_len) out_fragment[0] = '\0';
   if (!r || !r->ctx.origin_channel[0] || !r->ctx.origin_event_id[0]) return;

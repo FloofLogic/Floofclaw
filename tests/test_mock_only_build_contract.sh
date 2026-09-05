@@ -26,14 +26,26 @@ rm -f /tmp/fclaw_mockonly_err.$$
 # 2. A command-line CFLAGS must not disarm the feature defines.
 #    -Bn, not -n: a dry run over an already-current tree prints no recipe at
 #    all, which would pass every grep below for the wrong reason.
-make CFLAGS='-std=c11 -O0' -Bn 2>/dev/null | grep -Fq -- '-DFCLAW_HAVE_LIBCURL' ||
+#    The dry run goes to a file, never into `grep -q`: under pipefail a
+#    grep that exits at its first match kills make with SIGPIPE (141) and
+#    the pipeline reports failure with the recipe fully intact -- one seal
+#    in three failed that way on a loaded Mac.
+dry_run="${TMPDIR:-/tmp}/fclaw_mockonly_dry.$$"
+make CFLAGS='-std=c11 -O0' -Bn >"$dry_run" 2>/dev/null ||
+  fail "the dry run with a command-line CFLAGS did not complete"
+grep -Fq -- '-DFCLAW_HAVE_LIBCURL' "$dry_run" ||
   fail "a command-line CFLAGS dropped -DFCLAW_HAVE_LIBCURL"
 
 # 3. MOCK_ONLY=1 omits both optional libraries...
-make MOCK_ONLY=1 -Bn 2>/dev/null | grep -Fq -- '-DFCLAW_HAVE_LIBCURL' &&
+make MOCK_ONLY=1 -Bn >"$dry_run" 2>/dev/null ||
+  fail "the MOCK_ONLY=1 dry run did not complete"
+if grep -Fq -- '-DFCLAW_HAVE_LIBCURL' "$dry_run"; then
   fail "MOCK_ONLY=1 still defined FCLAW_HAVE_LIBCURL"
-make MOCK_ONLY=1 -Bn 2>/dev/null | grep -Fq -- '-DFCLAW_HAVE_OPENSSL' &&
+fi
+if grep -Fq -- '-DFCLAW_HAVE_OPENSSL' "$dry_run"; then
   fail "MOCK_ONLY=1 still defined FCLAW_HAVE_OPENSSL"
+fi
+rm -f "$dry_run"
 
 # 4. ...and the result compiles clean and runs the shipped mock floop.
 make clean >/dev/null

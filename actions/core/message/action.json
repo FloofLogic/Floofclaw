@@ -9,7 +9,7 @@
     "properties": {
       "message": {
         "type": "string",
-        "description": "Text to deliver to the user."
+        "description": "Text to deliver to the user: at most 8192 bytes of UTF-8. A longer message is refused with the limit named, never truncated; split a long answer across turns."
       }
     }
   },

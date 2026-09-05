@@ -249,7 +249,7 @@ registry leaves Git status unchanged.
 
 ## Key properties
 
-- `make test` runs 41 unit cases, 192 integration cases, fixture-isolation and
+- `make test` runs 44 unit cases, 195 integration cases, fixture-isolation and
   public-interface contract probes, and one hermetic, mock-provider-backed
   smoke using local fixtures only.
 - `FCLAW_LIVE_SMOKE=1 make live-smoke` checks the opt-in real-provider path

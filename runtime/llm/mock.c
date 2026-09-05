@@ -75,7 +75,7 @@ static int mock_replace_task_placeholder(const char *prompt,
   const char *token = "__TASK_ID__";
   const char *hit;
   char task_id[128];
-  char tmp[8192];
+  char tmp[LLM_RESP_MAX]; /* a fixture may be as long as a real response */
   size_t token_len = strlen(token), used = 0;
   const char *p = response_out;
   if (!strstr(response_out, token)) return 0;

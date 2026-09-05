@@ -32,8 +32,8 @@
 static void channel_log(const char *channel, const char *direction, const char *text) {
   char path[256];
   char ts[64];
-  char escaped[CHANNEL_LINE_MAX];
-  char line[CHANNEL_LINE_MAX + 256];
+  char escaped[RT_MESSAGE_ESCAPED_MAX + 1];
+  char line[RT_MESSAGE_ESCAPED_MAX + 256];
   time_t now;
   struct tm tmv;
   if (fs_mkdir_p(CHANNEL_LOG_DIR) != 0) return;
@@ -72,7 +72,7 @@ static int delivery_line_matches(const char *line, const char *origin_event_id,
   char got_origin[RT_SMALL] = "";
   char got_channel[RT_SMALL] = "";
   char request_id[RT_SMALL] = "";
-  char text[RT_LARGE] = "";
+  char text[RT_MESSAGE_TEXT_MAX + 1] = "";
   if (!line || !channel) return 0;
   if (json_ref_first_object(line, &root) != 0) return 0;
   if (run_id_out && run_id_out_len > 0) {
@@ -451,7 +451,7 @@ static void print_cli_spinner(size_t *idx) {
 static int drain_cli_deliveries(long long *cursor) {
   int printed = 0;
   while (1) {
-    char response[RT_LARGE] = "";
+    char response[RT_MESSAGE_TEXT_MAX + 1] = "";
     char run_id[RT_SMALL] = "";
     int rc = find_channel_delivery_since(cursor, "cli", response, sizeof(response),
                                          run_id, sizeof(run_id));
@@ -535,7 +535,7 @@ static void print_agent_channel_result(const char *channel, int rc,
 
 int channel_run_cli_interactive(const char *loop_name, int human) {
   char line[CHANNEL_LINE_MAX];
-  char response[RT_LARGE];
+  char response[RT_MESSAGE_TEXT_MAX + 1];
   char run_id[RT_SMALL];
   char live_loop[RT_SMALL] = "";
   int interactive = isatty(fileno(stdin));
@@ -575,7 +575,7 @@ int channel_run_cli_interactive(const char *loop_name, int human) {
 int channel_run_ws(const char *loop_name, int human) {
   char line[CHANNEL_LINE_MAX];
   char user_text[RT_LARGE];
-  char response[RT_LARGE];
+  char response[RT_MESSAGE_TEXT_MAX + 1];
   char run_id[RT_SMALL];
   char live_loop[RT_SMALL] = "";
   int preflight = channel_live_floop("ws", "ws", loop_name,
@@ -618,7 +618,7 @@ int channel_run_irc(const char *loop_name, int human) {
    * channels — is the adapter in adapters/irc/, selected at build time with
    * FCLAW_ADAPTERS and run by the gateway, not by this command. */
   char line[CHANNEL_LINE_MAX];
-  char response[RT_LARGE];
+  char response[RT_MESSAGE_TEXT_MAX + 1];
   char run_id[RT_SMALL];
   char live_loop[RT_SMALL] = "";
   int preflight = channel_live_floop("irc", "irc", loop_name,

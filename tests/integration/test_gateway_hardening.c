@@ -2256,14 +2256,20 @@ int dns_failure_uses_channel_backoff_and_narration(void) {
     fc_reconnect_backoff_init(&discord->reconnect_backoff,
                               discord->module_id_buf);
     net_test_fail_next_dns();
-    rc |= expect(dc_gateway_start_connect(discord, 2000U) != 0,
-                 "Discord treats failed getaddrinfo as connection failure");
-    rc |= expect(discord->next_reconnect_ms > 2000U,
-                 "Discord waits in shared reconnect backoff after DNS failure");
+    rc |= expect(dc_gateway_start_connect(discord, 2000U) == 0 &&
+                     discord->gw_state == DC_RESOLVING,
+                 "Discord begins an async resolve instead of blocking");
+    dc_drive_resolve(discord, 2000U);
+    rc |= expect(discord->gw_state == DC_DISCONNECTED &&
+                     discord->gw_resolve == NULL &&
+                     discord->next_reconnect_ms > 2000U,
+                 "a failed lookup falls into the shared reconnect backoff");
     retry_at = discord->next_reconnect_ms;
     net_test_fail_next_dns();
-    rc |= expect(dc_gateway_start_connect(discord, retry_at) != 0 &&
-                     discord->next_reconnect_ms > retry_at,
+    rc |= expect(dc_gateway_start_connect(discord, retry_at) == 0,
+                 "Discord begins the next resolve after backoff");
+    dc_drive_resolve(discord, retry_at);
+    rc |= expect(discord->next_reconnect_ms > retry_at,
                  "Discord remains patient across repeated DNS failure");
   }
   net_test_reset_dns();
@@ -2773,7 +2779,11 @@ int discord_rest_ambiguous_completion_is_bounded_and_narrated(void) {
                             "{\"content\":\"connect\"}") == 0,
                "queue pre-send connect failure fixture");
   net_test_fail_next_dns();
-  rc |= expect(dc_rest_start(a, 54000U) != 0 && a->out_count == 1 &&
+  rc |= expect(dc_rest_start(a, 54000U) == 0 &&
+                   a->rest_state == DC_REST_RESOLVING,
+               "pre-send resolve begins off the reactor without blocking");
+  dc_drive_rest_resolve(a, 54000U);
+  rc |= expect(a->out_count == 1 &&
                    a->rest_state == DC_REST_IDLE &&
                    a->rest_ambiguous_retries == 0U &&
                    a->rest_retry_after_ms == 55500U,
@@ -2986,5 +2996,55 @@ int view_debug_correlates_agent_stderr_by_artifact(void) {
                          "view -d never dumps unreferenced agent stderr");
   free(out);
   rc |= test_reset_workspace();
+  return rc;
+}
+
+/* The reactor is one cooperative thread, so net_connect_nb's synchronous
+ * getaddrinfo could freeze every module for the platform resolver timeout
+ * on a dead network (Truly, 2026-09-03: three ~30 s runtime-main stalls).
+ * net_resolve_* runs the lookup in a child and reports through a pollable
+ * fd, so the reactor keeps ticking. This proves the mechanism end to end
+ * on a real name and on the deterministic failure hook, without a live
+ * network dependency for the failure case. */
+int net_async_resolver_reports_through_a_pollable_fd(void) {
+  int rc = 0;
+  NetResolve *ok = NULL;
+  NetResolve *bad = NULL;
+  int fd = -1;
+  int drc;
+  struct pollfd pfd;
+  int tries;
+
+  /* A resolvable name returns a connect-in-progress fd through the fd. */
+  ok = net_resolve_begin("127.0.0.1", 9);
+  rc |= expect(ok != NULL, "net_resolve_begin returns at once for a real host");
+  rc |= expect(net_resolve_fd(ok) >= 0, "the resolve exposes a pollable fd");
+  drc = 1;
+  for (tries = 0; tries < 200 && drc == 1; ++tries) {
+    pfd.fd = net_resolve_fd(ok);
+    pfd.events = POLLIN;
+    (void)poll(&pfd, 1, 50);
+    drc = net_resolve_connect(ok, &fd);
+  }
+  rc |= expect(drc == 0 && fd >= 0,
+               "the resolved address yields a connect-in-progress fd");
+  if (fd >= 0) net_close(fd);
+  net_resolve_free(ok);
+
+  /* The failure hook reports NET_CONNECT_DNS_FAILED through the same fd,
+   * with no fork and no live lookup. */
+  fd = -1;
+  net_test_fail_next_dns();
+  bad = net_resolve_begin("gateway.discord.gg", 443);
+  rc |= expect(bad != NULL, "net_resolve_begin returns for the failure hook");
+  rc |= expect(net_resolve_fd(bad) >= 0, "the failing resolve is pollable");
+  pfd.fd = net_resolve_fd(bad);
+  pfd.events = POLLIN;
+  (void)poll(&pfd, 1, 1000);
+  drc = net_resolve_connect(bad, &fd);
+  rc |= expect(drc == NET_CONNECT_DNS_FAILED && fd < 0,
+               "a failed lookup is reported as NET_CONNECT_DNS_FAILED");
+  net_resolve_free(bad);
+  net_test_reset_dns();
   return rc;
 }

@@ -60,13 +60,54 @@ The provider's optional local limits live in `config/llm_registry.json`:
 
 Omit a limit for no local cap; `0` deliberately blocks calls. These are local
 guardrails, not a claim about the account's server-side quota. `daily_usd`
-uses the dated USD-per-million-token assumptions in `config/pricing.json`.
-Before dispatch, the runtime reserves the request's configured maximum output
-plus a deliberately high text-input estimate; the reservation survives a
-crash and resets on the next local day. An unlisted provider/model—or media,
-whose provider-specific billing is not token-complete—fails closed while a
-dollar cap is active. The raw provider artifact names that rejection as
-`provider_budget_exceeded`; no network request is sent.
+uses the dated USD-per-million-token assumptions in `config/pricing.json`
+(`input`, `cached_input`, `output`, and, where a provider bills cache writes
+separately, `cache_creation_input`).
+
+Before dispatch, the runtime reserves a ceiling for the request: one token
+per byte of text plus a serializer allowance, the table's
+`media_input_tokens_per_item` for each attached media item, and the
+profile's full `max_output_tokens`. The reservation is written under a lock
+before any network request, so a crash mid-call leaves it charged to the
+day. Once the call's outcome is known, the ledger is corrected:
+
+- A response that reports usage replaces the ceiling with the priced actual
+  cost, so ordinary work spends the cap at the provider's rate rather than
+  the ceiling's.
+- A failure before any request byte left the process (DNS, connection
+  refused, TLS setup, a request the runtime could not build) returns the
+  reservation in full. The call-count limits still charge the attempt.
+- Anything else — a timeout, a reset mid-transfer, any HTTP error status —
+  keeps the ceiling, because the provider may have billed the request.
+
+Each `provider_calls/NNN_meta.json` records `budget_outcome` (`settled`,
+`released`, `kept`, or `none`), `budget_reserved_usd`, and
+`budget_settled_usd`. A floop `retry_attempts` re-issue is its own call with
+its own reservation and settlement.
+
+Media is admitted under a cap only because the table bounds it:
+`media_input_tokens_per_item` (8,192 in the shipped table) exceeds the
+largest single image on every listed provider, and settlement then charges
+the reported usage. A multi-page document, audio, or video can cost more
+than the allowance; settlement still records the true cost, so one such
+turn can overshoot the cap by the difference. Remove the field from a
+maintained table to refuse media under a cap instead.
+
+Requests the table cannot price fail closed while a cap is set, and the raw
+provider artifact names why as `provider_budget_exceeded`:
+`daily_usd_unpriced` for an unlisted provider/model,
+`daily_usd_unpriced_media` for media when the table carries no allowance,
+and `daily_usd_pricing_unavailable` when the table itself is missing or
+malformed (also reported on stderr with the path). No network request is
+sent in any of those cases.
+
+The day and minute windows follow the local clock and only roll forward: a
+clock stepped backwards keeps counting against the window it already opened.
+The usage ledger stores every provider's `input_tokens` as the whole prompt
+(cached parts included, with `provider_cached_input_tokens` and
+`provider_cache_creation_input_tokens` as the priced subsets) and
+`output_tokens` as every billed output token, provider-reported thinking
+included.
 
 A model profile may also declare `"effort": "low"`, `"medium"`, or
 `"high"`. Gemini 2.5 profiles map those values to tested numeric thinking

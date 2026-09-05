@@ -320,6 +320,10 @@ static int dc_init(FcReactorModule *m) {
 static int dc_collect_fds(FcReactorModule *m, FcPollSet *ps) {
   DcAdapter *a = m ? (DcAdapter *)m->state : NULL;
   if (!a || !a->enabled) return 0;
+  if (a->gw_state == DC_RESOLVING && a->gw_resolve) {
+    int rfd = net_resolve_fd(a->gw_resolve);
+    if (rfd >= 0) (void)fc_pollset_add(ps, rfd, POLLIN, m, NULL);
+  }
   if (a->gw_fd >= 0) {
     short ev = 0;
     if (a->gw_state == DC_TCP_CONNECTING) ev = POLLOUT;
@@ -329,6 +333,10 @@ static int dc_collect_fds(FcReactorModule *m, FcPollSet *ps) {
       if (a->gw_tx_len == 0 || a->gw_want == POLLIN) ev |= POLLIN;
     }
     if (ev) (void)fc_pollset_add(ps, a->gw_fd, ev, m, NULL);
+  }
+  if (a->rest_state == DC_REST_RESOLVING && a->rest_resolve) {
+    int rfd = net_resolve_fd(a->rest_resolve);
+    if (rfd >= 0) (void)fc_pollset_add(ps, rfd, POLLIN, m, NULL);
   }
   if (a->rest_fd >= 0) {
     short ev = 0;
@@ -345,7 +353,13 @@ static int dc_on_fd(FcReactorModule *m, int fd, int revents, void *tag) {
   DcAdapter *a = m ? (DcAdapter *)m->state : NULL;
   (void)tag;
   if (!a || !a->enabled) return 0;
-  if (fd == a->gw_fd) dc_drive_gateway(a, revents);
+  if (a->gw_state == DC_RESOLVING && a->gw_resolve &&
+      fd == net_resolve_fd(a->gw_resolve))
+    dc_drive_resolve(a, fc_now_ms());
+  else if (a->rest_state == DC_REST_RESOLVING && a->rest_resolve &&
+           fd == net_resolve_fd(a->rest_resolve))
+    dc_drive_rest_resolve(a, fc_now_ms());
+  else if (fd == a->gw_fd) dc_drive_gateway(a, revents);
   else if (fd == a->rest_fd) dc_drive_rest(a, revents);
   return 0;
 }
@@ -355,6 +369,7 @@ static int dc_tick(FcReactorModule *m, uint64_t now_ms) {
   if (!a || !a->enabled) return 0;
   (void)dc_gateway_progress_expired(a, now_ms);
   (void)dc_rest_progress_expired(a, now_ms);
+  if (a->gw_state == DC_RESOLVING) dc_drive_resolve(a, now_ms);
   if (a->gw_state == DC_DISCONNECTED && now_ms >= a->next_reconnect_ms) (void)dc_gateway_start_connect(a, now_ms);
   if (a->gw_state == DC_GATEWAY_OPEN) {
     (void)fc_reconnect_backoff_maybe_reset(&a->reconnect_backoff, now_ms);
@@ -362,6 +377,7 @@ static int dc_tick(FcReactorModule *m, uint64_t now_ms) {
       dc_drive_gateway(a, POLLOUT);
   }
   dc_drain_deliveries(a);
+  if (a->rest_state == DC_REST_RESOLVING) dc_drive_rest_resolve(a, now_ms);
   if (a->rest_state == DC_REST_IDLE && a->out_count > 0) (void)dc_rest_start(a, now_ms);
   return 0;
 }
@@ -371,6 +387,8 @@ static uint64_t dc_next_deadline(FcReactorModule *m, uint64_t now_ms) {
   uint64_t d = FC_NO_DEADLINE;
   if (!a || !a->enabled) return FC_NO_DEADLINE;
   if (a->gw_state == DC_DISCONNECTED && a->next_reconnect_ms < d) d = a->next_reconnect_ms;
+  if (a->gw_state == DC_RESOLVING && a->gw_resolve_deadline_ms < d) d = a->gw_resolve_deadline_ms;
+  if (a->rest_state == DC_REST_RESOLVING && a->rest_resolve_deadline_ms < d) d = a->rest_resolve_deadline_ms;
   if ((a->gw_state == DC_WS_HANDSHAKE ||
        (a->gw_state == DC_GATEWAY_OPEN && a->gw_rx_len > 0)) &&
       a->gw_parse_progress_ms > 0 &&

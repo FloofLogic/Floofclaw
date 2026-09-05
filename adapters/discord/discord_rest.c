@@ -19,6 +19,7 @@
 
 void dc_close_rest(DcAdapter *a) {
   if (!a) return;
+  if (a->rest_resolve) { net_resolve_free(a->rest_resolve); a->rest_resolve = NULL; }
   if (a->rest_tls) { fc_tls_free(a->rest_tls); a->rest_tls = NULL; }
   if (a->rest_fd >= 0) { net_close(a->rest_fd); a->rest_fd = -1; }
   a->rest_state = DC_REST_IDLE;
@@ -73,14 +74,44 @@ int dc_rest_start(DcAdapter *a, uint64_t now_ms) {
     dc_rest_drop_or_commit(a);
     return -1;
   }
-  if (net_connect_nb(DC_REST_HOST, DC_REST_PORT, &fd) != 0 || fd < 0) {
+  /* Resolve discord.com off the reactor thread; the request is built and
+   * waiting. The blocking connect the adapter used to do here is now
+   * dc_drive_rest_resolve, once the address is in. A resolve failure is
+   * unambiguously pre-send, so it keeps the head and the ambiguous-retry
+   * budget exactly as the synchronous connect failure did. */
+  if (a->rest_resolve) { net_resolve_free(a->rest_resolve); a->rest_resolve = NULL; }
+  a->rest_resolve = net_resolve_begin(DC_REST_HOST, DC_REST_PORT);
+  if (!a->rest_resolve) {
     a->rest_retry_after_ms = now_ms + DC_REST_RETRY_MS;
     dc_close_rest(a);
     return -1;
   }
-  a->rest_fd = fd;
-  a->rest_state = DC_REST_TCP_CONNECTING;
+  (void)fd;
+  a->rest_state = DC_REST_RESOLVING;
+  a->rest_resolve_deadline_ms = now_ms + DC_RESOLVE_TIMEOUT_MS;
   return 0;
+}
+
+void dc_drive_rest_resolve(DcAdapter *a, uint64_t now_ms) {
+  int fd = -1;
+  int rc;
+  if (!a || a->rest_state != DC_REST_RESOLVING || !a->rest_resolve) return;
+  if (now_ms >= a->rest_resolve_deadline_ms) {
+    a->rest_retry_after_ms = now_ms + DC_REST_RETRY_MS;
+    dc_close_rest(a); /* frees the resolve and returns to DC_REST_IDLE */
+    return;
+  }
+  rc = net_resolve_connect(a->rest_resolve, &fd);
+  if (rc == 1) return; /* still resolving */
+  net_resolve_free(a->rest_resolve);
+  a->rest_resolve = NULL;
+  if (rc == 0) {
+    a->rest_fd = fd;
+    a->rest_state = DC_REST_TCP_CONNECTING;
+    return;
+  }
+  a->rest_retry_after_ms = now_ms + DC_REST_RETRY_MS;
+  dc_close_rest(a);
 }
 
 static int dc_rest_flush(DcAdapter *a) {

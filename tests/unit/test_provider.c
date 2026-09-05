@@ -112,11 +112,17 @@ int provider_pricing_and_daily_usd_budget_are_conservative(void) {
   rc |= expect(llm_pricing_catalog_load(&catalog) == 0,
                "bounded pricing catalog loads");
   rc |= expect(llm_pricing_usage_usd(&catalog, "priced_provider",
-                                     "priced-model", 100, 10, 40, 1,
+                                     "priced-model", 100, 10, 40, 1, 0, 0,
                                      &usd) == 0,
                "usage pricing finds exact provider and model");
   rc |= expect(usd > 0.00000839 && usd < 0.00000841,
                "cached and uncached tokens receive separate prices");
+  rc |= expect(llm_pricing_usage_usd(&catalog, "priced_provider",
+                                     "priced-model", 100, 10, 40, 1, 20, 1,
+                                     &usd) == 0,
+               "usage pricing accepts reported cache-creation tokens");
+  rc |= expect(usd > 0.00000839 && usd < 0.00000841,
+               "a row without cache_creation_input prices creation at the input rate");
   rc |= expect(llm_pricing_max_cost_micros(&catalog, "priced_provider",
                                            "priced-model", 100, 10,
                                            &micros) == 0 && micros == 12,
@@ -163,7 +169,274 @@ int provider_pricing_and_daily_usd_budget_are_conservative(void) {
   rc |= expect_substr(raw, "\"reason\":\"daily_usd_unpriced\"",
                       "unpriced-model rejection names the fix boundary");
 
+  (void)setenv("FCLAW_PRICING", "workspace/no-such-pricing.json", 1);
+  memset(&usage, 0, sizeof(usage));
+  rc |= expect(llm_provider_limit_reserve_request_at(
+                   &provider, &profile, &request, "workspace/logs", day2 + 2,
+                   &usage, raw, sizeof(raw)) ==
+                   LLM_PROVIDER_LIMIT_BLOCKED_USD,
+               "a missing pricing table fails closed under a cost cap");
+  rc |= expect_substr(raw, "\"reason\":\"daily_usd_pricing_unavailable\"",
+                      "a missing table is named apart from an unlisted model");
+
   restore_env_value("FCLAW_LLM_REGISTRY", saved_registry);
+  restore_env_value("FCLAW_PRICING", saved_pricing);
+  return rc;
+}
+
+int provider_budget_settles_reported_usage_and_releases_undispatched(void) {
+  char *saved_pricing = capture_env_value("FCLAW_PRICING");
+  LlmProvider provider;
+  LlmProfile profile;
+  LlmRequest request = {"hello", NULL, 0U};
+  LlmUsage usage;
+  LlmUsageRecord record;
+  char raw[512];
+  char *state = NULL;
+  time_t day1 = local_midday(2026, 9, 2);
+  int rc = 0;
+
+  rc |= test_reset_workspace();
+  rc |= expect(test_write_file(
+                   "workspace/pricing.json",
+                   "{\"models\":[{\"provider\":\"settle_provider\","
+                   "\"model\":\"settle-model\",\"input\":0.1,"
+                   "\"cached_input\":0.01,\"cache_creation_input\":0.125,"
+                   "\"output\":0.2}]}\n") == 0,
+               "write settlement pricing fixture");
+  (void)setenv("FCLAW_PRICING", "workspace/pricing.json", 1);
+  memset(&provider, 0, sizeof(provider));
+  snprintf(provider.id, sizeof(provider.id), "settle_provider");
+  provider.rpm_limit = -1;
+  provider.daily_limit = -1;
+  provider.daily_usd_limit = 1.0;
+  memset(&profile, 0, sizeof(profile));
+  snprintf(profile.provider, sizeof(profile.provider), "%s", provider.id);
+  snprintf(profile.model, sizeof(profile.model), "settle-model");
+  profile.max_output_tokens = 10;
+
+  /* Reported usage replaces the ceiling with the priced actual cost. */
+  memset(&usage, 0, sizeof(usage));
+  rc |= expect(llm_provider_limit_reserve_request_at(
+                   &provider, &profile, &request, "workspace/logs", day1,
+                   &usage, raw, sizeof(raw)) == LLM_PROVIDER_LIMIT_OK,
+               "reservation under a dollar cap is granted");
+  rc |= expect(usage.budget_outcome == LLM_BUDGET_KEPT &&
+                   usage.budget_reserved_micros == 105,
+               "the reservation records its ceiling as kept");
+  usage.request_dispatched = 1;
+  usage.input_tokens = 100;
+  usage.output_tokens = 10;
+  usage.provider_cached_input_tokens = 40;
+  usage.provider_cached_input_tokens_reported = 1;
+  usage.provider_cache_creation_input_tokens = 20;
+  usage.provider_cache_creation_input_tokens_reported = 1;
+  rc |= expect(llm_provider_limit_settle_request_at(
+                   &provider, &profile, "workspace/logs", day1 + 1,
+                   &usage) == 0,
+               "settlement with reported usage succeeds");
+  rc |= expect(usage.budget_outcome == LLM_BUDGET_SETTLED &&
+                   usage.budget_settled_micros == 9,
+               "settlement prices uncached, cached, created, and output tokens");
+  rc |= test_read_file(
+      "workspace/logs/provider_limits/settle_provider.json", &state);
+  rc |= expect_substr(state, "\"day_usd_reserved_micros\":9",
+                      "the ledger holds the actual cost, not the ceiling");
+  free(state);
+  state = NULL;
+
+  /* A request that never reached the provider returns its reservation. */
+  memset(&usage, 0, sizeof(usage));
+  rc |= expect(llm_provider_limit_reserve_request_at(
+                   &provider, &profile, &request, "workspace/logs", day1 + 2,
+                   &usage, raw, sizeof(raw)) == LLM_PROVIDER_LIMIT_OK,
+               "second reservation is granted");
+  rc |= expect(llm_provider_limit_settle_request_at(
+                   &provider, &profile, "workspace/logs", day1 + 3,
+                   &usage) == 0,
+               "settlement of an undispatched request succeeds");
+  rc |= expect(usage.budget_outcome == LLM_BUDGET_RELEASED &&
+                   usage.budget_settled_micros == 0,
+               "an undispatched request is released");
+  rc |= test_read_file(
+      "workspace/logs/provider_limits/settle_provider.json", &state);
+  rc |= expect_substr(state, "\"day_usd_reserved_micros\":9",
+                      "the released reservation leaves the ledger unchanged");
+  free(state);
+  state = NULL;
+
+  /* An ambiguous failure (dispatched, nothing reported) keeps its ceiling. */
+  memset(&usage, 0, sizeof(usage));
+  rc |= expect(llm_provider_limit_reserve_request_at(
+                   &provider, &profile, &request, "workspace/logs", day1 + 4,
+                   &usage, raw, sizeof(raw)) == LLM_PROVIDER_LIMIT_OK,
+               "third reservation is granted");
+  usage.request_dispatched = 1;
+  rc |= expect(llm_provider_limit_settle_request_at(
+                   &provider, &profile, "workspace/logs", day1 + 5,
+                   &usage) == 0,
+               "settlement of an ambiguous failure returns cleanly");
+  rc |= expect(usage.budget_outcome == LLM_BUDGET_KEPT,
+               "an ambiguous failure keeps its reservation");
+  rc |= test_read_file(
+      "workspace/logs/provider_limits/settle_provider.json", &state);
+  rc |= expect_substr(state, "\"day_usd_reserved_micros\":114",
+                      "the kept ceiling stays charged to the day");
+  free(state);
+  state = NULL;
+
+  /* No reservation, nothing to settle. */
+  memset(&usage, 0, sizeof(usage));
+  rc |= expect(llm_provider_limit_settle_request_at(
+                   &provider, &profile, "workspace/logs", day1 + 6,
+                   &usage) == 0 && usage.budget_outcome == LLM_BUDGET_NONE,
+               "a call without a reservation is a settlement no-op");
+
+  /* The ledger field the settlement prices is optional on older records. */
+  rc |= expect(llm_usage_record_parse(
+                   "{\"ts\":\"2026-09-02T00:00:00Z\",\"floop\":\"hello\","
+                   "\"run_id\":\"run_001\",\"call_seq\":1,\"agent\":\"chat\","
+                   "\"profile\":\"p\",\"provider\":\"settle_provider\","
+                   "\"model\":\"settle-model\",\"input_chars\":5,"
+                   "\"input_media_count\":0,\"input_media_bytes\":0,"
+                   "\"output_chars\":2,\"input_tokens\":100,"
+                   "\"output_tokens\":10,\"total_tokens\":110,"
+                   "\"provider_cached_input_tokens\":40,"
+                   "\"provider_cache_creation_input_tokens\":20,"
+                   "\"duration_ms\":1}",
+                   &record) == 0 &&
+                   record.provider_cache_creation_input_tokens_reported == 1 &&
+                   record.provider_cache_creation_input_tokens == 20,
+               "a record with cache-creation tokens parses and reports them");
+  rc |= expect(llm_usage_record_parse(
+                   "{\"ts\":\"2026-08-08T00:00:00Z\",\"floop\":\"hello\","
+                   "\"run_id\":\"run_001\",\"call_seq\":1,\"agent\":\"chat\","
+                   "\"profile\":\"p\",\"provider\":\"settle_provider\","
+                   "\"model\":\"settle-model\",\"input_chars\":5,"
+                   "\"input_media_count\":0,\"input_media_bytes\":0,"
+                   "\"output_chars\":2,\"input_tokens\":100,"
+                   "\"output_tokens\":10,\"total_tokens\":110,"
+                   "\"provider_cached_input_tokens\":null,"
+                   "\"duration_ms\":1}",
+                   &record) == 0 &&
+                   record.provider_cache_creation_input_tokens_reported == 0,
+               "a pre-0.31.0 record without the field still parses");
+
+  restore_env_value("FCLAW_PRICING", saved_pricing);
+  return rc;
+}
+
+int provider_limit_windows_never_roll_backward(void) {
+  LlmProvider provider;
+  LlmUsage usage;
+  char raw[256];
+  time_t day1 = local_midday(2026, 9, 1);
+  time_t day2 = local_midday(2026, 9, 2);
+  time_t day3 = local_midday(2026, 9, 3);
+  int rc = 0;
+
+  rc |= test_reset_workspace();
+  memset(&provider, 0, sizeof(provider));
+  snprintf(provider.id, sizeof(provider.id), "unit_backward_day");
+  provider.rpm_limit = -1;
+  provider.daily_limit = 1;
+
+  memset(&usage, 0, sizeof(usage));
+  rc |= expect(llm_provider_limit_reserve_at(&provider, "workspace/logs", day2,
+                                             &usage, raw, sizeof(raw)) == LLM_PROVIDER_LIMIT_OK,
+               "the first request of the day is allowed");
+  memset(&usage, 0, sizeof(usage));
+  rc |= expect(llm_provider_limit_reserve_at(&provider, "workspace/logs", day1,
+                                             &usage, raw, sizeof(raw)) == LLM_PROVIDER_LIMIT_BLOCKED_DAILY,
+               "a clock stepped back a day keeps counting against the open day");
+  memset(&usage, 0, sizeof(usage));
+  rc |= expect(llm_provider_limit_reserve_at(&provider, "workspace/logs", day3,
+                                             &usage, raw, sizeof(raw)) == LLM_PROVIDER_LIMIT_OK,
+               "the next real day still reopens the allowance");
+
+  memset(&provider, 0, sizeof(provider));
+  snprintf(provider.id, sizeof(provider.id), "unit_backward_minute");
+  provider.rpm_limit = 1;
+  provider.daily_limit = -1;
+  memset(&usage, 0, sizeof(usage));
+  rc |= expect(llm_provider_limit_reserve_at(&provider, "workspace/logs", day2,
+                                             &usage, raw, sizeof(raw)) == LLM_PROVIDER_LIMIT_OK,
+               "the first request of the minute is allowed");
+  memset(&usage, 0, sizeof(usage));
+  rc |= expect(llm_provider_limit_reserve_at(&provider, "workspace/logs", day2 - 120,
+                                             &usage, raw, sizeof(raw)) == LLM_PROVIDER_LIMIT_BLOCKED_RPM,
+               "a clock stepped back two minutes does not reopen the rpm window");
+  memset(&usage, 0, sizeof(usage));
+  rc |= expect(llm_provider_limit_reserve_at(&provider, "workspace/logs", day2 + 60,
+                                             &usage, raw, sizeof(raw)) == LLM_PROVIDER_LIMIT_OK,
+               "the next real minute reopens the rpm window");
+  return rc;
+}
+
+int provider_media_reservation_uses_the_table_allowance(void) {
+  char *saved_pricing = capture_env_value("FCLAW_PRICING");
+  LlmProvider provider;
+  LlmProfile profile;
+  LlmMedia media[2];
+  LlmRequest request = {"hello", media, 2U};
+  LlmUsage usage;
+  char raw[512];
+  char *state = NULL;
+  time_t day1 = local_midday(2026, 9, 2);
+  int rc = 0;
+
+  rc |= test_reset_workspace();
+  memset(media, 0, sizeof(media));
+  snprintf(media[0].media_type, sizeof(media[0].media_type), "image/png");
+  media[0].size_bytes = 4096;
+  snprintf(media[1].media_type, sizeof(media[1].media_type), "image/jpeg");
+  media[1].size_bytes = 8192;
+  rc |= expect(test_write_file(
+                   "workspace/pricing_media.json",
+                   "{\"media_input_tokens_per_item\":100,"
+                   "\"models\":[{\"provider\":\"media_provider\","
+                   "\"model\":\"media-model\",\"input\":0.1,"
+                   "\"cached_input\":0.01,\"output\":0.2}]}\n") == 0,
+               "write pricing fixture with a media allowance");
+  rc |= expect(test_write_file(
+                   "workspace/pricing_no_media.json",
+                   "{\"models\":[{\"provider\":\"media_provider\","
+                   "\"model\":\"media-model\",\"input\":0.1,"
+                   "\"cached_input\":0.01,\"output\":0.2}]}\n") == 0,
+               "write pricing fixture without a media allowance");
+  memset(&provider, 0, sizeof(provider));
+  snprintf(provider.id, sizeof(provider.id), "media_provider");
+  provider.rpm_limit = -1;
+  provider.daily_limit = -1;
+  provider.daily_usd_limit = 1.0;
+  memset(&profile, 0, sizeof(profile));
+  snprintf(profile.provider, sizeof(profile.provider), "%s", provider.id);
+  snprintf(profile.model, sizeof(profile.model), "media-model");
+  profile.max_output_tokens = 10;
+
+  (void)setenv("FCLAW_PRICING", "workspace/pricing_media.json", 1);
+  memset(&usage, 0, sizeof(usage));
+  rc |= expect(llm_provider_limit_reserve_request_at(
+                   &provider, &profile, &request, "workspace/logs", day1,
+                   &usage, raw, sizeof(raw)) == LLM_PROVIDER_LIMIT_OK,
+               "media under a cost cap is admitted when the table bounds it");
+  rc |= expect(usage.budget_reserved_micros == 125,
+               "each media item reserves the table's per-item allowance");
+  rc |= test_read_file(
+      "workspace/logs/provider_limits/media_provider.json", &state);
+  rc |= expect_substr(state, "\"day_usd_reserved_micros\":125",
+                      "the media allowance is charged to the day ledger");
+  free(state);
+
+  (void)setenv("FCLAW_PRICING", "workspace/pricing_no_media.json", 1);
+  memset(&usage, 0, sizeof(usage));
+  rc |= expect(llm_provider_limit_reserve_request_at(
+                   &provider, &profile, &request, "workspace/logs", day1 + 1,
+                   &usage, raw, sizeof(raw)) == LLM_PROVIDER_LIMIT_BLOCKED_USD,
+               "media fails closed when the table declines to bound it");
+  rc |= expect_substr(raw, "\"reason\":\"daily_usd_unpriced_media\"",
+                      "unbounded media keeps its own rejection reason");
+
   restore_env_value("FCLAW_PRICING", saved_pricing);
   return rc;
 }
@@ -215,7 +488,8 @@ int provider_usage_extracts_reported_cache_tokens(void) {
   } fixtures[] = {
     {"gemini_key",
      "{\"usageMetadata\":{\"promptTokenCount\":100,"
-     "\"candidatesTokenCount\":5,\"cachedContentTokenCount\":80}}",
+     "\"candidatesTokenCount\":5,\"thoughtsTokenCount\":7,"
+     "\"cachedContentTokenCount\":80}}",
      80},
     {"openai_compat",
      "{\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":5,"
@@ -231,7 +505,7 @@ int provider_usage_extracts_reported_cache_tokens(void) {
      60},
     {"http",
      "{\"usage\":{\"input_tokens\":100,\"output_tokens\":5,"
-     "\"cache_read_input_tokens\":50}}",
+     "\"cache_read_input_tokens\":50,\"cache_creation_input_tokens\":20}}",
      50},
   };
   int rc = 0;
@@ -243,6 +517,28 @@ int provider_usage_extracts_reported_cache_tokens(void) {
                  "provider cache counter marked reported");
     rc |= expect(usage.provider_cached_input_tokens == fixtures[i].cached,
                  "provider cache counter preserved exactly");
+  }
+  {
+    /* Anthropic reports the uncached remainder as input_tokens; the ledger
+     * carries the whole prompt so pricing never mistakes the remainder for
+     * the total (200 uncached + 5,000 cached used to price as 60 uncached). */
+    LlmUsage usage;
+    memset(&usage, 0, sizeof(usage));
+    llm_extract_usage("http", fixtures[4].json, &usage);
+    rc |= expect(usage.input_tokens == 170 && usage.total_tokens == 175,
+                 "anthropic input_tokens is the whole prompt, cache included");
+    rc |= expect(usage.provider_cache_creation_input_tokens_reported == 1 &&
+                     usage.provider_cache_creation_input_tokens == 20,
+                 "anthropic cache-creation tokens are reported");
+  }
+  {
+    LlmUsage usage;
+    memset(&usage, 0, sizeof(usage));
+    llm_extract_usage("gemini_key", fixtures[0].json, &usage);
+    rc |= expect(usage.output_tokens == 12,
+                 "gemini thought tokens are billed output and counted as such");
+    rc |= expect(usage.provider_cache_creation_input_tokens_reported == 0,
+                 "providers that never report cache creation stay unreported");
   }
   {
     LlmUsage usage;

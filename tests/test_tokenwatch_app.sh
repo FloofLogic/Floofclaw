@@ -23,13 +23,18 @@ assert not [r for r in data["usage_records"] if r["agent"] == "zero_call_agent"]
 assert any(r["provider_cached_input_tokens"] is None for r in data["usage_records"])
 assert len(data["cacheview_records"]["chat_manager"]) == 3
 assert data["cacheview_records"]["chat_manager"][1]["provider_cached_input_tokens"] == 8900
-assert pricing["schema_version"] == 2
-assert pricing["last_updated"] == "2026-08-09"
+assert pricing["schema_version"] == 3
+assert pricing["last_updated"] == "2026-09-02"
+assert pricing["media_input_tokens_per_item"] == 8192
 rows = {(item["provider"], item["model"]) for item in pricing["models"]}
 assert len(rows) == len(pricing["models"])
 assert ("gemini_key", "gemini-2.5-flash") in rows
 assert ("anthropic", "claude-sonnet-4-6") in rows
 assert ("anthropic_key", "claude-sonnet-4-6") in rows
+assert ("anthropic", "claude-opus-5") in rows
+assert ("anthropic_key", "claude-sonnet-5") in rows
+anthropic_rows = [row for row in pricing["models"] if row["provider"].startswith("anthropic")]
+assert all(row["cache_creation_input"] > row["input"] for row in anthropic_rows)
 assert not any(model == "qwen-fixture" for _, model in rows)
 external = [row for row in pricing["models"] if row["provider"] != "mock"]
 assert all(row["source"].startswith("https://") for row in external)

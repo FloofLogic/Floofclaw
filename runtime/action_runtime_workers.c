@@ -38,7 +38,7 @@ typedef struct {
   long long exit_code;
   long long last_checked_ms;
   int needs_input;
-  char final_text[RT_LARGE];
+  char final_text[RT_OPERATION_RESULT_TEXT_MAX + 1];
   /* Completion capability, threaded IN MEMORY from the runtime's
    * preallocated pending action into the forked supervising runner.
    * Deliberately never serialized into state.json and never exposed to
@@ -227,6 +227,11 @@ static int process_alive(long long pid) {
   return errno == EPERM;
 }
 
+/* Read a worker-authored text file, trimmed of trailing whitespace. A text
+ * longer than the buffer is cut on a UTF-8 boundary and ends with a line
+ * that says so: a bounded result must never pass for the whole one. Scraps
+ * relayed a campsite list cut mid-URL as complete because this buffer was
+ * RT_LARGE and the cut was silent (run_1729). */
 static int read_text_clip(const char *path, char *out, size_t out_len) {
   char *text = NULL;
   size_t n;
@@ -237,7 +242,22 @@ static int read_text_clip(const char *path, char *out, size_t out_len) {
   while (n > 0 && (text[n - 1] == '\n' || text[n - 1] == '\r' ||
                    text[n - 1] == ' '  || text[n - 1] == '\t'))
     text[--n] = '\0';
-  if (n >= out_len) n = out_len - 1;
+  if (n >= out_len) {
+    char marker[96];
+    int marker_len = snprintf(marker, sizeof(marker),
+                              "\n[truncated by FloofClaw: %zu of %zu bytes shown]",
+                              n, n);
+    size_t keep = out_len > (size_t)marker_len + 1U
+                      ? out_len - 1U - (size_t)marker_len : 0U;
+    while (keep > 0 && ((unsigned char)text[keep] & 0xC0U) == 0x80U) keep--;
+    marker_len = snprintf(marker, sizeof(marker),
+                          "\n[truncated by FloofClaw: %zu of %zu bytes shown]",
+                          keep, n);
+    memcpy(out, text, keep);
+    snprintf(out + keep, out_len - keep, "%s", marker);
+    fc_xfree(text);
+    return 0;
+  }
   memcpy(out, text, n);
   out[n] = '\0';
   fc_xfree(text);
@@ -304,7 +324,7 @@ static int write_codex_state(const CodexOpState *st) {
   char etask[RT_LARGE * 2], eexpected[PATH_MAX * 2];
   char estdout[PATH_MAX * 2], estderr[PATH_MAX * 2], efinal[PATH_MAX * 2];
   char eprompt[PATH_MAX * 2], eexit[PATH_MAX * 2], eopdir[PATH_MAX * 2];
-  char efinal_text[RT_LARGE * 2];
+  char efinal_text[RT_OPERATION_RESULT_TEXT_MAX * 2 + 1];
   char ebound_task[RT_MED];
   char eworking_memory[RT_TASK_WORKING_MEMORY_MAX * 2];
   char out[RT_XL * 2];
@@ -1077,7 +1097,7 @@ static int spawn_claude_runner(ClaudeOpState *st, const char *cwd_abs,
            * surface the last line here so the artifact has something
            * compact even before the reviewer parses the full stream. */
           if (code == 0) {
-            char tail[RT_LARGE] = "";
+            char tail[RT_OPERATION_RESULT_TEXT_MAX + 1] = "";
             if (read_text_clip(st->stdout_path, tail, sizeof(tail)) == 0 && tail[0])
               (void)fs_write_text(st->final_path, tail);
           }

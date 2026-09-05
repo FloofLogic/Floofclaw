@@ -207,11 +207,11 @@ Current test surfaces and required gates:
 
 | layer | command | purpose |
 |---|---|---|
-| unit | `make unit` | 37 fast C boundary/budget checks |
-| integration | `make integration` | 184 in-process runtime checks across four isolated workers |
+| unit | `make unit` | 49 fast C boundary/budget checks |
+| integration | `make integration` | 200 in-process runtime checks across four isolated workers |
 | routine gate | `make test` | unit + integration + public-contract probes + hermetic smoke in isolated workspaces; offline |
 | release/build contracts | `make test-full` | routine gate plus mock-only, adapter-selection, and Android ARM64 rebuilds |
-| major/deep-engine gate | `make robustness` (currently macOS) | ASan, UBSan, small-stack, fuzz, chaos, disk-full, and thrash; about 20–23 minutes |
+| major/deep-engine gate | `make robustness` (currently macOS) | ASan, UBSan, small-stack, fuzz, chaos, disk-full, and thrash; roughly an hour on the reference Mac |
 | live provider | `FCLAW_LIVE_SMOKE=1 make live-smoke` | opt-in single real-provider path check |
 | IRC baseline | `scripts/irc_probe.py` per flow | end-to-end agent behavior on the shipped floops |
 

@@ -191,6 +191,7 @@ static void write_provider_meta(const char *path, const char *floop,
   char local_limit_reason_esc[LLM_ID_MAX * 2];
   char local_limit_reason_json[(LLM_ID_MAX * 2) + 4];
   char provider_cached_input_tokens_json[64];
+  char provider_cache_creation_input_tokens_json[64];
   char repair_meta[1024];
   char out[4096];
   if (!path || !floop || !*floop || !agent_id || !profile || !provider ||
@@ -220,6 +221,14 @@ static void write_provider_meta(const char *path, const char *floop,
     snprintf(provider_cached_input_tokens_json,
              sizeof(provider_cached_input_tokens_json), "null");
   }
+  if (usage->provider_cache_creation_input_tokens_reported) {
+    snprintf(provider_cache_creation_input_tokens_json,
+             sizeof(provider_cache_creation_input_tokens_json), "%lld",
+             usage->provider_cache_creation_input_tokens);
+  } else {
+    snprintf(provider_cache_creation_input_tokens_json,
+             sizeof(provider_cache_creation_input_tokens_json), "null");
+  }
   build_json_repair_meta(usage, repair_meta, sizeof(repair_meta));
   snprintf(out, sizeof(out),
            "{"
@@ -239,9 +248,13 @@ static void write_provider_meta(const char *path, const char *floop,
            "\"output_tokens\":%lld,"
            "\"total_tokens\":%lld,"
            "\"provider_cached_input_tokens\":%s,"
+           "\"provider_cache_creation_input_tokens\":%s,"
            "\"duration_ms\":%lld,"
            "\"local_limit_blocked\":%s,"
            "\"local_limit_reason\":%s,"
+           "\"budget_outcome\":\"%s\","
+           "\"budget_reserved_usd\":%.6f,"
+           "\"budget_settled_usd\":%.6f,"
            "\"json_repair\":%s"
            "}\n",
            floop_esc, agent_esc, profile_esc, provider_esc, kind_esc,
@@ -252,9 +265,13 @@ static void write_provider_meta(const char *path, const char *floop,
            usage->output_chars,
            usage->input_tokens, usage->output_tokens, usage->total_tokens,
            provider_cached_input_tokens_json,
+           provider_cache_creation_input_tokens_json,
            usage->duration_ms,
            usage->local_limit_reason[0] ? "true" : "false",
            local_limit_reason_json,
+           llm_budget_outcome_name(usage->budget_outcome),
+           (double)usage->budget_reserved_micros / 1000000.0,
+           (double)usage->budget_settled_micros / 1000000.0,
            repair_meta);
   (void)fs_write_text_atomic(path, out);
 }
@@ -383,6 +400,15 @@ int llm_call_request(const char *run_dir, const char *floop,
         rc = -1;
         fprintf(stderr, "llm: provider limit preflight failed for %s\n", provider.id);
       }
+      /* The reservation was a ceiling; the outcome is known now. */
+      if (usage.budget_outcome == LLM_BUDGET_KEPT &&
+          llm_provider_limit_settle_request(&provider, profile,
+                                            "workspace/logs", &usage) != 0)
+        fprintf(stderr,
+                "llm: daily_usd settlement failed for %s; reservation of "
+                "%.6f USD stands\n",
+                provider.id,
+                (double)usage.budget_reserved_micros / 1000000.0);
     }
   } else {
     fprintf(stderr, "llm: provider kind '%s' not implemented yet\n", provider.kind);

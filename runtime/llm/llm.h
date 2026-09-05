@@ -67,17 +67,39 @@ typedef struct {
   double daily_usd_limit;          /* 0 blocks; < 0 means no local cost cap */
 } LlmProvider;
 
+/* What happened to the daily-USD reservation a call made before dispatch. */
+typedef enum {
+  LLM_BUDGET_NONE = 0,     /* no dollar cap on the provider; nothing reserved */
+  LLM_BUDGET_KEPT = 1,     /* reservation stands (crash, or an ambiguous failure) */
+  LLM_BUDGET_SETTLED = 2,  /* replaced by the cost of the reported usage */
+  LLM_BUDGET_RELEASED = 3  /* returned: the request provably never reached the provider */
+} LlmBudgetOutcome;
+
+const char *llm_budget_outcome_name(LlmBudgetOutcome outcome);
+
 typedef struct {
   long long input_chars;
   size_t input_media_count;
   uint64_t input_media_bytes;
   long long output_chars;
   long long duration_ms;
+  /* input_tokens is the whole prompt on every provider, cached parts
+   * included; the cache counters below are subsets of it. output_tokens is
+   * every billed output token, provider-reported thinking included. */
   long long input_tokens;
   long long output_tokens;
   long long total_tokens;
   long long provider_cached_input_tokens;
   int provider_cached_input_tokens_reported;
+  long long provider_cache_creation_input_tokens;
+  int provider_cache_creation_input_tokens_reported;
+  /* Set once any transport attempt got past connection setup, so a failure
+   * without it provably never reached the provider. */
+  int request_dispatched;
+  LlmBudgetOutcome budget_outcome;
+  long long budget_reserved_micros;
+  long long budget_settled_micros;
+  char budget_day_key[16];
   int json_repair_checked;
   FjrStatus json_repair_status;
   FjrReport json_repair_report;
@@ -104,6 +126,8 @@ typedef struct {
   long long total_tokens;
   long long provider_cached_input_tokens;
   int provider_cached_input_tokens_reported;
+  long long provider_cache_creation_input_tokens;
+  int provider_cache_creation_input_tokens_reported;
   long long duration_ms;
 } LlmUsageRecord;
 

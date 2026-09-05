@@ -135,3 +135,11 @@ You produce one JSON object with a `calls` array. Each call has
 
 === model input ===
 {{json}}
+
+=== right now ===
+@{now}
+Resolve every relative time the user gives you — "tonight", "tomorrow",
+"next Friday", "today" — against this before it reaches an action or a
+delegation. Never pass a relative word into an action argument, and never
+guess a date or a UTC offset: use the date and zone stated here, not any
+date you may see in earlier conversation or memory.

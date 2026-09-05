@@ -7,7 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-static const char *pricing_path(void) {
+const char *llm_pricing_path(void) {
   const char *path = getenv("FCLAW_PRICING");
   return (path && *path) ? path : "config/pricing.json";
 }
@@ -22,16 +22,27 @@ int llm_pricing_catalog_load(LlmPricingCatalog *out) {
   size_t count;
   if (!out) return -1;
   memset(out, 0, sizeof(*out));
-  if (fs_read_text(pricing_path(), &text, FS_READ_TEXT_DEFAULT_CAP) != 0)
+  if (fs_read_text(llm_pricing_path(), &text, FS_READ_TEXT_DEFAULT_CAP) != 0)
     return -1;
   if (json_ref_first_object(text, &root) != 0 ||
       json_ref_object_get_array(&root, "models", &models) != 0) {
     free(text);
     return -1;
   }
+  /* Optional; a table without it declines to bound media (see pricing.h). */
+  if (json_ref_object_get_long(&root, "media_input_tokens_per_item",
+                               &out->media_input_tokens_per_item) != 0)
+    out->media_input_tokens_per_item = 0;
+  if (out->media_input_tokens_per_item < 0 ||
+      out->media_input_tokens_per_item > 1000000) {
+    free(text);
+    memset(out, 0, sizeof(*out));
+    return -1;
+  }
   count = json_ref_array_size(&models);
   if (count > LLM_PRICING_MAX_MODELS) {
     free(text);
+    memset(out, 0, sizeof(*out));
     return -1;
   }
   for (size_t i = 0; i < count; ++i) {
@@ -52,6 +63,16 @@ int llm_pricing_catalog_load(LlmPricingCatalog *out) {
         !valid_rate(price->input_per_million) ||
         !valid_rate(price->cached_input_per_million) ||
         !valid_rate(price->output_per_million)) {
+      free(text);
+      memset(out, 0, sizeof(*out));
+      return -1;
+    }
+    /* Cache writes cost more than plain input on the one provider that
+     * reports them; a row that omits the rate never undercuts input. */
+    if (json_ref_object_get_double(&row, "cache_creation_input",
+                                   &price->cache_creation_input_per_million) != 0)
+      price->cache_creation_input_per_million = price->input_per_million;
+    if (!valid_rate(price->cache_creation_input_per_million)) {
       free(text);
       memset(out, 0, sizeof(*out));
       return -1;
@@ -89,13 +110,17 @@ int llm_pricing_usage_usd(const LlmPricingCatalog *catalog,
                           const char *provider, const char *model,
                           long long input_tokens, long long output_tokens,
                           long long cached_input_tokens,
-                          int cached_input_reported, double *usd_out) {
+                          int cached_input_reported,
+                          long long cache_creation_input_tokens,
+                          int cache_creation_input_reported,
+                          double *usd_out) {
   LlmPrice price;
   long long cached = 0;
+  long long created = 0;
   long long uncached;
   int found;
   if (!usd_out || input_tokens < 0 || output_tokens < 0 ||
-      cached_input_tokens < 0)
+      cached_input_tokens < 0 || cache_creation_input_tokens < 0)
     return -1;
   *usd_out = 0.0;
   found = llm_pricing_lookup(catalog, provider, model, &price);
@@ -105,11 +130,45 @@ int llm_pricing_usage_usd(const LlmPricingCatalog *catalog,
                  ? input_tokens
                  : cached_input_tokens;
   }
-  uncached = input_tokens - cached;
+  if (cache_creation_input_reported) {
+    created = cache_creation_input_tokens > input_tokens - cached
+                  ? input_tokens - cached
+                  : cache_creation_input_tokens;
+  }
+  uncached = input_tokens - cached - created;
   *usd_out = ((double)uncached * price.input_per_million +
               (double)cached * price.cached_input_per_million +
+              (double)created * price.cache_creation_input_per_million +
               (double)output_tokens * price.output_per_million) /
              1000000.0;
+  return 0;
+}
+
+int llm_pricing_usage_micros(const LlmPricingCatalog *catalog,
+                             const char *provider, const char *model,
+                             long long input_tokens, long long output_tokens,
+                             long long cached_input_tokens,
+                             int cached_input_reported,
+                             long long cache_creation_input_tokens,
+                             int cache_creation_input_reported,
+                             long long *micros_out) {
+  double usd = 0.0;
+  double micros;
+  long long rounded;
+  int rc;
+  if (!micros_out) return -1;
+  *micros_out = 0;
+  rc = llm_pricing_usage_usd(catalog, provider, model, input_tokens,
+                             output_tokens, cached_input_tokens,
+                             cached_input_reported,
+                             cache_creation_input_tokens,
+                             cache_creation_input_reported, &usd);
+  if (rc != 0) return rc;
+  micros = usd * 1000000.0;
+  if (micros < 0.0 || micros > (double)LLONG_MAX) return -1;
+  rounded = (long long)micros;
+  if ((double)rounded < micros) rounded++;
+  *micros_out = rounded;
   return 0;
 }
 

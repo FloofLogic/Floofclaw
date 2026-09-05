@@ -15,6 +15,14 @@
 #define RT_LARGE 4096
 #define RT_ACTION_SCHEMA_MAX 8192
 #define RT_OPERATION_RESULT_TEXT_MAX 8192
+/* A user-visible `message` delivers at most this many bytes of UTF-8. Every
+ * copy on the reply path (fc_message, the terminal's delivery fragment, the
+ * ledger line, each adapter's tailer, the CLI channel) is sized for it, and
+ * fc_message refuses a longer text rather than truncating it; the
+ * normalizer refuses it earlier still, where the model can shorten it. Its
+ * JSON-escaped form is bounded to twice that. */
+#define RT_MESSAGE_TEXT_MAX 8192
+#define RT_MESSAGE_ESCAPED_MAX (RT_MESSAGE_TEXT_MAX * 2)
 #define RT_EVENT_PAYLOAD_MAX 16384
 #define RT_XL 65536
 /* A memory compaction request travels as an event payload, is replayed

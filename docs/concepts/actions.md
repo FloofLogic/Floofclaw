@@ -389,6 +389,18 @@ keys, never both, and still rejects every other non-intent key. Raw provider
 bytes remain unchanged in artifacts; durable events always use the canonical
 runtime-owned action field.
 
+Inside `args`, key names are the action's business: an `action_request`
+nests `args` beside the runtime's own `request_id`, `run_id`, and
+`task_id`, so an action may declare an argument called `event_id` or
+`source` and receive it verbatim. The runtime's names (`event_id`,
+`run_id`, `request_id`, `job_id`, `source`, `created_by`, `work_rev`) are
+refused only where the args object becomes a runtime payload itself —
+`task.create`, `task.update`, and the `memory.*` calls — and a bound work
+controller may not assert `work_rev` or `trigger_event_id` inside `args`,
+because the runtime stamps both from its trusted work binding. Each
+rejection names the offending key. `task_id` is the one key read out of
+`args` on every call, as the task binding.
+
 Successful data is not projected into task artifacts. A data-returning
 managed action publishes a later `operation_result`, and the floop's configured
 agent turn decides what to message, note, or do next. OpenClaw routes that

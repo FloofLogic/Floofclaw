@@ -118,6 +118,8 @@ static int usage_aggregate(const char *want_agent, const char *want_profile,
                          record.input_tokens, record.output_tokens,
                          record.provider_cached_input_tokens,
                          record.provider_cached_input_tokens_reported,
+                         record.provider_cache_creation_input_tokens,
+                         record.provider_cache_creation_input_tokens_reported,
                          &call_usd)
                    : 1;
     if (price_rc == 0) {

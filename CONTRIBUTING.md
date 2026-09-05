@@ -27,7 +27,7 @@ by Section 5 of Apache 2.0. Only submit work you have the right to license.
   probe are grandfathered. Actions are a separate process boundary and may
   use the runtime their contract genuinely requires. Run `make metrics` for
   the current measured size.
-- **`make test` green** (~30 s, hermetic, offline) with every patch.
+- **`make test` green** (about a minute, hermetic, offline) with every patch.
   A behavior change without a regression test is a rumor, not a fix.
 - **Loud beats clever.** Every cap rejects loudly, every failure names
   its fix, nothing truncates silently. Read

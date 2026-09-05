@@ -4,8 +4,8 @@
 
 | layer | binary/script | purpose |
 |---|---|---|
-| **Unit** | `bin/fclaw_unit_tests` | 41 fast C checks for budgets and boundary contracts |
-| **Integration** | `bin/fclaw_integration_tests` | 191 in-process scheduler/runtime checks across four isolated workers |
+| **Unit** | `bin/fclaw_unit_tests` | 49 fast C checks for budgets and boundary contracts |
+| **Integration** | `bin/fclaw_integration_tests` | 200 in-process scheduler/runtime checks across four isolated workers |
 | **Isolation** | `tests/test_fixture_isolation.sh` | harness-control refusal and killed-fixture checkout preservation |
 | **Public contracts** | `tests/test_cli_output_modes.sh`, `tests/test_version_contract.sh`, `tests/test_action_cli.sh` | uniform output modes, release versioning, and the managed-worker action bridge |
 | **Local client** | `tests/test_local_client_api.sh` | authenticated fixed HTTP/WS routes, streaming lifecycle, failure, fallback, and bounds |
@@ -77,8 +77,8 @@ There are exactly two required tiers:
 
 | tier | command | when to run |
 |---|---|---|
-| Every change and every routine release | `make test` | The only routine gate: under 60 seconds on the reference development machine, hermetic, isolated, and offline. |
-| Major version releases only | `make robustness` | Run once before a major version tag, or after deep engine surgery (new subsystem, durability/recovery changes). About 20–23 minutes — deliberately too expensive to be routine. Never blocks docs, config, or ordinary feature work. |
+| Every change and every routine release | `make test` | The only routine gate: about a minute on the reference development machine, hermetic, isolated, and offline. |
+| Major version releases only | `make robustness` | Run once before a major version tag, or after deep engine surgery (new subsystem, durability/recovery changes). About roughly an hour — deliberately too expensive to be routine. Never blocks docs, config, or ordinary feature work. |
 
 `make robustness` fails fast in this order: rebuild/feature-selection
 contracts (`test-build-contracts`), ASan, UBSan, small-stack tests, fuzzing,

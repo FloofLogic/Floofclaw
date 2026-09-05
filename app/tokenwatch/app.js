@@ -67,7 +67,13 @@ function recordCost(record) {
   const reported = record.provider_cached_input_tokens;
   const cached = reported === null || reported === undefined
     ? 0 : Math.min(input, Number(reported || 0));
-  return ((input - cached) * price.input + cached * price.cached_input +
+  const createdReported = record.provider_cache_creation_input_tokens;
+  const created = createdReported === null || createdReported === undefined
+    ? 0 : Math.min(input - cached, Number(createdReported || 0));
+  const createdRate = Number.isFinite(price.cache_creation_input)
+    ? price.cache_creation_input : price.input;
+  return ((input - cached - created) * price.input +
+          cached * price.cached_input + created * createdRate +
           output * price.output) / 1_000_000;
 }
 

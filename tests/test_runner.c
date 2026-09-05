@@ -91,6 +91,18 @@ static const BudgetOverride kBudgetOverrides[] = {
    * fsynced between them. Measured 320-480ms. */
   { "floofclaw_agent_repairs_a_normalizer_rejection", 1500 },
   { "floofclaw_repair_budget_is_bounded", 1500 },
+  /* Forks a resolver child and polls its pipe; the real-host lookup and
+   * process spawn dominate. */
+  { "net_async_resolver_reports_through_a_pollable_fd", 3000 },
+  /* Two gateway boots: one subprocess action call parks and retires, then
+   * one refused payload repairs and delivers. Measured 741ms unsanitized. */
+  { "action_args_may_use_runtime_key_names_but_payloads_may_not", 3000 },
+  /* Two fake-worker attempts back to back, each returning as its own run. */
+  { "managed_worker_final_text_keeps_the_result_ceiling_and_marks_a_cut", 6000 },
+  { "message_reply_of_six_kib_is_delivered_intact", 1500 },
+  /* One refused turn plus its repair turn, then the delivery. */
+  { "message_reply_over_the_ceiling_is_refused_and_repaired", 3000 },
+  { "conversational_reply_over_the_ceiling_fails_loudly", 3000 },
   /* One complete LLM turn plus durable message/task effects. */
   { "openclaw_finalize_with_working_memory_is_not_semantically_rejected", 1500 },
   { "manual_affair_review_with_note_add_records_note", 1000 },

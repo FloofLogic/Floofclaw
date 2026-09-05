@@ -120,6 +120,7 @@ LLM_SRC = \
 	runtime/llm/profile.c \
 	runtime/llm/mock.c \
 	runtime/llm/usage.c \
+	runtime/llm/extract.c \
 	runtime/llm/pricing.c \
 	runtime/llm/normalize.c \
 	runtime/llm/call.c \
@@ -342,6 +343,7 @@ UNIT_TEST_SRC = \
 	tests/unit/test_json_escape.c \
 	tests/unit/test_llm_request.c \
 	tests/unit/test_llm_stream.c \
+	tests/unit/test_llm_extract.c \
 	tests/unit/test_provider.c
 
 # Integration tests — in-process harness coverage for runtime budgets.
@@ -415,12 +417,12 @@ bin/fclaw_test_all: $(RUNTIME_ALL_SRC) $(RUNTIME_HDRS)
 	@mkdir -p bin
 	$(CC) $(CFLAGS) $(RUNTIME_ALL_SRC) $(LDFLAGS) -o $@
 
-bin/fclaw_unit_tests: $(UNIT_TEST_SRC) runtime/fjson_repair/repair.c runtime/support/json.c runtime/support/fsutil.c runtime/support/duration.c runtime/support/heap_guard.c runtime/support/reconnect_backoff.c runtime/support/http1.c runtime/support/net_tls.c runtime/llm/normalize.c runtime/llm/profile.c runtime/llm/request.c runtime/llm/stream.c runtime/llm/provider_limit.c runtime/llm/pricing.c runtime/llm/usage.c runtime/secure/auth.c runtime/secure/auth_targets.c runtime/secure/secret_store.c runtime/secure/action_secret_broker.c
+bin/fclaw_unit_tests: $(UNIT_TEST_SRC) runtime/fjson_repair/repair.c runtime/support/json.c runtime/support/fsutil.c runtime/support/duration.c runtime/support/heap_guard.c runtime/support/reconnect_backoff.c runtime/support/http1.c runtime/support/net_tls.c runtime/llm/normalize.c runtime/llm/profile.c runtime/llm/request.c runtime/llm/stream.c runtime/llm/provider_limit.c runtime/llm/pricing.c runtime/llm/usage.c runtime/llm/extract.c runtime/secure/auth.c runtime/secure/auth_targets.c runtime/secure/secret_store.c runtime/secure/action_secret_broker.c
 	@mkdir -p bin
 	$(CC) $(CFLAGS) -Itests \
 		-DTEST_REGISTRY_INC='"test_registry_unit.inc"' \
 		-DDEFAULT_BUDGET_MS=100 \
-		$(UNIT_TEST_SRC) runtime/fjson_repair/repair.c runtime/support/json.c runtime/support/fsutil.c runtime/support/duration.c runtime/support/heap_guard.c runtime/support/reconnect_backoff.c runtime/support/http1.c runtime/support/net_tls.c runtime/llm/normalize.c runtime/llm/profile.c runtime/llm/request.c runtime/llm/stream.c runtime/llm/provider_limit.c runtime/llm/pricing.c runtime/llm/usage.c runtime/secure/auth.c runtime/secure/auth_targets.c runtime/secure/secret_store.c runtime/secure/action_secret_broker.c runtime/action_coerce.c $(LDFLAGS) -o $@
+		$(UNIT_TEST_SRC) runtime/fjson_repair/repair.c runtime/support/json.c runtime/support/fsutil.c runtime/support/duration.c runtime/support/heap_guard.c runtime/support/reconnect_backoff.c runtime/support/http1.c runtime/support/net_tls.c runtime/llm/normalize.c runtime/llm/profile.c runtime/llm/request.c runtime/llm/stream.c runtime/llm/provider_limit.c runtime/llm/pricing.c runtime/llm/usage.c runtime/llm/extract.c runtime/secure/auth.c runtime/secure/auth_targets.c runtime/secure/secret_store.c runtime/secure/action_secret_broker.c runtime/action_coerce.c $(LDFLAGS) -o $@
 
 bin/fclaw_integration_tests: $(INTEGRATION_TEST_SRC) $(INTEGRATION_RUNTIME_SRC) $(RUNTIME_HDRS)
 	@mkdir -p bin

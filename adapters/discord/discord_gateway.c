@@ -249,6 +249,7 @@ static void dc_schedule_dns_reconnect(DcAdapter *a, uint64_t now_ms,
 
 void dc_close_gateway_with_cause(DcAdapter *a, const char *cause) {
   if (!a) return;
+  if (a->gw_resolve) { net_resolve_free(a->gw_resolve); a->gw_resolve = NULL; }
   if (a->gw_tls) { fc_tls_free(a->gw_tls); a->gw_tls = NULL; }
   if (a->gw_fd >= 0) { net_close(a->gw_fd); a->gw_fd = -1; }
   a->gw_tx_len = 0;
@@ -265,21 +266,52 @@ void dc_close_gateway(DcAdapter *a) {
 }
 
 int dc_gateway_start_connect(DcAdapter *a, uint64_t now_ms) {
-  int fd = -1;
-  int connect_rc;
   if (!a || !a->enabled) return -1;
-  connect_rc = net_connect_nb(DC_GATEWAY_HOST, DC_GATEWAY_PORT, &fd);
-  if (connect_rc != 0 || fd < 0) {
-    if (connect_rc == NET_CONNECT_DNS_FAILED)
-      dc_schedule_dns_reconnect(a, now_ms, DC_GATEWAY_HOST);
-    else
-      dc_schedule_reconnect(a, now_ms, "tcp connect failed");
+  /* Resolve the gateway host in a child so a hung resolver on a dead
+   * network cannot freeze the reactor. The blocking connect the adapter
+   * used to do here now happens in dc_drive_resolve, once the name is in. */
+  if (a->gw_resolve) { net_resolve_free(a->gw_resolve); a->gw_resolve = NULL; }
+  a->gw_resolve = net_resolve_begin(DC_GATEWAY_HOST, DC_GATEWAY_PORT);
+  if (!a->gw_resolve) {
+    dc_schedule_reconnect(a, now_ms, "resolve start failed");
     return -1;
   }
-  a->gw_fd = fd;
-  a->gw_state = DC_TCP_CONNECTING;
-  dc_diag(a, "gateway tcp connecting %s:%d", DC_GATEWAY_HOST, DC_GATEWAY_PORT);
+  a->gw_state = DC_RESOLVING;
+  a->gw_resolve_deadline_ms = now_ms + DC_RESOLVE_TIMEOUT_MS;
+  dc_diag(a, "gateway resolving %s", DC_GATEWAY_HOST);
   return 0;
+}
+
+/* Drive an in-flight gateway name resolution. Called when the resolve fd
+ * is readable, from tick while resolving, and once when the deadline
+ * passes. Advances to DC_TCP_CONNECTING on success, or schedules the same
+ * backoff reconnect the synchronous path used on DNS/connect failure. */
+void dc_drive_resolve(DcAdapter *a, uint64_t now_ms) {
+  int fd = -1;
+  int rc;
+  if (!a || a->gw_state != DC_RESOLVING || !a->gw_resolve) return;
+  if (now_ms >= a->gw_resolve_deadline_ms) {
+    net_resolve_free(a->gw_resolve);
+    a->gw_resolve = NULL;
+    a->gw_state = DC_DISCONNECTED;
+    dc_schedule_dns_reconnect(a, now_ms, DC_GATEWAY_HOST);
+    return;
+  }
+  rc = net_resolve_connect(a->gw_resolve, &fd);
+  if (rc == 1) return; /* still resolving */
+  net_resolve_free(a->gw_resolve);
+  a->gw_resolve = NULL;
+  if (rc == 0) {
+    a->gw_fd = fd;
+    a->gw_state = DC_TCP_CONNECTING;
+    dc_diag(a, "gateway tcp connecting %s:%d", DC_GATEWAY_HOST, DC_GATEWAY_PORT);
+    return;
+  }
+  a->gw_state = DC_DISCONNECTED;
+  if (rc == NET_CONNECT_DNS_FAILED)
+    dc_schedule_dns_reconnect(a, now_ms, DC_GATEWAY_HOST);
+  else
+    dc_schedule_reconnect(a, now_ms, "tcp connect failed");
 }
 
 int dc_gw_flush(DcAdapter *a) {

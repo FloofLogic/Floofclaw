@@ -122,7 +122,7 @@ managed-op, and configured result turns receive it through the existing path.
 
 ### One binary, one long-lived process, zero magic
 
-FloofClaw is one C binary (557,192 bytes for the stripped macOS arm64
+FloofClaw is one C binary (573,768 bytes for the stripped macOS arm64
 `release-small` build with Discord, IRC, Telegram, and WS; run
 `./scripts/metrics.sh` immediately after that target to reproduce it) and one
 long-lived, single-threaded gateway process with no pthreads on the hot

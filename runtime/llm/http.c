@@ -8,6 +8,7 @@
  * OpenAI-compatible Responses, and Gemini generateContent. */
 
 #include "llm.h"
+#include "extract.h"
 #include "stream.h"
 
 #include "../secure/auth.h"
@@ -39,6 +40,20 @@ typedef struct {
  * parse failure fails fast as before. This runs in the LLM child
  * process, not the reactor, so a blocking backoff sleep is fine
  * (Principle #3 is about reactor callbacks, not subprocesses). */
+/* Failures that end before any request byte leaves this process: the
+ * provider cannot have seen the request, so a dollar reservation made for
+ * it can be returned. Everything else (timeouts, resets, any HTTP status)
+ * leaves the outcome unknown from here. */
+static int llm_http_never_dispatched(CURLcode rc) {
+  return rc == CURLE_COULDNT_RESOLVE_PROXY ||
+         rc == CURLE_COULDNT_RESOLVE_HOST ||
+         rc == CURLE_COULDNT_CONNECT ||
+         rc == CURLE_SSL_CONNECT_ERROR ||
+         rc == CURLE_PEER_FAILED_VERIFICATION ||
+         rc == CURLE_URL_MALFORMAT ||
+         rc == CURLE_UNSUPPORTED_PROTOCOL;
+}
+
 static int llm_http_retryable(CURLcode rc, long http_status) {
   if (rc == CURLE_OPERATION_TIMEDOUT || rc == CURLE_COULDNT_CONNECT ||
       rc == CURLE_RECV_ERROR || rc == CURLE_SEND_ERROR ||
@@ -169,62 +184,6 @@ static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
   return want;
 }
 
-/* Extract content[0].text from an Anthropic Messages response. */
-static int extract_anthropic_text(const char *response_json, char *out, size_t out_len) {
-  JsonRef root, content_arr, first;
-  if (json_ref_first_object(response_json, &root) != 0) return -1;
-  if (json_ref_object_get_array(&root, "content", &content_arr) != 0) return -1;
-  if (json_ref_array_get(&content_arr, 0, &first) != 0) return -1;
-  return json_ref_object_get_string(&first, "text", out, out_len);
-}
-
-/* Extract choices[0].message.content from an OpenAI-compatible Chat response. */
-static int extract_openai_compat_text(const char *response_json, char *out, size_t out_len) {
-  JsonRef root, choices_arr, first, message;
-  if (json_ref_first_object(response_json, &root) != 0) return -1;
-  if (json_ref_object_get_array(&root, "choices", &choices_arr) != 0) return -1;
-  if (json_ref_array_get(&choices_arr, 0, &first) != 0) return -1;
-  if (json_ref_object_get_object(&first, "message", &message) != 0) return -1;
-  return json_ref_object_get_string(&message, "content", out, out_len);
-}
-
-/* Extract output[0].content[0].text from an OpenAI Responses response. */
-static int extract_openai_responses_text(const char *response_json, char *out, size_t out_len) {
-  JsonRef root, output_arr;
-  size_t n;
-  if (json_ref_first_object(response_json, &root) != 0) return -1;
-  if (json_ref_object_get_array(&root, "output", &output_arr) != 0) return -1;
-  n = json_ref_array_size(&output_arr);
-  for (size_t i = 0; i < n; ++i) {
-    JsonRef item, content_arr;
-    char type[LLM_ID_MAX] = "";
-    if (json_ref_array_get(&output_arr, i, &item) != 0) continue;
-    (void)json_ref_object_get_string(&item, "type", type, sizeof(type));
-    if (strcmp(type, "message") != 0) continue;
-    if (json_ref_object_get_array(&item, "content", &content_arr) != 0) continue;
-    if (json_ref_array_size(&content_arr) > 0) {
-      JsonRef content;
-      if (json_ref_array_get(&content_arr, 0, &content) == 0 &&
-          json_ref_object_get_string(&content, "text", out, out_len) == 0) {
-        return 0;
-      }
-    }
-  }
-  return -1;
-}
-
-/* Extract candidates[0].content.parts[0].text from a Gemini response. */
-static int extract_gemini_text(const char *response_json, char *out, size_t out_len) {
-  JsonRef root, candidates_arr, candidate, content, parts, part;
-  if (json_ref_first_object(response_json, &root) != 0) return -1;
-  if (json_ref_object_get_array(&root, "candidates", &candidates_arr) != 0) return -1;
-  if (json_ref_array_get(&candidates_arr, 0, &candidate) != 0) return -1;
-  if (json_ref_object_get_object(&candidate, "content", &content) != 0) return -1;
-  if (json_ref_object_get_array(&content, "parts", &parts) != 0) return -1;
-  if (json_ref_array_get(&parts, 0, &part) != 0) return -1;
-  return json_ref_object_get_string(&part, "text", out, out_len);
-}
-
 static int build_request_url(const LlmProfile *profile, const LlmProvider *provider,
                              int streaming,
                              char *url_out, size_t url_out_len) {
@@ -271,7 +230,7 @@ static int gemini_stream_process_line(GeminiStreamState *s) {
   while (*payload == ' ' || *payload == '\t') payload++;
   if (!*payload || strcmp(payload, "[DONE]") == 0) return 0;
   if (s->usage) llm_extract_usage("gemini_key", payload, s->usage);
-  if (extract_gemini_text(payload, delta, sizeof(delta)) != 0)
+  if (llm_extract_gemini_text(payload, delta, sizeof(delta)) != 0)
     return 0; /* usage-only or provider metadata event */
   len = strlen(delta);
   if (s->model_len + len + 1 > sizeof(s->model_text)) return -1;
@@ -463,6 +422,8 @@ int llm_http_call(const LlmProfile *profile, const LlmProvider *provider,
       http_status = 0;
       rc = curl_easy_perform(curl);
       curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_status);
+      if (usage_out && !llm_http_never_dispatched(rc))
+        usage_out->request_dispatched = 1;
       if (rc == CURLE_OK && http_status >= 200 && http_status < 300) break;
       if (attempt < max_retries && llm_http_retryable(rc, http_status) &&
           (!streaming ||
@@ -520,16 +481,20 @@ int llm_http_call(const LlmProfile *profile, const LlmProvider *provider,
                  gemini_stream->model_text);
     } else if (strcmp(provider->kind, "openai_chat") == 0 ||
                strcmp(provider->kind, "openai_compat") == 0) {
-      extract_rc = extract_openai_compat_text(resp.buf ? resp.buf : "", model_text, sizeof(model_text));
+      extract_rc = llm_extract_openai_compat_text(resp.buf ? resp.buf : "", model_text, sizeof(model_text));
     } else if (strcmp(provider->kind, "openai_responses") == 0) {
-      extract_rc = extract_openai_responses_text(resp.buf ? resp.buf : "", model_text, sizeof(model_text));
+      extract_rc = llm_extract_openai_responses_text(resp.buf ? resp.buf : "", model_text, sizeof(model_text));
     } else if (strcmp(provider->kind, "gemini_key") == 0) {
-      extract_rc = extract_gemini_text(resp.buf ? resp.buf : "", model_text, sizeof(model_text));
+      extract_rc = llm_extract_gemini_text(resp.buf ? resp.buf : "", model_text, sizeof(model_text));
     } else {
-      extract_rc = extract_anthropic_text(resp.buf ? resp.buf : "", model_text, sizeof(model_text));
+      extract_rc = llm_extract_anthropic_text(resp.buf ? resp.buf : "", model_text, sizeof(model_text));
     }
     if (extract_rc != 0) {
-      fprintf(stderr, "llm/http: could not extract model text from response\n");
+      char stop_reason[LLM_ID_MAX] = "";
+      llm_extract_stop_reason(provider->kind, raw, stop_reason, sizeof(stop_reason));
+      fprintf(stderr, "llm/http: could not extract model text from response"
+                      " (kind=%s stop_reason=%s)\n",
+              provider->kind, stop_reason[0] ? stop_reason : "unknown");
       free(resp.buf);
       if (gemini_stream) {
         llm_message_stream_destroy(gemini_stream->decoder);

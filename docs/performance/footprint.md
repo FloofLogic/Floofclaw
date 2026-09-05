@@ -8,10 +8,10 @@ The current reproducible source and binary measurements are emitted by
 tables below preserve the 2026-07-20 macOS/arm64 hardening snapshot and must
 not be read as current release values.
 
-The 2026-08-25 arm64 macOS measurement (Apple clang 17) reports 42,665 runtime
-C/header lines and a 557,192-byte stripped `release-small` executable carrying
+The 2026-09-04 arm64 macOS measurement (Apple clang 17) reports 43,932 runtime
+C/header lines and a 573,768-byte stripped `release-small` executable carrying
 all four shipped adapters. Repeated isolated samples put the mock-backed
-`hello` around 0.2 seconds and idle gateway RSS around 8–10 MiB. The older 667,304-byte
+`hello` around 0.13 seconds and idle gateway RSS around 8–10 MiB. The older 667,304-byte
 number was the default `-O2`, WS-only build and is not the distributed-binary
 claim. `./scripts/metrics.sh` includes the exact profile, adapters, and revision;
 RSS and wall time are naturally variable samples, not the Mach
@@ -51,7 +51,7 @@ Historical sizes on macOS arm64:
 |-----------------------|---------------|-----------------|
 | Dev (unstripped)      | 460,104 bytes | `make`          |
 | Historical release (stripped) | 432,160 bytes | `make release` |
-| Current all-adapter small release | 557,192 bytes | `make release-small` |
+| Current all-adapter small release | 573,768 bytes | `make release-small` |
 
 The dev build keeps symbols so backtraces from crashes are readable.
 

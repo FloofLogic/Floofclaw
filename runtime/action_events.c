@@ -170,11 +170,15 @@ int rt_action_emit_terminal(RtRun *r, const char *type, const char *rid,
    * record the terminal, but never hand the adapter a second delivery. */
   if (strcmp(action ? action : "", "message") == 0 && r->ctx.origin_channel[0] && ok &&
       strcmp(reason ? reason : "", "memoized_duplicate") != 0) {
-    char message_text[RT_LARGE] = "";
+    char message_text[RT_MESSAGE_TEXT_MAX + 1] = "";
     JsonRef result_ref;
-    if (result_json && json_ref_first_object(result_json, &result_ref) == 0)
-      (void)json_ref_object_get_string(&result_ref, "message", message_text, sizeof(message_text));
-    rt_ports_emit_message(r, rid, message_text, delivery, sizeof(delivery));
+    if (result_json && json_ref_first_object(result_json, &result_ref) == 0 &&
+        json_ref_object_get_string(&result_ref, "message", message_text,
+                                   sizeof(message_text)) == 0)
+      rt_ports_emit_message(r, rid, message_text, delivery, sizeof(delivery));
+    else
+      (void)rt_narrate("message %s: result text unreadable; nothing delivered",
+                       rid ? rid : "");
   }
   if (snprintf(
       payload, sizeof(payload),

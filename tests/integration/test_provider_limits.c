@@ -4,12 +4,18 @@
 #include "../../runtime/llm/provider_limit.h"
 #include "../../runtime/support/fsutil.h"
 
+#include <arpa/inet.h>
 #include <dirent.h>
+#include <errno.h>
+#include <netinet/in.h>
 #include <stdio.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 static char *capture_env_value(const char *name) {
   const char *value = getenv(name);
@@ -36,6 +42,77 @@ static time_t local_midday(int year, int month, int day) {
   tmv.tm_hour = 12;
   tmv.tm_isdst = -1;
   return mktime(&tmv);
+}
+
+static int fd_write_all(int fd, const void *bytes, size_t len) {
+  const unsigned char *p = (const unsigned char *)bytes;
+  size_t off = 0U;
+  while (off < len) {
+    ssize_t n = write(fd, p + off, len - off);
+    if (n < 0 && errno == EINTR) continue;
+    if (n <= 0) return -1;
+    off += (size_t)n;
+  }
+  return 0;
+}
+
+/* One loopback HTTP exchange: accept, read the request, answer with `body`
+ * as application/json, exit. The port is chosen by the kernel. */
+static int spawn_one_json_response_server(const char *body, pid_t *pid_out,
+                                          unsigned *port_out) {
+  struct sockaddr_in address;
+  socklen_t address_len = sizeof(address);
+  int listener;
+  pid_t pid;
+  if (!body || !pid_out || !port_out) return -1;
+  listener = socket(AF_INET, SOCK_STREAM, 0);
+  if (listener < 0) return -1;
+  memset(&address, 0, sizeof(address));
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.sin_port = 0;
+  if (bind(listener, (struct sockaddr *)&address, sizeof(address)) != 0 ||
+      listen(listener, 1) != 0 ||
+      getsockname(listener, (struct sockaddr *)&address, &address_len) != 0) {
+    close(listener);
+    return -1;
+  }
+  *port_out = (unsigned)ntohs(address.sin_port);
+  pid = fork();
+  if (pid < 0) {
+    close(listener);
+    return -1;
+  }
+  if (pid == 0) {
+    char request[8192];
+    char header[512];
+    int client;
+    int header_len;
+    alarm(10);
+    client = accept(listener, NULL, NULL);
+    if (client < 0) _exit(2);
+    (void)read(client, request, sizeof(request));
+    header_len = snprintf(
+        header, sizeof(header),
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n\r\n",
+        strlen(body));
+    if (header_len < 0 || (size_t)header_len >= sizeof(header) ||
+        fd_write_all(client, header, (size_t)header_len) != 0 ||
+        fd_write_all(client, body, strlen(body)) != 0) {
+      close(client);
+      close(listener);
+      _exit(3);
+    }
+    close(client);
+    close(listener);
+    _exit(0);
+  }
+  close(listener);
+  *pid_out = pid;
+  return 0;
 }
 
 static int write_registry_fixture(const char *path, const char *providers_json) {
@@ -289,5 +366,142 @@ int provider_limit_state_is_replaced_atomically_under_a_lock_file(void) {
                "only the state, its lock, and the planted torn temp remain (no leaked temp files)");
 
   free(state);
+  return rc;
+}
+
+/* The pre-dispatch reservation is a ceiling. Once the provider answers, the
+ * ledger holds what the reported usage actually costs, so a $5 cap is no
+ * longer spent by ~40 conservative ceilings. */
+int provider_daily_usd_reservation_settles_after_a_loopback_response(void) {
+  char *saved_registry = capture_env_value("FCLAW_LLM_REGISTRY");
+  char *saved_pricing = capture_env_value("FCLAW_PRICING");
+  char *saved_retries = capture_env_value("FCLAW_LLM_MAX_RETRIES");
+  static const char body[] =
+      "{\"choices\":[{\"message\":{\"content\":\"{\\\"ok\\\":true}\"}}],"
+      "\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":10,"
+      "\"prompt_tokens_details\":{\"cached_tokens\":40}}}";
+  LlmProfile profile;
+  char response[LLM_RESP_MAX];
+  char providers[1024];
+  char *meta = NULL;
+  char *state = NULL;
+  pid_t server = -1;
+  unsigned port = 0;
+  int status = 0;
+  int rc = 0;
+
+  rc |= test_reset_workspace();
+  rc |= expect(spawn_one_json_response_server(body, &server, &port) == 0,
+               "loopback provider starts");
+  snprintf(providers, sizeof(providers),
+           "    {\n"
+           "      \"id\": \"settle_provider\",\n"
+           "      \"kind\": \"openai_compat\",\n"
+           "      \"url\": \"http://127.0.0.1:%u/v1/chat/completions\",\n"
+           "      \"limits\": { \"daily_usd\": 1.0 }\n"
+           "    }",
+           port);
+  rc |= write_registry_fixture("workspace/test_registry_settle.json", providers);
+  rc |= test_write_file(
+      "workspace/test_pricing_settle.json",
+      "{\"models\":[{\"provider\":\"settle_provider\","
+      "\"model\":\"settle-model\",\"input\":0.1,"
+      "\"cached_input\":0.01,\"output\":0.2}]}\n");
+  (void)setenv("FCLAW_LLM_REGISTRY", "workspace/test_registry_settle.json", 1);
+  (void)setenv("FCLAW_PRICING", "workspace/test_pricing_settle.json", 1);
+  (void)setenv("FCLAW_LLM_MAX_RETRIES", "0", 1);
+
+  memset(&profile, 0, sizeof(profile));
+  snprintf(profile.id, sizeof(profile.id), "settle_profile");
+  snprintf(profile.provider, sizeof(profile.provider), "settle_provider");
+  snprintf(profile.model, sizeof(profile.model), "settle-model");
+  profile.max_output_tokens = 10;
+
+  rc |= test_mkdir_p("workspace/runs/run_settle");
+  rc |= expect(llm_call("workspace/runs/run_settle", "hello", "tests-agent",
+                        &profile, "{\"message\":\"hello\"}", response,
+                        sizeof(response)) == 0,
+               "the capped call completes against the loopback provider");
+  if (server > 0) (void)waitpid(server, &status, 0);
+  rc |= test_read_file("workspace/runs/run_settle/provider_calls/001_meta.json",
+                       &meta);
+  rc |= expect_substr(meta, "\"budget_outcome\":\"settled\"",
+                      "meta records that the reservation was settled");
+  rc |= expect_substr(meta, "\"budget_reserved_usd\":0.000107",
+                      "meta records the pre-dispatch ceiling");
+  rc |= expect_substr(meta, "\"budget_settled_usd\":0.000009",
+                      "meta records the priced actual cost");
+  rc |= test_read_file("workspace/logs/provider_limits/settle_provider.json",
+                       &state);
+  rc |= expect_substr(state, "\"day_usd_reserved_micros\":9",
+                      "the day ledger holds the actual cost after settlement");
+
+  free(state);
+  free(meta);
+  restore_env_value("FCLAW_LLM_MAX_RETRIES", saved_retries);
+  restore_env_value("FCLAW_PRICING", saved_pricing);
+  restore_env_value("FCLAW_LLM_REGISTRY", saved_registry);
+  return rc;
+}
+
+/* A connection refused never reached the provider, so the reservation is
+ * returned; the call-count limits still charge the attempt. */
+int provider_daily_usd_reservation_is_released_when_the_provider_is_unreachable(void) {
+  char *saved_registry = capture_env_value("FCLAW_LLM_REGISTRY");
+  char *saved_pricing = capture_env_value("FCLAW_PRICING");
+  char *saved_retries = capture_env_value("FCLAW_LLM_MAX_RETRIES");
+  LlmProfile profile;
+  char response[LLM_RESP_MAX];
+  char *meta = NULL;
+  char *state = NULL;
+  int rc = 0;
+
+  rc |= test_reset_workspace();
+  rc |= write_registry_fixture(
+      "workspace/test_registry_release.json",
+      "    {\n"
+      "      \"id\": \"release_provider\",\n"
+      "      \"kind\": \"openai_compat\",\n"
+      "      \"url\": \"http://127.0.0.1:1/v1/chat/completions\",\n"
+      "      \"limits\": { \"daily\": 5, \"daily_usd\": 1.0 }\n"
+      "    }");
+  rc |= test_write_file(
+      "workspace/test_pricing_release.json",
+      "{\"models\":[{\"provider\":\"release_provider\","
+      "\"model\":\"release-model\",\"input\":0.1,"
+      "\"cached_input\":0.01,\"output\":0.2}]}\n");
+  (void)setenv("FCLAW_LLM_REGISTRY", "workspace/test_registry_release.json", 1);
+  (void)setenv("FCLAW_PRICING", "workspace/test_pricing_release.json", 1);
+  (void)setenv("FCLAW_LLM_MAX_RETRIES", "0", 1);
+
+  memset(&profile, 0, sizeof(profile));
+  snprintf(profile.id, sizeof(profile.id), "release_profile");
+  snprintf(profile.provider, sizeof(profile.provider), "release_provider");
+  snprintf(profile.model, sizeof(profile.model), "release-model");
+  profile.max_output_tokens = 10;
+
+  rc |= test_mkdir_p("workspace/runs/run_release");
+  rc |= expect(llm_call("workspace/runs/run_release", "hello", "tests-agent",
+                        &profile, "{\"message\":\"hello\"}", response,
+                        sizeof(response)) != 0,
+               "the call fails against a refused connection");
+  rc |= test_read_file("workspace/runs/run_release/provider_calls/001_meta.json",
+                       &meta);
+  rc |= expect_substr(meta, "\"budget_outcome\":\"released\"",
+                      "meta records that the reservation was released");
+  rc |= expect_substr(meta, "\"budget_settled_usd\":0.000000",
+                      "a released reservation settles to nothing");
+  rc |= test_read_file("workspace/logs/provider_limits/release_provider.json",
+                       &state);
+  rc |= expect_substr(state, "\"day_usd_reserved_micros\":0",
+                      "the day ledger no longer holds the ceiling");
+  rc |= expect_substr(state, "\"day_count\":1",
+                      "the attempt still counts against the daily call limit");
+
+  free(state);
+  free(meta);
+  restore_env_value("FCLAW_LLM_MAX_RETRIES", saved_retries);
+  restore_env_value("FCLAW_PRICING", saved_pricing);
+  restore_env_value("FCLAW_LLM_REGISTRY", saved_registry);
   return rc;
 }

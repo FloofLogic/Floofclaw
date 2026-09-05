@@ -3,6 +3,126 @@
 FloofClaw follows semantic versioning for public source releases. The public
 release tag and `runtime/version.h` carry the same plain `X.Y.Z` version.
 
+## 0.31.0 — 2026-09-05
+
+Everything since v0.30.0.
+
+### Changed
+
+- **The daily USD ceiling now settles to what a call actually cost.** The
+  pre-dispatch reservation is still a crash-safe ceiling, but a response that
+  reports usage replaces it with the priced actual cost, and a request that
+  provably never reached the provider (DNS, connection refused, TLS setup, an
+  unbuildable request) returns it in full. Timeouts, mid-transfer resets, and
+  HTTP error statuses keep the ceiling, since the provider may have billed
+  them. Every `provider_calls/NNN_meta.json` now carries `budget_outcome`,
+  `budget_reserved_usd`, and `budget_settled_usd`.
+- **Media is admitted under a USD cap when the pricing table bounds it.**
+  `config/pricing.json` (schema 3) carries `media_input_tokens_per_item`
+  (8,192 in the shipped table, above the largest single image on every
+  listed provider); each attached item reserves that many input tokens and
+  settlement then charges the reported usage. A table without the field
+  keeps the previous `daily_usd_unpriced_media` refusal.
+- **A missing or malformed pricing table is named as such.** Under a cap it
+  fails closed with `daily_usd_pricing_unavailable` and a stderr line naming
+  the path, instead of the `daily_usd_unpriced` reason that means an unlisted
+  model.
+- **Local limit windows only roll forward.** A clock stepped backwards across
+  midnight or a minute boundary keeps counting against the window already
+  open instead of granting a second allowance.
+- **Provider usage is normalized before it reaches the ledger.** Anthropic's
+  `input_tokens` (the uncached remainder) is folded with its cache-read and
+  cache-creation counters so `input_tokens` means the whole prompt on every
+  provider, and Gemini's `thoughtsTokenCount` is counted in `output_tokens`
+  because that is how it is billed. Usage records and meta artifacts gain
+  `provider_cache_creation_input_tokens` (null where a provider reports
+  none); records without the field still parse.
+- **Pricing rows may carry `cache_creation_input`.** The Anthropic rows do
+  ($3.75 for Sonnet 4.6, checked 2026-09-02); a row without it prices
+  cache-creation tokens at the plain input rate. Claude Opus 5 and Claude
+  Sonnet 5 rows are added for both Anthropic provider ids. The
+  `app/tokenwatch` mirror follows.
+
+### Fixed
+
+- **A worker's result is no longer cut to 4,095 bytes on its way to the
+  model.** The Codex and Claude runners copied `final.txt` into a
+  4 KiB buffer and submitted the head as the complete result; on Scraps a
+  6,159-byte campsite list arrived cut mid-URL and the result manager
+  relayed the stump as the answer (`run_1729`). The buffer now carries the
+  8,192-byte result ceiling every other stage already allowed, and a text
+  longer than that is cut on a UTF-8 boundary and ends with
+  `[truncated by FloofClaw: N of M bytes shown]` so the model and the user
+  can tell.
+- **A reply longer than the delivery path can carry is refused, not
+  blanked.** `message` text was copied through 4 KiB buffers whose copy
+  failed silently, so a longer reply would have been recorded as delivered
+  with empty text. The ceiling is now `RT_MESSAGE_TEXT_MAX` (8,192 bytes)
+  on every copy from the intrinsic to each adapter's tailer and the CLI
+  channel; the normalizer rejects a longer message with its byte count so
+  the repair turn can shorten it, and `fc_message` fails the action with
+  the limit named if one reaches it anyway.
+- **Claude Opus 5 and Sonnet 5 responses parse when the model thinks.** The
+  Anthropic extractor read only `content[0]`; those models think by default
+  and lead with a `thinking` block, so every such response failed with
+  "could not extract model text" after being billed. The extractor now
+  takes the first `text` block (Gemini's likewise skips `thought` parts), the
+  failure line names the provider's stop reason, and the four extractors
+  are unit-tested against canned bodies.
+- **`make test-build-contracts` no longer fails on a busy machine.** The
+  mock-only contract piped a `make -Bn` dry run into `grep -q` under
+  `pipefail`; `grep` exits at its first match and `make` died of SIGPIPE,
+  failing the contract about one seal in three under load. The dry run
+  goes to a file first.
+- **A hung DNS lookup no longer freezes the reactor.** The reactor is a
+  single cooperative thread, and every channel adapter resolved its host
+  with a blocking `getaddrinfo` before connecting; on a dead network (a
+  sleeping laptop, a Wi-Fi transition) that stalled every module for the
+  platform resolver timeout, seen as ~30 s `reactor: slow tick` records
+  covering `runtime-main` as well. A new asynchronous resolver in
+  `runtime/support/net.c` runs the lookup in a short-lived child and reports
+  through a pollable fd, so the reactor keeps ticking while a name resolves.
+  Every connect path now uses it through a resolving state with a bounded
+  deadline — the Discord gateway and REST client, IRC, and Telegram — and
+  the blocking `net_connect_nb` helper is gone.
+- **An action argument may be named like a runtime key.** The call
+  normalizer refused `event_id`, `run_id`, `request_id`, `job_id`, `source`,
+  `created_by`, and `work_rev` inside the args of every call and reported the
+  refusal as `call args must be object`, so an action whose schema names an
+  argument `event_id` (the shipped `gcal` `get`, `update`, and `delete`
+  kinds) could never be called from an agent on any floop. An
+  `action_request` nests args beside the runtime's own fields, so those
+  names are now ordinary arguments there; they stay refused where args
+  become a runtime payload verbatim (`task.create`, `task.update`,
+  `memory.*`), a bound work controller still cannot assert `work_rev` or
+  `trigger_event_id` inside args, and every such refusal names the key. A
+  malformed `task_id` inside args is reported as such instead of as a
+  non-object.
+- **Anthropic `estimated_usd` no longer undercounts cached prompts.** The
+  ledger stored Anthropic's uncached remainder as `input_tokens` and then
+  subtracted cache reads from it again, so 200 uncached + 5,000 cached + 100
+  output tokens priced at 1,560 µ$ instead of 3,600 µ$ while reporting
+  `pricing_complete:true`. Records written before this release keep the old
+  numbers.
+- **A `working_memory` note with no live task to attach to is dropped, not
+  fatal.** When an agent emitted a sidecar `working_memory` note but no live
+  task was in its context to bind it to, the normalizer rejected the whole
+  agent output and failed the run — `run_186` was a `result_manager` turn
+  that added a note after the work manager had already terminalized its task.
+  Such an unbindable note is now narrated and skipped, while a note naming a
+  task that exists only in another context still rejects.
+- **The shipped `floofclaw` floop resolves relative dates and confirms
+  results in plain language.** Its `chat_manager`, `work_manager`,
+  `review_manager`, and `result_manager` now receive the current date as
+  `@{now}` (placed last so the static prompt prefix stays cacheable) and the
+  operator's standing facts as `@{user}`, and resolve "today", "tonight", and
+  "tomorrow" against `@{now}` instead of a date carried in conversation — a
+  "schedule lunch today" request had been booking events days in the past.
+  The `result_manager` now confirms outcomes conversationally and never
+  surfaces event IDs, operation handles, or raw ISO timestamps, and no longer
+  issues the task-state writes the work manager's terminalization ownership
+  had made redundant.
+
 ## 0.30.0 — 2026-08-27
 
 Everything since v0.29.0. The `0.29.1` version in `runtime/version.h` was
