@@ -32,7 +32,7 @@
       },
       "model": {
         "type": "string",
-        "description": "Optional Claude model override."
+        "description": "Optional Claude model for this start. Defaults to the deployment's actions.manage_claude.model, and to the Claude Code CLI's own default when neither is set."
       },
       "permission_mode": {
         "type": "string",
@@ -49,6 +49,12 @@
     "fc_manage_claude()"
   ],
   "config": [
+    {
+      "name": "MODEL",
+      "key": "model",
+      "kind": "string",
+      "required": false
+    },
     {
       "name": "MAX_PERMISSION_MODE",
       "key": "max_permission_mode",

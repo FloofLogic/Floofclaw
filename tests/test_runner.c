@@ -119,10 +119,13 @@ static const BudgetOverride kBudgetOverrides[] = {
   { "deterministic_completion_claims_use_durable_operation_contract", 20000 },
   { "operation_completion_deadline_and_recovery_contract", 20000 },
   { "default_floofclaw_admitted_work_reaches_result_manager_reply", 20000 },
+  { "terminal_work_outcome_preserves_selected_result_details", 20000 },
   /* Each drives the shipped floop through one failed subprocess attempt and
    * a later semantic controller turn using hermetic provider responses. */
   { "work_manager_tries_justified_alternative_after_failure", 20000 },
   { "work_manager_blocks_when_no_justified_alternative_remains", 20000 },
+  { "synchronous_work_failure_returns_to_exact_context_and_replies", 5000 },
+  { "terminal_work_outcome_cannot_end_in_silence", 5000 },
   { "work_consequence_routes_intermediate_and_terminal_results", 20000 },
   { "work_controller_keeps_managed_actions_ordinary_and_stale_results_inert", 5000 },
   /* Starts two loopback HTTP fixtures to prove exact media transfer,
@@ -131,6 +134,7 @@ static const BudgetOverride kBudgetOverrides[] = {
   { "work_publication_recovers_once_after_source_append_crash", 15000 },
   { "work_publication_pending_claim_resumes_same_run", 15000 },
   { "publication_outbox_rejects_conflicting_sources_and_enforces_cap", 30000 },
+  { "publication_outbox_binds_at_intake_and_releases_at_retire", 15000 },
   /* Drive a real gateway and fork a parking subprocess to prove pass
    * semantics; process launch dominates wall time. */
   { "one_pass_floop_resumes_instead_of_rewinding_on_a_parked_subprocess", 5000 },

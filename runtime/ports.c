@@ -953,6 +953,14 @@ static int create_run_from_envelope(RtScheduler *s, RtRun *r, const char *envelo
       log_rejected_envelope(envelope_path, "persist_intake_claim_failed");
       return -1;
     }
+    /* Bind the record to this run now that the claim is durable, so every
+     * later claim check reads one runstate instead of every retained one.
+     * A crash in this window leaves an unbound record the scan resolves. */
+    if (validated_outbox &&
+        rt_publication_outbox_claim(env.envelope_id, r->ctx.run_id) != 0)
+      (void)rt_narrate(
+          "publication outbox: wake %s not bound to %s; reconciliation will resolve it",
+          env.envelope_id, r->ctx.run_id);
   }
   if (commit_inbound_event(r, &env) != 0) {
     if (deferred_claim) {
@@ -999,7 +1007,10 @@ void rt_ports_drain_sources(RtScheduler *s, int max) {
   int budget;
   if (!s) return;
   retry_waiting_inbound_claims(s);
-  if (rt_publication_outbox_reconcile() != 0) return;
+  /* No full pass here. A record is published by its producer, bound at
+   * intake, and removed as its run retires; the tick only picks up what one
+   * of those three could not settle. */
+  if (rt_publication_outbox_retry_if_pending() != 0) return;
   if (max <= 0) max = RT_INTAKE_PER_TICK;
   budget = (int)(RT_MAX_ACTIVE_RUNS - s->run_count);
   if (budget <= 0) return;

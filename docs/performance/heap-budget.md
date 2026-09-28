@@ -157,4 +157,4 @@ harness and reports throughput, active-run saturation, RSS, and Mach
 ## See also
 
 - [Footprint](footprint.md) — the LOC / binary / RSS numbers
-- [Principles](../concepts/principles.md) §6 — "Static shape on the hot path"
+- [Philosophy](../PHILOSOPHY.md#reactor-and-resource-discipline)

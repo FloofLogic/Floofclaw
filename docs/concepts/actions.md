@@ -190,7 +190,7 @@ A real failure this prevents: a work manager called `gcal` with
 description said only `RFC3339` — correct, and useless. The neighbouring
 `start` field gave a concrete example and was called correctly every time.
 
-See [Principles §19](principles.md#19-a-bad-tool-call-is-the-actions-bug-not-the-prompts).
+See [Philosophy](../PHILOSOPHY.md#actions-own-capability-contracts).
 
 ## Args schema
 
@@ -404,7 +404,9 @@ rejection names the offending key. `task_id` is the one key read out of
 Successful data is not projected into task artifacts. A data-returning
 managed action publishes a later `operation_result`, and the floop's configured
 agent turn decides what to message, note, or do next. OpenClaw routes that
-later turn to the same `main_claw`; FloofClaw routes it to `result_manager`.
+later turn to the same `main_claw`; FloofClaw routes it to the bound
+`work_manager`, whose terminal decision then carries the selected result text
+to `result_manager`.
 Ordinary managed-action failure or rejection also returns through the
 correlated `operation_result` continuation. Failed task-bound actions retain
 one narrow diagnostic path: the runtime may append tool, reason, and error
@@ -855,29 +857,34 @@ any contract-declaring action without knowing its id — see
 implement it; the fake adapters in the acceptance tests prove the
 handler is swappable by config alone.
 
-### When to use it: the "LLM needs a result to answer" pattern
+### Result routing
 
-Plain actions run after the LLM's answer turn; their return payload
-never becomes part of a subsequent LLM prompt. So any time a user's
-question requires data the LLM does not have in-context — current
-prices, a URL's live contents, a database lookup, a computed value
-the runtime can't precompute cheaply — the answer is a
-managed-operation action, not an engine change to prefetch that
-data into the input.
+Every action writes its ordinary start and terminal lifecycle into the source
+run. What happens next is declared by the floop and action contract:
 
-The two-turn flow:
+- A fire-and-forget call may end at its terminal action event. When a bound
+  work controller selected it, that terminal also publishes a correlated
+  `work_step_result`, so the exact controller decides whether to continue,
+  complete, or block.
+- A data-returning action declares `managed_operation`. Its immediate or
+  detached terminal result publishes exactly one correlated
+  `operation_result`; the floop routes that event to the configured agent.
 
-1. LLM sees the question and calls the action with `op:"start"`. A floop may
-   separately acknowledge long background work; OpenClaw instead reserves its
-   final `message` for the completed answer or a real block.
-2. The action fetches / computes / whatever, returns
-   `{"status":"finished","handle":"<id>","text":"<summary>"}`.
-   (If the work is fast — sub-second — this happens on the start
-   call itself; if it's slow, start returns `running` and the detached
-   worker later submits its completion claim through the bus. The
-   action-declared deadline bounds a worker that never reports.)
-3. On the LLM's next turn, an `operation_result` envelope carries
-   the `text` field. The LLM composes the real answer using it.
+There is no hidden same-run result pickup. If an agent needs fresh external
+data before it can answer—current prices, URL contents, a database lookup, or
+a worker report—use a managed-operation action rather than prefetching data in
+the kernel.
+
+The managed-operation flow is:
+
+1. An agent calls the action with `op:"start"`.
+2. Fast work may return `finished` immediately; slow work returns `running`
+   and later submits its durable completion claim. The manifest deadline
+   bounds a worker that never reports.
+3. The runtime terminalizes the operation and publishes `operation_result`.
+4. The floop's gated agent consumes that result. In `floofclaw`, a bound
+   `work_manager` evaluates it before a terminal outcome reaches
+   `result_manager`.
 
 `web_read` and the bounded file/HTTP actions are synchronous examples that
 can return `finished` from `start`. `manage_codex` is the canonical async

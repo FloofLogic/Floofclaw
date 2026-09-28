@@ -282,6 +282,13 @@ static void retire_terminal_runs(RtScheduler *s) {
       snprintf(s->last_retired_run_id,
                sizeof(s->last_retired_run_id), "%s", r->ctx.run_id);
       s->last_retired_state = r->state;
+      /* The run's terminal status is already durable (rt_run_set_state
+       * persists it), so this is the moment an internal wake's publication
+       * record becomes garbage. Releasing it here is what keeps the outbox
+       * off the reactor's per-tick path. */
+      if (r->created_from_event_id[0])
+        (void)rt_publication_outbox_release(r->created_from_event_id,
+                                            r->ctx.run_id);
       if (!has_other_active_context_run(s, r))
         (void)rt_tasks_archive_completed_for_context(r->ctx.context_id);
       rt_scheduler_free_run(s, r);

@@ -109,7 +109,9 @@ and advances runs after consuming events.
 Scripts can rely on `set -e` catching either hard refusal. A script that needs
 to distinguish a failed run from a pre-run collision must inspect the printed
 result and whether a run ID was assigned; exit status `2` alone does not make
-that distinction.
+that distinction. A failed agent-input build preserves its typed error and
+diagnostic in the result; the floop step id is used only when no more specific
+run error exists.
 
 ## `fclaw action list | exec | auth`
 

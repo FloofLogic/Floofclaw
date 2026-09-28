@@ -130,4 +130,4 @@ deliberately, which is the correct forensic outcome.
 - [Heap budget](heap-budget.md) — per-event allocation budget and
   measurement caveats
 - [Architecture](../architecture.md) §Memory And Hot Paths
-- [Principles](../concepts/principles.md) §6 Static shape on the hot path
+- [Philosophy](../PHILOSOPHY.md#reactor-and-resource-discipline)

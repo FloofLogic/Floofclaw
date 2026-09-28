@@ -158,6 +158,22 @@ normalizer's own detail in the message. Without this, one slip ended the turn
 and floop `retry_attempts` re-ran the identical turn at full model price with
 nothing said about what was wrong.
 
+An ordinary agent packet may make one action structurally mandatory:
+
+```json
+{
+  "executor": "llm",
+  "required_call": "message",
+  "actions": ["message", "note_add"]
+}
+```
+
+The named action must exist in that agent's allowlist, and every output must
+contain exactly one such call. Other allowed calls may accompany it. This is a
+floop-owned output-shape rule, not a scheduler judgment; rejection uses the
+same bounded LLM repair path above. The shipped FloofClaw result manager uses
+it so a terminal work outcome cannot become a note-only or empty turn.
+
 ## Bound Work Controller Policy
 
 An agent with `"bind_task": "open_work"` may configure its semantic repair
@@ -177,7 +193,9 @@ allowed after rejected or failed actions. It accepts `0` through `8` and
 defaults to `1` when omitted for compatibility. The floop owns the behavioral
 choice; the engine only enforces the selected value and the absolute safety
 ceiling. The separate eight-selection semantic-lineage ceiling can still stop
-a lineage earlier.
+a lineage earlier. Every bound-controller turn must contain exactly one
+ordinary call; an optional `working_memory_append` may accompany it but cannot
+replace it.
 
 ## Shipped Floops
 

@@ -460,7 +460,7 @@ static int render_projection_from(const MemorySummaryState *st,
   /* memory.bytes exposes the current size of memory.jsonl so agents can
    * decide (in their own policy) when to invoke rotate_file. The engine
    * knows nothing about a threshold or cadence; see the mechanism-versus-
-   * policy rule in docs/concepts/principles.md. */
+   * policy rule in docs/PHILOSOPHY.md. */
   {
     struct stat mst;
     long long bytes = 0;

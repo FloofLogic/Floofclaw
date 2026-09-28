@@ -101,6 +101,18 @@ int rt_agent_runner_preload_meta(RtScheduler *s, const char *agent_id,
     return -1;
   if (rt_agent_read_listen_config(s->loop_name, agent_id, m->executor, m, err, err_len) != 0)
     return -1;
+  if (m->required_call[0]) {
+    const RtActionDef *required =
+        rt_action_registry_find(&s->actions, m->required_call);
+    if (!required || !rt_agent_allows_action(m, required)) {
+      if (err)
+        snprintf(err, err_len,
+                 "agent %s requires call %s but does not allow that action; "
+                 "fix: add it to actions or remove required_call",
+                 m->id, m->required_call);
+      return -1;
+    }
+  }
   if (strcmp(m->executor, "llm") == 0 &&
       validate_llm_startup(s, m, err, err_len) != 0)
     return -1;
@@ -408,6 +420,31 @@ static int start_script_agent_job(RtRun *r, const RtStep *step,
   return 1;
 }
 
+/* Invocation preparation has a lower-level context because it also serves
+ * direct inspection tests. Preserve any typed diagnostic at the runner
+ * boundary, where run lifecycle errors belong, instead of letting run.c
+ * replace it with the floop step id. */
+static int prepare_agent_invocation(RtRun *r, const RtStep *step,
+                                    const RtAgentMeta *meta,
+                                    const char *bound_task_id,
+                                    long long bound_work_rev,
+                                    RtAgentInvocation *inv) {
+  if (rt_agent_prepare_invocation(
+          &r->ctx, r->scheduler->loop_name, step, meta->executor,
+          &r->scheduler->actions, meta, bound_task_id, bound_work_rev,
+          inv) == 0)
+    return 0;
+  if (inv->prepare_error_code[0]) {
+    rt_run_set_error(
+        r, inv->prepare_error_code,
+        inv->prepare_error_message[0]
+            ? inv->prepare_error_message
+            : "Agent input could not be prepared.",
+        NULL);
+  }
+  return -1;
+}
+
 int rt_agent_runner_start_step(RtRun *r, const RtStep *step, RtJobRunner *runner) {
   const RtAgentMeta *meta = agent_meta_lookup(r->scheduler, step->target);
   RtAgentInvocation inv;
@@ -553,9 +590,7 @@ int rt_agent_runner_start_step(RtRun *r, const RtStep *step, RtJobRunner *runner
         }
       }
     }
-    if (rt_agent_prepare_invocation(&r->ctx, r->scheduler->loop_name, step,
-                                    meta->executor, &r->scheduler->actions,
-                                    meta, task_id, work_rev, &inv) != 0)
+    if (prepare_agent_invocation(r, step, meta, task_id, work_rev, &inv) != 0)
       return -1;
   } else if (meta->affair_extraction_context_only) {
     char task_id[RT_SMALL];
@@ -572,10 +607,9 @@ int rt_agent_runner_start_step(RtRun *r, const RtStep *step, RtJobRunner *runner
       (void)rt_emit_error(&r->ctx, "kernel", "agent %s selected task lookup failed", step->target);
       return -1;
     }
-    if (rt_agent_prepare_invocation(&r->ctx, r->scheduler->loop_name, step, meta->executor,
-                                    &r->scheduler->actions, meta, task_id, 0, &inv) != 0) return -1;
-  } else if (rt_agent_prepare_invocation(&r->ctx, r->scheduler->loop_name, step, meta->executor,
-                                         &r->scheduler->actions, meta, NULL, 0, &inv) != 0) {
+    if (prepare_agent_invocation(r, step, meta, task_id, 0, &inv) != 0)
+      return -1;
+  } else if (prepare_agent_invocation(r, step, meta, NULL, 0, &inv) != 0) {
     return -1;
   }
   if (strcmp(meta->executor, "llm") == 0 &&

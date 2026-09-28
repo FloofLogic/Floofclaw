@@ -1756,6 +1756,116 @@ int default_floofclaw_admitted_work_reaches_result_manager_reply(void) {
   return rc;
 }
 
+/* Completing work must not turn a detailed managed-operation result into a
+ * status sentence. The controller still owns the terminal decision, while the
+ * exact selected result crosses the work_outcome boundary for the result
+ * manager. Markers near the beginning, middle, and end catch prefix excerpts
+ * and summary-only handoffs. */
+int terminal_work_outcome_preserves_selected_result_details(void) {
+  char *saved_profiles = fx_capture_env("FCLAW_MODEL_PROFILES");
+  char *saved_paths = fx_capture_env("LLM_MOCK_RESPONSE_PATHS");
+  HarnessGateway *g = NULL;
+  char report[5901];
+  char *logs = NULL, *deliveries = NULL, *result_inputs = NULL;
+  int rc = 0;
+
+  memset(report, 'x', sizeof(report) - 1U);
+  report[sizeof(report) - 1U] = '\0';
+  memcpy(report + 24, "EARLY_RATE_241", strlen("EARLY_RATE_241"));
+  memcpy(report + 2860, "MIDDLE_PHONE_512_926_8984",
+         strlen("MIDDLE_PHONE_512_926_8984"));
+  memcpy(report + 5750, "LATE_BOOKING_LINK_VISIBLE",
+         strlen("LATE_BOOKING_LINK_VISIBLE"));
+
+  rc |= fx_reset();
+  rc |= test_mkdir_p("workspace/evidence");
+  rc |= test_write_file("workspace/evidence/detailed_report.txt", report);
+  rc |= test_write_file(
+      "workspace/detail_admit.json",
+      "{\"calls\":[{\"name\":\"work\",\"args\":{"
+      "\"work\":\"Read the detailed report and return its useful contents.\","
+      "\"done_when\":\"The complete report has been inspected.\"}},"
+      "{\"name\":\"message\",\"args\":{\"message\":\"checking\"}}]}\n");
+  rc |= test_write_file(
+      "workspace/detail_read.json",
+      "{\"calls\":[{\"name\":\"read_file\",\"args\":{"
+      "\"op\":\"start\",\"path\":\"evidence/detailed_report.txt\"}}]}\n");
+  rc |= test_write_file(
+      "workspace/detail_complete.json",
+      "{\"calls\":[{\"name\":\"work_complete\",\"args\":{"
+      "\"summary\":\"the detailed report was inspected\"}}]}\n");
+  rc |= test_write_file(
+      "workspace/detail_reply.json",
+      "{\"calls\":[{\"name\":\"message\",\"args\":{"
+      "\"message\":\"EARLY_RATE_241; MIDDLE_PHONE_512_926_8984; "
+      "LATE_BOOKING_LINK_VISIBLE\"}}]}\n");
+  (void)setenv("FCLAW_MODEL_PROFILES",
+               "tests/fixtures/smoke/model_profiles_mock.json", 1);
+  (void)setenv("LLM_MOCK_RESPONSE_PATHS",
+               "workspace/detail_admit.json:"
+               "workspace/detail_read.json:"
+               "workspace/detail_complete.json:"
+               "workspace/detail_reply.json", 1);
+
+  g = harness_gateway_init("floofclaw");
+  rc |= expect(g != NULL, "terminal detail-fidelity fixture loads");
+  if (g) {
+    rc |= expect(harness_gateway_publish(
+                     g, "tests", "give me the detailed report") == 0,
+                 "publish detailed managed work");
+    rc |= expect(drive_until_file_contains(
+                     g, "workspace/logs/deliveries.jsonl",
+                     "LATE_BOOKING_LINK_VISIBLE", 12000) == 0,
+                 "terminal reply retains late report detail");
+    drive_for_ms(g, 200);
+    harness_gateway_close(g);
+    g = NULL;
+  }
+
+  logs = read_all_run_logs();
+  rc |= test_read_file("workspace/logs/deliveries.jsonl", &deliveries);
+  result_inputs =
+      read_all_agent_artifacts_with_suffix("_result.input.json");
+  rc |= expect(logs && deliveries && result_inputs,
+               "terminal detail-fidelity artifacts exist");
+  if (logs) {
+    rc |= expect_substr(logs, "\"result_text\":",
+                        "terminal source names the preserved selected result");
+    rc |= expect_substr(logs, "EARLY_RATE_241",
+                        "terminal truth retains the report beginning");
+    rc |= expect_substr(logs, "MIDDLE_PHONE_512_926_8984",
+                        "terminal truth retains the report middle");
+    rc |= expect_substr(logs, "LATE_BOOKING_LINK_VISIBLE",
+                        "terminal truth retains the report end");
+    rc |= expect_no_substr(logs, "\"type\":\"run_failed\"",
+                           "detailed terminal handoff has no failed run");
+  }
+  if (result_inputs) {
+    rc |= expect_substr(result_inputs, "EARLY_RATE_241",
+                        "result manager receives the report beginning");
+    rc |= expect_substr(result_inputs, "MIDDLE_PHONE_512_926_8984",
+                        "result manager receives the report middle");
+    rc |= expect_substr(result_inputs, "LATE_BOOKING_LINK_VISIBLE",
+                        "result manager receives the report end");
+  }
+  if (deliveries) {
+    rc |= expect_substr(deliveries, "EARLY_RATE_241",
+                        "delivered result retains the report beginning");
+    rc |= expect_substr(deliveries, "MIDDLE_PHONE_512_926_8984",
+                        "delivered result retains the report middle");
+    rc |= expect_substr(deliveries, "LATE_BOOKING_LINK_VISIBLE",
+                        "delivered result retains the report end");
+  }
+
+  if (g) harness_gateway_close(g);
+  free(result_inputs);
+  free(deliveries);
+  free(logs);
+  fx_restore_env("LLM_MOCK_RESPONSE_PATHS", saved_paths);
+  fx_restore_env("FCLAW_MODEL_PROFILES", saved_profiles);
+  return rc;
+}
+
 /* A failed attempt is evidence for the next controller turn, not authority
  * to block the task. The mock responses pin the semantic choices while the
  * shipped floop proves their durable action/result routing end to end. */
@@ -1763,12 +1873,12 @@ int work_manager_tries_justified_alternative_after_failure(void) {
   char *saved_profiles = fx_capture_env("FCLAW_MODEL_PROFILES");
   char *saved_paths = fx_capture_env("LLM_MOCK_RESPONSE_PATHS");
   HarnessGateway *g = NULL;
-  char *logs = NULL, *steps = NULL;
+  char *logs = NULL, *steps = NULL, *result_inputs = NULL;
   int rc = 0;
 
   rc |= fx_reset();
   rc |= test_write_file("workspace/evidence/verified.txt",
-                        "verified answer recovered by the second method\n");
+                        "SECOND_METHOD_EXACT_EVIDENCE_42\n");
   rc |= test_write_file(
       "workspace/dgu_admit.json",
       "{\"calls\":[{\"name\":\"work\",\"args\":{"
@@ -1818,7 +1928,9 @@ int work_manager_tries_justified_alternative_after_failure(void) {
 
   logs = read_all_run_logs();
   rc |= test_read_file("workspace/memory/state/work_steps.json", &steps);
-  rc |= expect(logs && steps,
+  result_inputs =
+      read_all_agent_artifacts_with_suffix("_result.input.json");
+  rc |= expect(logs && steps && result_inputs,
                "persistence alternative artifacts exist");
   if (logs) {
     rc |= expect(count_lines_with_both(
@@ -1840,8 +1952,12 @@ int work_manager_tries_justified_alternative_after_failure(void) {
     rc |= expect_substr(steps, "\"action\":\"read_file\"",
                         "ledger retains the justified alternative");
   }
+  if (result_inputs)
+    rc |= expect_substr(result_inputs, "SECOND_METHOD_EXACT_EVIDENCE_42",
+                        "multi-attempt completion preserves the selected result");
 
   if (g) harness_gateway_close(g);
+  free(result_inputs);
   free(steps);
   free(logs);
   fx_restore_env("LLM_MOCK_RESPONSE_PATHS", saved_paths);
@@ -1936,6 +2052,185 @@ int work_manager_blocks_when_no_justified_alternative_remains(void) {
   if (g) harness_gateway_close(g);
   free(tasks);
   free(logs);
+  fx_restore_env("LLM_MOCK_RESPONSE_PATHS", saved_paths);
+  fx_restore_env("FCLAW_MODEL_PROFILES", saved_profiles);
+  return rc;
+}
+
+/* A synchronous controller action used to publish work_step_result without
+ * the original context_id. A DM-style input then fell back to the adapter-wide
+ * context, the exact controller binding looked stale, and the accepted work
+ * ended in silence. Preserve the route and drive failure -> block -> reply. */
+int synchronous_work_failure_returns_to_exact_context_and_replies(void) {
+  char *saved_profiles = fx_capture_env("FCLAW_MODEL_PROFILES");
+  char *saved_paths = fx_capture_env("LLM_MOCK_RESPONSE_PATHS");
+  HarnessGateway *g = NULL;
+  char bus_id[BUS_ID_MAX] = "";
+  char *bus = NULL, *logs = NULL, *runstate = NULL, *deliveries = NULL;
+  int rc = 0;
+
+  rc |= fx_reset();
+  rc |= test_write_file(
+      "workspace/closed_loop_admit.json",
+      "{\"calls\":[{\"name\":\"work\",\"args\":{"
+      "\"work\":\"Record the requested result.\","
+      "\"done_when\":\"The result is recorded.\"}},{\"name\":\"message\","
+      "\"args\":{\"message\":\"I'll handle it.\"}}]}\n");
+  rc |= test_write_file(
+      "workspace/closed_loop_action_fails.json",
+      "{\"calls\":[{\"name\":\"note_add\",\"args\":{"
+      "\"affair_id\":\"affair_missing\",\"text\":\"attempt\"}}]}\n");
+  rc |= test_write_file(
+      "workspace/closed_loop_block.json",
+      "{\"calls\":[{\"name\":\"work_blocked\",\"args\":{"
+      "\"blocker\":\"the requested concern does not exist\","
+      "\"needed\":\"a valid concern must be supplied\"}}]}\n");
+  rc |= test_write_file(
+      "workspace/closed_loop_reply.json",
+      "{\"calls\":[{\"name\":\"message\",\"args\":{"
+      "\"message\":\"I couldn't finish that because the requested concern "
+      "does not exist. I need a valid concern to continue.\"}}]}\n");
+  (void)setenv("FCLAW_MODEL_PROFILES",
+               "tests/fixtures/smoke/model_profiles_mock.json", 1);
+  (void)setenv("LLM_MOCK_RESPONSE_PATHS",
+               "workspace/closed_loop_admit.json:"
+               "workspace/closed_loop_action_fails.json:"
+               "workspace/closed_loop_block.json:"
+               "workspace/closed_loop_reply.json", 1);
+
+  g = harness_gateway_init("floofclaw");
+  rc |= expect(g != NULL, "closed-loop exact-context fixture loads");
+  if (g) {
+    rc |= expect(bus_publish(
+                     "discord", "user_message",
+                     "{\"text\":\"record this for me\","
+                     "\"adapter_id\":\"discord-main\","
+                     "\"context_id\":\"dm:user-closed-loop\","
+                     "\"ref\":{\"thread_id\":\"dm-42\"}}",
+                     bus_id, sizeof(bus_id)) == 0,
+                 "publish work from a non-default conversation context");
+    rc |= expect(drive_until_file_contains(
+                     g, "workspace/logs/deliveries.jsonl",
+                     "I couldn't finish that", 12000) == 0,
+                 "failed work returns a plain-language terminal reply");
+    drive_for_ms(g, 200);
+    harness_gateway_close(g);
+    g = NULL;
+  }
+
+  logs = read_all_run_logs();
+  rc |= test_read_file("workspace/logs/bus.jsonl", &bus);
+  rc |= test_read_file("workspace/runs/run_003/runstate.json", &runstate);
+  rc |= test_read_file("workspace/logs/deliveries.jsonl", &deliveries);
+  rc |= expect_substr(bus ? bus : "", "\"type\":\"work_step_result\"",
+                      "failed synchronous action publishes a controller wake");
+  rc |= expect_substr(bus ? bus : "",
+                      "\"context_id\":\"chat:discord:dm:user-closed-loop\"",
+                      "controller wake carries the trusted original context");
+  rc |= expect_substr(runstate ? runstate : "",
+                      "\"context_id\":\"chat:discord:dm:user-closed-loop\"",
+                      "consequence run stays in the exact conversation lane");
+  rc |= expect(count_lines_with_both(
+                   logs ? logs : "", "\"type\":\"action_failed\"",
+                   "\"action\":\"note_add\"") == 1,
+               "the selected action failure remains durable evidence");
+  rc |= expect(count_substr(logs ? logs : "",
+                            "\"source\":\"work_manager\"") == 2,
+               "the same bound controller decides before and after failure");
+  rc |= expect(count_substr(logs ? logs : "",
+                            "\"type\":\"work_blocked\"") == 1,
+               "the controller closes the failed work explicitly");
+  rc |= expect_substr(deliveries ? deliveries : "",
+                      "\"adapter_id\":\"discord-main\"",
+                      "terminal reply retains the originating adapter");
+  rc |= expect_substr(deliveries ? deliveries : "",
+                      "\"ref\":{\"thread_id\":\"dm-42\"}",
+                      "terminal reply retains the opaque reply address");
+  rc |= expect_no_substr(logs ? logs : "", "\"type\":\"run_failed\"",
+                         "graceful task failure does not fail the runtime run");
+
+  if (g) harness_gateway_close(g);
+  free(deliveries);
+  free(runstate);
+  free(logs);
+  free(bus);
+  fx_restore_env("LLM_MOCK_RESPONSE_PATHS", saved_paths);
+  fx_restore_env("FCLAW_MODEL_PROFILES", saved_profiles);
+  return rc;
+}
+
+/* A terminal work outcome may not disappear because its result agent returns
+ * an empty call set. The configured required_call first gets the normal LLM
+ * repair budget; exhaustion uses the existing run-failure delivery. Either
+ * way, an accepted ask has a visible conclusion. */
+int terminal_work_outcome_cannot_end_in_silence(void) {
+  char *saved_profiles = fx_capture_env("FCLAW_MODEL_PROFILES");
+  char *saved_paths = fx_capture_env("LLM_MOCK_RESPONSE_PATHS");
+  HarnessGateway *g = NULL;
+  char *deliveries = NULL, *runstate = NULL, *repair = NULL;
+  int rc = 0;
+
+  rc |= fx_reset();
+  rc |= test_write_file(
+      "workspace/no_silence_admit.json",
+      "{\"calls\":[{\"name\":\"work\",\"args\":{"
+      "\"work\":\"Attempt the bounded request.\","
+      "\"done_when\":\"The request is completed.\"}},{\"name\":\"message\","
+      "\"args\":{\"message\":\"I'll try that.\"}}]}\n");
+  rc |= test_write_file(
+      "workspace/no_silence_block.json",
+      "{\"calls\":[{\"name\":\"work_blocked\",\"args\":{"
+      "\"blocker\":\"no authorized path can complete the request\","
+      "\"needed\":\"a new authorized capability\"}}]}\n");
+  rc |= test_write_file("workspace/no_silence_empty.json",
+                        "{\"calls\":[]}\n");
+  (void)setenv("FCLAW_MODEL_PROFILES",
+               "tests/fixtures/smoke/model_profiles_mock.json", 1);
+  (void)setenv("LLM_MOCK_RESPONSE_PATHS",
+               "workspace/no_silence_admit.json:"
+               "workspace/no_silence_block.json:"
+               "workspace/no_silence_empty.json:"
+               "workspace/no_silence_empty.json:"
+               "workspace/no_silence_empty.json", 1);
+
+  g = harness_gateway_init("floofclaw");
+  rc |= expect(g != NULL, "terminal no-silence fixture loads");
+  if (g) {
+    rc |= expect(harness_gateway_publish(
+                     g, "tests", "attempt the bounded request") == 0,
+                 "publish work whose result agent stays empty");
+    rc |= expect(drive_until_file_contains(
+                     g, "workspace/logs/deliveries.jsonl",
+                     "Run failed: agent_output_invalid", 12000) == 0,
+                 "exhausted terminal narration emits a mechanical failure");
+    drive_for_ms(g, 200);
+    harness_gateway_close(g);
+    g = NULL;
+  }
+
+  rc |= test_read_file("workspace/logs/deliveries.jsonl", &deliveries);
+  rc |= test_read_file("workspace/runs/run_002/runstate.json", &runstate);
+  rc |= test_read_file(
+      "workspace/runs/run_002/provider_calls/002_request.json", &repair);
+  rc |= expect_substr(repair ? repair : "", "exactly one message call",
+                      "repair prompt names the missing terminal message");
+  rc |= expect_substr(runstate ? runstate : "",
+                      "\"code\":\"agent_output_invalid\"",
+                      "terminal result exhaustion fails with the exact code");
+  rc |= expect_substr(runstate ? runstate : "",
+                      "exactly one message call",
+                      "terminal failure retains the structural reason");
+  rc |= expect(count_substr(deliveries ? deliveries : "",
+                            "I'll try that.") == 1,
+               "the initial acknowledgement is delivered once");
+  rc |= expect(count_substr(deliveries ? deliveries : "",
+                            "Run failed: agent_output_invalid") == 1,
+               "the terminal failure is delivered once instead of silence");
+
+  if (g) harness_gateway_close(g);
+  free(repair);
+  free(runstate);
+  free(deliveries);
   fx_restore_env("LLM_MOCK_RESPONSE_PATHS", saved_paths);
   fx_restore_env("FCLAW_MODEL_PROFILES", saved_profiles);
   return rc;
@@ -5633,5 +5928,202 @@ int conversational_reply_over_the_ceiling_fails_loudly(void) {
   free(message);
   fx_restore_env("LLM_MOCK_RESPONSE_PATH", saved_path);
   fx_restore_env("LLM_MOCK_RESPONSE_PATHS", saved_paths);
+  return rc;
+}
+
+/* The publication outbox settles a record at the two moments its state
+ * actually moves — intake binds the claiming run onto it, retire removes it
+ * — so the reactor's intake tick runs no full pass at all. What a bind or a
+ * release cannot settle arms one retry pass on the next tick, and a record
+ * that was never bound (a crash between the runstate write and the bind)
+ * still resolves by scanning the run directories. */
+int publication_outbox_binds_at_intake_and_releases_at_retire(void) {
+  RtContext ctx;
+  RtScheduler *scheduler = NULL;
+  RtRun *claim;
+  char err[RT_LARGE] = "";
+  char payload[RT_XL], wake[4096], source_event_id[RT_SMALL];
+  char wake_id[BUS_ID_MAX] = "";
+  char record_path[PATH_MAX], inbox_path[PATH_MAX], processed_path[PATH_MAX];
+  char *record_text = NULL;
+  int rc = 0;
+
+  rc |= fx_reset();
+  rc |= setup_a4_actions();
+  rc |= write_a4_floop("a4flow");
+  rc |= expect(a4_direct_context(&ctx, "run_001") == 0 &&
+               a4_append_direct_work(
+                   &ctx, "task_a4_bind", "bind the record") == 0,
+               "create bind-fixture work consequence");
+  rc |= expect(rt_append_event_format(
+                   &ctx, "action_request", "a4_controller",
+                   payload, sizeof(payload), 0,
+                   "{\"request_id\":\"bind_selected\","
+                   "\"action\":\"a4_note\","
+                   "\"args\":{\"label\":\"bind\"},"
+                   "\"task_id\":\"task_a4_bind\",\"work_rev\":1,"
+                   "\"context_id\":\"chat:tests\","
+                   "\"trigger_event_id\":\"evt_run_001_000001\"}") == 0,
+               "record bind-fixture semantic selection");
+  rc |= expect(rt_next_event_id(
+                   &ctx, source_event_id, sizeof(source_event_id)) == 0,
+               "reserve bind-fixture source id");
+  snprintf(payload, sizeof(payload),
+           "{\"request_id\":\"bind_selected\",\"action\":\"a4_note\","
+           "\"run_id\":\"run_001\",\"job_id\":null,"
+           "\"task_id\":\"task_a4_bind\","
+           "\"result\":{\"text\":\"bind source\"},\"error\":null,"
+           "\"work_rev\":1,\"context_id\":\"chat:tests\","
+           "\"trigger_event_id\":\"evt_run_001_000001\","
+           "\"source_event_id\":\"%s\"}",
+           source_event_id);
+  snprintf(wake, sizeof(wake),
+           "{\"task_id\":\"task_a4_bind\",\"work_rev\":1,"
+           "\"request_id\":\"bind_selected\",\"action\":\"a4_note\","
+           "\"source_event_id\":\"%s\",\"status\":\"succeeded\","
+           "\"detail\":\"bind source\",\"text\":\"bind source\","
+           "\"origin_event_id\":\"bus_bind\",\"adapter_id\":\"\","
+           "\"ref\":null}",
+           source_event_id);
+  rc |= expect(rt_publication_outbox_prepare(
+                   &ctx, source_event_id, "action_succeeded", payload,
+                   "tests", "work_step_result", wake,
+                   wake_id, sizeof(wake_id)) == 0,
+               "prepare bind-fixture wake");
+  rc |= expect(rt_append_event_sync(
+                   &ctx, "action_succeeded", "action_runner", payload) == 0,
+               "commit bind-fixture source");
+  snprintf(record_path, sizeof(record_path),
+           "workspace/bus/outbox/%s.json", wake_id);
+  snprintf(inbox_path, sizeof(inbox_path),
+           "workspace/bus/inbox/%s.json", wake_id);
+  snprintf(processed_path, sizeof(processed_path),
+           "workspace/bus/processed/%s.json", wake_id);
+
+  scheduler = (RtScheduler *)calloc(1, sizeof(*scheduler));
+  if (!scheduler) return expect(0, "allocate bind scheduler");
+  /* Startup runs the full pass, which publishes the prepared wake and
+   * leaves the retry flag clear. */
+  rc |= expect(rt_scheduler_init(scheduler, "a4flow", err, sizeof(err)) == 0,
+               err[0] ? err : "initialize bind scheduler");
+  rc |= expect_file_exists(inbox_path);
+  rc |= expect_file_exists(record_path);
+
+  /* The intake tick does not reconcile. With the published envelope taken
+   * away, a full pass would republish it; two ticks must not. */
+  rc |= expect(unlink(inbox_path) == 0, "remove the published envelope");
+  rt_ports_drain_sources(scheduler, 1);
+  rt_ports_drain_sources(scheduler, 1);
+  rc |= expect_file_not_exists(inbox_path);
+  rc |= expect(rt_publication_outbox_reconcile() == 0,
+               "a producer's own pass still publishes");
+  rc |= expect_file_exists(inbox_path);
+
+  /* Intake claims the wake and binds the record to the claiming run. */
+  rc |= expect(test_mkdir_p("workspace/bus/processed") == 0 &&
+               rename(inbox_path, processed_path) == 0,
+               "claim bind-fixture wake as processed");
+  claim = &scheduler->pool[0];
+  memset(claim, 0, sizeof(*claim));
+  claim->scheduler = scheduler;
+  claim->profile = &scheduler->profile;
+  snprintf(claim->ctx.workspace, sizeof(claim->ctx.workspace), "workspace");
+  snprintf(claim->ctx.run_id, sizeof(claim->ctx.run_id), "run_002");
+  snprintf(claim->ctx.run_dir, sizeof(claim->ctx.run_dir),
+           "workspace/runs/run_002");
+  snprintf(claim->ctx.context_id, sizeof(claim->ctx.context_id), "chat:tests");
+  snprintf(claim->created_from_event_id,
+           sizeof(claim->created_from_event_id), "%s", wake_id);
+  snprintf(claim->created_from_type, sizeof(claim->created_from_type),
+           "work_step_result");
+  claim->state = RT_RUN_READY;
+  scheduler->used[0] = 1;
+  scheduler->runs[scheduler->run_count++] = claim;
+  snprintf(payload, sizeof(payload),
+           "{\"event_id\":\"evt_run_002_000001\","
+           "\"ts\":\"2026-07-26T00:00:00Z\","
+           "\"type\":\"work_step_result\",\"source\":\"tests\","
+           "\"run_id\":\"run_002\",\"payload\":%s}\n",
+           wake);
+  rc |= expect(test_mkdir_p("workspace/runs/run_002") == 0 &&
+               test_write_file(
+                   "workspace/runs/run_002/event_log.jsonl", payload) == 0,
+               "commit exact first event in the claimed run");
+  snprintf(payload, sizeof(payload),
+           "{\"run_id\":\"run_002\",\"context_id\":\"chat:tests\","
+           "\"profile\":\"a4flow\",\"status\":\"running\","
+           "\"advance\":0,\"created_from\":{\"event_id\":\"%s\","
+           "\"type\":\"work_step_result\"}}\n",
+           wake_id);
+  rc |= expect(test_write_file(
+                   "workspace/runs/run_002/runstate.json", payload) == 0,
+               "persist the claimed run's control state");
+  rc |= expect(rt_publication_outbox_claim(wake_id, "run_002") == 0,
+               "intake binds the record to the claiming run");
+  (void)test_read_file(record_path, &record_text);
+  rc |= expect_substr(record_text ? record_text : "",
+                      "\"claimed_run_id\":\"run_002\"",
+                      "the record names the run that claimed its wake");
+  free(record_text);
+  record_text = NULL;
+  /* Re-binding the same run is the recommit path and is not an error; a
+   * different run is a conflict this write must not paper over. */
+  rc |= expect(rt_publication_outbox_claim(wake_id, "run_002") == 0,
+               "rebinding the same run is accepted");
+  rc |= expect(rt_publication_outbox_claim(wake_id, "run_009") != 0,
+               "binding a second run to one wake is refused");
+
+  /* Retire is the only thing that removes a record, and only once the
+   * claiming run's terminal state is durable. */
+  rc |= expect(rt_publication_outbox_release(wake_id, "run_002") != 0,
+               "a claim that is not yet terminal is not released");
+  rc |= expect_file_exists(record_path);
+
+  /* That failure armed the one retry pass. It runs on the next tick and
+   * correctly leaves a claim that is still active alone. */
+  rc |= expect(rt_publication_outbox_retry_if_pending() == 0,
+               "the armed retry pass runs and succeeds");
+  rc |= expect_file_exists(record_path);
+
+  /* A record that was never bound — a crash between the runstate write and
+   * the bind — still resolves, by scanning the run directories. */
+  (void)test_read_file(record_path, &record_text);
+  rc |= expect(record_text != NULL, "the bound record is readable");
+  if (record_text) {
+    char *field = strstr(record_text, ",\"claimed_run_id\"");
+    char *close = field ? strchr(field + 1, '}') : NULL;
+    rc |= expect(field != NULL && close != NULL,
+                 "locate the binding to remove");
+    if (field && close) {
+      memmove(field, close, strlen(close) + 1U);
+      rc |= expect(test_write_file(record_path, record_text) == 0,
+                   "rewrite the record as if the bind never happened");
+    }
+  }
+  free(record_text);
+  record_text = NULL;
+  rc |= expect(rt_publication_outbox_release(wake_id, "run_002") != 0,
+               "an unbound, still-active claim is found by scan and kept");
+  rc |= expect_file_exists(record_path);
+
+  snprintf(payload, sizeof(payload),
+           "{\"run_id\":\"run_002\",\"context_id\":\"chat:tests\","
+           "\"profile\":\"a4flow\",\"status\":\"done\","
+           "\"advance\":0,\"created_from\":{\"event_id\":\"%s\","
+           "\"type\":\"work_step_result\"}}\n",
+           wake_id);
+  rc |= expect(test_write_file(
+                   "workspace/runs/run_002/runstate.json", payload) == 0,
+               "persist the claimed run's terminal state");
+  rc |= expect(rt_publication_outbox_release(wake_id, "run_002") == 0,
+               "an unbound but terminal claim releases by its runstate");
+  rc |= expect_file_not_exists(record_path);
+  claim->state = RT_RUN_DONE;
+  scheduler->run_count = 0;
+  scheduler->used[0] = 0;
+
+  rt_scheduler_destroy(scheduler);
+  free(scheduler);
+  rc |= fx_reset();
   return rc;
 }

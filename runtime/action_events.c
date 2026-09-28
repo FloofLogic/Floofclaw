@@ -81,6 +81,7 @@ static int prepare_step_wake(RtRun *r, const RtPendingAction *pending,
                              const char *status,
                              const char *detail) {
   char etask[RT_MED], erid[RT_MED], eaction[RT_MED], esource[RT_MED];
+  char econtext[RT_LARGE];
   char eadapter[RT_MED], eorigin[RT_MED], edetail[RT_LARGE];
   char wake[4096];
   const char *ref = "null";
@@ -94,6 +95,7 @@ static int prepare_step_wake(RtRun *r, const RtPendingAction *pending,
       json_escape(pending->request_id, erid, sizeof(erid)) != 0 ||
       json_escape(action ? action : "", eaction, sizeof(eaction)) != 0 ||
       json_escape(source_event_id, esource, sizeof(esource)) != 0 ||
+      json_escape(r->ctx.context_id, econtext, sizeof(econtext)) != 0 ||
       json_escape(r->ctx.origin_adapter_id, eadapter, sizeof(eadapter)) != 0 ||
       json_escape(r->ctx.origin_event_id, eorigin, sizeof(eorigin)) != 0)
     return -1;
@@ -104,12 +106,12 @@ static int prepare_step_wake(RtRun *r, const RtPendingAction *pending,
   }
   n = snprintf(
       wake, sizeof(wake),
-      "{\"task_id\":\"%s\",\"work_rev\":%lld,"
+      "{\"task_id\":\"%s\",\"context_id\":\"%s\",\"work_rev\":%lld,"
       "\"request_id\":\"%s\",\"action\":\"%s\","
       "\"source_event_id\":\"%s\",\"status\":\"%s\","
       "\"detail\":\"%s\",\"text\":\"%s\","
       "\"origin_event_id\":\"%s\",\"adapter_id\":\"%s\",\"ref\":%s}",
-      etask, pending->work_rev, erid, eaction, esource,
+      etask, econtext, pending->work_rev, erid, eaction, esource,
       status ? status : "", edetail, edetail, eorigin, eadapter, ref);
   if (n < 0 || (size_t)n >= sizeof(wake)) return -1;
   return rt_publication_outbox_prepare(

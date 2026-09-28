@@ -5,7 +5,7 @@
 | layer | binary/script | purpose |
 |---|---|---|
 | **Unit** | `bin/fclaw_unit_tests` | 49 fast C checks for budgets and boundary contracts |
-| **Integration** | `bin/fclaw_integration_tests` | 200 in-process scheduler/runtime checks across four isolated workers |
+| **Integration** | `bin/fclaw_integration_tests` | 201 in-process scheduler/runtime checks across four isolated workers |
 | **Isolation** | `tests/test_fixture_isolation.sh` | harness-control refusal and killed-fixture checkout preservation |
 | **Public contracts** | `tests/test_cli_output_modes.sh`, `tests/test_version_contract.sh`, `tests/test_action_cli.sh` | uniform output modes, release versioning, and the managed-worker action bridge |
 | **Local client** | `tests/test_local_client_api.sh` | authenticated fixed HTTP/WS routes, streaming lifecycle, failure, fallback, and bounds |

@@ -269,7 +269,7 @@ the dependency layout, API selection, and device smoke command.
 make test
 ```
 
-The routine offline gate runs 49 unit tests, 200 integration tests, fixture
+The routine offline gate runs 49 unit tests, 203 integration tests, fixture
 isolation, the local-client lifecycle probe, and a hermetic smoke with mock
 provider responses in about a minute. `make test-full` adds rebuild and
 feature-selection contracts; release checks run it automatically.
@@ -291,7 +291,7 @@ Read the reproducible history behind those claims in
 - [MCP servers](docs/getting-started/mcp.md)
 - [Floops](docs/getting-started/floops.md)
 - [Actions](docs/concepts/actions.md)
-- [Constitution](docs/concepts/constitution.md)
+- [Philosophy](docs/PHILOSOPHY.md)
 
 ## 📄 License
 

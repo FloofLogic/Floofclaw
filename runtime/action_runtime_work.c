@@ -363,6 +363,25 @@ static int compact_task_state_value(const JsonRef *task, const char *key,
   return 0;
 }
 
+/* A controller decides whether the current consequence satisfies the task;
+ * it does not need to re-author that consequence for the result messenger.
+ * Preserve the runtime-owned consequence text mechanically so terminal status
+ * and user-facing evidence travel together without collapsing a detailed
+ * worker report into work_complete's concise summary. */
+static int current_work_result_text(const RtRun *r,
+                                    char *out, size_t out_len) {
+  JsonRef payload;
+  if (!r || !out || out_len == 0) return -1;
+  out[0] = '\0';
+  if (strcmp(r->ctx.event_kind, "operation_result") != 0 &&
+      strcmp(r->ctx.event_kind, "work_step_result") != 0)
+    return 0;
+  if (!r->ctx.event_payload_json[0] ||
+      json_ref_top_object(r->ctx.event_payload_json, &payload) != 0)
+    return -1;
+  return json_ref_object_get_string(&payload, "text", out, out_len);
+}
+
 static int terminalize_bound_work(RtRun *r, const char *rid,
                                   const char *args, int blocked,
                                   char *result, size_t result_len,
@@ -370,14 +389,15 @@ static int terminalize_bound_work(RtRun *r, const char *rid,
   int pidx = rt_action_runner_pending_index(r, rid);
   RtPendingAction *pending;
   char *large = NULL;
-  char *snapshot, *esummary, *eblocker, *eneeded, *payload;
+  char *snapshot, *esummary, *eblocker, *eneeded, *payload, *eresult;
   char summary[RT_LARGE] = "", blocker[RT_LARGE] = "";
   char needed[RT_LARGE] = "", affair_id[RT_SMALL] = "";
+  char result_text[RT_OPERATION_RESULT_TEXT_MAX + 1] = "";
   char artifacts[RT_LARGE] = "[]", operation[RT_LARGE] = "null";
   char etask[RT_MED], ectx[RT_LARGE], eaffair[RT_MED];
   char echannel[RT_MED], eadapter[RT_MED], eorigin[RT_MED];
   char erid[RT_MED], eaction[RT_MED], etrigger[RT_MED], esource[RT_MED];
-  char source_event_id[RT_SMALL], wake[4096];
+  char source_event_id[RT_SMALL], wake[RT_EVENT_PAYLOAD_MAX];
   char *evidence = NULL;
   JsonRef task, state;
   long long updated_ms = 0;
@@ -450,6 +470,9 @@ static int terminalize_bound_work(RtRun *r, const char *rid,
   eblocker = large + RT_XL * 2U;
   eneeded = large + RT_XL * 3U;
   payload = large + RT_XL * 4U;
+  /* The task snapshot is no longer needed once its state values have been
+   * copied below, so its scratch becomes the escaped selected result. */
+  eresult = snapshot;
   if (!pending->task_id[0] || pending->work_rev <= 0 ||
       rt_task_work_binding_json(r->ctx.context_id, pending->task_id,
                                 pending->work_rev, 0,
@@ -500,6 +523,15 @@ static int terminalize_bound_work(RtRun *r, const char *rid,
   } else {
     (void)rt_json_get_string(args && *args ? args : "{}", "summary",
                              summary, sizeof(summary));
+    if (current_work_result_text(r, result_text,
+                                 sizeof(result_text)) != 0) {
+      snprintf(error, error_len,
+               "{\"message\":\"terminal work result is invalid\"}");
+      snprintf(result, result_len, "{}");
+      fc_xfree(evidence);
+      fc_xfree(large);
+      return -1;
+    }
   }
   if (!summary[0] || (blocked && !needed[0]) ||
       json_escape(pending->task_id, etask, sizeof(etask)) != 0 ||
@@ -517,7 +549,8 @@ static int terminalize_bound_work(RtRun *r, const char *rid,
       json_escape(source_event_id, esource, sizeof(esource)) != 0 ||
       json_escape(summary, esummary, RT_XL) != 0 ||
       json_escape(blocker, eblocker, RT_XL) != 0 ||
-      json_escape(needed, eneeded, RT_XL) != 0) {
+      json_escape(needed, eneeded, RT_XL) != 0 ||
+      json_escape(result_text, eresult, RT_XL) != 0) {
     snprintf(error, error_len,
              "{\"message\":\"terminal work outcome is invalid\"}");
     snprintf(result, result_len, "{}");
@@ -532,7 +565,8 @@ static int terminalize_bound_work(RtRun *r, const char *rid,
           "\"trigger_event_id\":\"%s\",\"source_event_id\":\"%s\","
           "\"status\":\"%s\","
           "\"affair_id\":%s%s%s,\"channel\":\"%s\",\"adapter_id\":\"%s\","
-          "\"origin_event_id\":\"%s\",\"ref\":%s,\"summary\":\"%s\"%s%s%s%s%s%s,"
+          "\"origin_event_id\":\"%s\",\"ref\":%s,\"summary\":\"%s\","
+          "\"result_text\":\"%s\"%s%s%s%s%s%s,"
           "\"operation_ref\":%s,\"artifacts\":%s,\"evidence_refs\":%s,"
           "\"state\":{\"status\":\"%s\",\"updated_ms\":%lld}}",
           etask, pending->work_rev, ectx, erid, eaction, etrigger, esource,
@@ -541,7 +575,7 @@ static int terminalize_bound_work(RtRun *r, const char *rid,
           affair_id[0] ? "\"" : "",
           echannel, eadapter, eorigin,
           r->ctx.origin_ref_json[0] ? r->ctx.origin_ref_json : "null",
-          esummary,
+          esummary, eresult,
           blocked ? ",\"blocker\":\"" : "",
           blocked ? eblocker : "",
           blocked ? "\"" : "",
@@ -586,7 +620,7 @@ static int terminalize_bound_work(RtRun *r, const char *rid,
         status,
         affair_id[0] ? "\"" : "", affair_id[0] ? eaffair : "null",
         affair_id[0] ? "\"" : "",
-        ebounded, ebounded,
+        ebounded, result_text[0] ? eresult : ebounded,
         blocked ? ",\"blocker\":\"" : "",
         blocked ? ebounded : "",
         blocked ? "\"" : "",
@@ -647,4 +681,3 @@ int fc_work_blocked(RtRun *r, const char *rid,
   return terminalize_bound_work(r, rid, args, 1,
                                 result, result_len, error, error_len);
 }
-

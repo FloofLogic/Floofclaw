@@ -86,7 +86,7 @@ Order matters when modules share state.
    - `tick` — `waitpid(WNOHANG)` for each running pid; mark `JOB_FINISHED` only when `exited && stdout_eof && stderr_eof`
    - `next_deadline_ms` — min over jobs of `deadline_ms` and `sigterm_at_ms + kill_grace_ms`
 3. **`bus_intake`** (`runtime/gateway/bus_intake_module.c`)
-   - `tick` — pop up to `RT_INTAKE_PER_TICK` envelopes from `workspace/bus/inbox/`, parse, create an `RtRun` per accepted envelope
+   - `tick` — retry any waiting inbound claim, then pop up to `RT_INTAKE_PER_TICK` envelopes from `workspace/bus/inbox/`, parse, create an `RtRun` per accepted envelope. It does **not** reconcile the publication outbox: a record is published by its producer, bound to its claiming run at intake, and removed as that run retires, so the tick only asks `rt_publication_outbox_retry_if_pending()` for the one pass that a failed bind, release, or producer publish left owing.
    - `next_deadline_ms` — `now` if `bus_inbox_has_pending()` else `FC_NO_DEADLINE`
 4. **`runtime`** (`runtime/gateway/runtime_module.c`)
    - `tick` — pump finished jobs back into runs, wake action-slot waiters, step ready runs (bounded), retire terminal runs

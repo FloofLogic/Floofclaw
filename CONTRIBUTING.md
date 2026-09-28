@@ -31,8 +31,8 @@ by Section 5 of Apache 2.0. Only submit work you have the right to license.
   A behavior change without a regression test is a rumor, not a fix.
 - **Loud beats clever.** Every cap rejects loudly, every failure names
   its fix, nothing truncates silently. Read
-  `docs/concepts/constitution.md` before proposing anything ambitious
-  — it is short and it is law.
+  `docs/PHILOSOPHY.md` before proposing anything ambitious—it is the
+  canonical design contract.
 - Runs on **macOS and Linux** with a C11 compiler, `make`, and a POSIX
   userland. The offline mock path needs no optional native library; libcurl
   enables real HTTP providers and OpenSSL enables TLS channels. Platform bugs

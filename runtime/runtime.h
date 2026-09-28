@@ -258,6 +258,10 @@ typedef struct {
   /* Bounded repair budget for an LLM normalizer rejection. agent.json
    * "repair_attempts". */
   int decision_repair_attempts;
+  /* Optional agent.json output contract. When nonempty, one call with this
+   * exact action id must appear in every ordinary output. The floop chooses
+   * the requirement; the normalizer only enforces its declared shape. */
+  char required_call[RT_SMALL];
   int conversational_payload_only;
   int affair_extraction_context_only;
   int memory_compaction_context_only;

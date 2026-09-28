@@ -10,7 +10,7 @@
     "properties": {
       "summary": {
         "type": "string",
-        "description": "Concise evidence-based explanation of what completed."
+        "description": "Concise evidence-based explanation of why the completion condition is satisfied. Do not restate or compress the selected result; the runtime preserves that result separately for delivery."
       }
     }
   },

@@ -27,7 +27,8 @@ handling one event kind:
 
 - `chat_manager` — user says something
 - `review_manager` — a scheduled affair check-in fires
-- `result_manager` — a worker (Codex, web fetch, and others) returns
+- `work_manager` — admitted work starts or an exact action consequence returns
+- `result_manager` — that work reaches a completed or blocked outcome
 
 The floop (`floops/<name>/loop.json`) dispatches events to agents by
 kind. Each agent's prompt describes its role, not a case tree covering every
@@ -164,7 +165,7 @@ composes them.
   covers the fresh-clone `hello` default, `companion`, the durable
   [floofclaw floop](concepts/floofclaw_floop.md), and `openclaw`.
 - **Understand the unified result flow** —
-  [action_result_flow.md](concepts/action_result_flow.md) explains
+  [the managed-operation contract](concepts/actions.md#managed-operation-contract) explains
   why every data-returning action goes through the event bus.
 - **First-time build** —
   [installation-and-build.md](getting-started/installation-and-build.md)

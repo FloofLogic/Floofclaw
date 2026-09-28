@@ -4,7 +4,7 @@ The routine suite is hermetic, offline, and intentionally contract-focused:
 
 - `bin/fclaw_unit_tests`: 49 fast C checks for parser, provider, filesystem,
   reconnect, TLS, and allocation-boundary contracts.
-- `bin/fclaw_integration_tests`: 200 in-process checks across the scheduler,
+- `bin/fclaw_integration_tests`: 201 in-process checks across the scheduler,
   reducers, recovery, channels, provider limits, durable operations, and hard
   capacity boundaries.
 - `tests/test_local_client_api.sh`: an isolated loopback lifecycle probe for

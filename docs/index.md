@@ -1,7 +1,6 @@
 # Documentation Index
 
-> **[READ_FIRST.md](READ_FIRST.md) is binding. Read it before any other
-> doc and before any change. Nothing below overrides it.**
+> **[PHILOSOPHY.md](PHILOSOPHY.md) is the canonical design contract.**
 
 **FloofClaw is a transparent agent orchestration runtime.** It composes
 multiple focused LLM agents together with heavy-lifting workers
@@ -33,10 +32,8 @@ For the pitch, read [what_is_floofclaw.md](what_is_floofclaw.md).
 
 ## Core concepts
 
-- [Constitution](concepts/constitution.md) — the invariants the engine makes unbypassable, each backed by a test
-- [Principles](concepts/principles.md) — the rules the runtime is built to
-- [Architecture](architecture.md) — kernel, floops, events, ownership boundaries
-- [Action Result Flow](concepts/action_result_flow.md) — the unified event-driven pattern: every data-returning action is managed-op; results flow via `operation_result`
+- [Philosophy](PHILOSOPHY.md) — canonical boundaries and design rules
+- [Architecture](architecture.md) — current module map and ownership
 - [Extensions](concepts/extensions.md) — the three surfaces, what is discovered when, and why there is no `dlopen`
 - [Actions](concepts/actions.md) — how to author an action (action.json, run.sh, intrinsic)
 - [Executors](concepts/executors.md) — `native`, `llm`, `script`
@@ -71,7 +68,6 @@ For the pitch, read [what_is_floofclaw.md](what_is_floofclaw.md).
 
 ## Cross-cutting
 
-- [Runtime orientation](comparison.md) — one-page tour of the shape
 - [Discord and IRC](discord_and_irc.md) — hard convention: Discord is the human channel; IRC is where automated probes run
 - [Testing](concepts/testing.md) — the hermetic routine gate, robustness gate,
   and opt-in live-provider check

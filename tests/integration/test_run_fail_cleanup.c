@@ -2959,6 +2959,62 @@ int memory_compaction_with_an_empty_slot_fails_before_the_provider(void) {
   return rc;
 }
 
+/* A pre-provider input failure used to retain its detailed error event but
+ * lose the same diagnosis from run state. The terminal fallback then used
+ * the step id as both code and message (for example, work.select:
+ * work.select). Drive the public delivery path and prove the runner carries
+ * the existing input diagnostic across that boundary. */
+int agent_input_projection_failure_reaches_public_run_error(void) {
+  char response[RT_LARGE] = "";
+  char run_id[RT_SMALL] = "";
+  char *runstate = NULL;
+  int rc = 0;
+  int run_rc;
+
+  rc |= test_reset_workspace();
+  rc |= test_write_file(
+      "floops/input_projection_failure/loop.json",
+      "{\"version\":1,\"name\":\"input_projection_failure\","
+      "\"description\":\"agent input failure fixture\","
+      "\"one_pass\":true,\"serialize_contexts\":true,\"steps\":["
+      "{\"id\":\"project\",\"type\":\"agent\","
+      "\"agent\":\"projection_agent\","
+      "\"gate\":\"event_kind:user_message\"}]}\n");
+  rc |= test_write_file(
+      "floops/input_projection_failure/agents/projection_agent/agent.json",
+      "{\"id\":\"projection_agent\",\"executor\":\"llm\","
+      "\"model\":{\"ref\":\"floofclaw_manager\"},"
+      "\"memory_compaction_context_only\":true,"
+      "\"listen\":[\"memory\"]}\n");
+  rc |= test_write_file(
+      "floops/input_projection_failure/agents/projection_agent/prompt.md",
+      "Projection failure fixture.\n");
+
+  run_rc = harness_run("tests", "input_projection_failure",
+                       "trigger projection failure", response,
+                       sizeof(response), run_id, sizeof(run_id));
+  rc |= expect(run_rc == 2, "input projection failure is a failed run");
+  rc |= expect_substr(response, "Run failed: agent_input_projection_failed:",
+                      "public failure carries the typed input error");
+  rc |= expect_substr(response, "model input projection failed",
+                      "public failure carries the existing diagnosis");
+  rc |= expect_no_substr(response, "project: project",
+                         "public failure does not repeat the step id");
+  if (run_id[0]) {
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "workspace/runs/%s/runstate.json", run_id);
+    rc |= test_read_file(path, &runstate);
+  }
+  rc |= expect_substr(runstate ? runstate : "",
+                      "\"code\":\"agent_input_projection_failed\"",
+                      "run state preserves the typed projection error");
+  rc |= expect_substr(runstate ? runstate : "",
+                      "model input projection failed",
+                      "run state preserves the detailed projection message");
+  free(runstate);
+  return rc;
+}
+
 int memory_compaction_not_requested_below_threshold_or_min_range(void) {
   RtContext ctx;
   RtAgentMeta meta;

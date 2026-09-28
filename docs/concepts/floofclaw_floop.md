@@ -58,18 +58,24 @@ memory.before -> chat -> review -> admission.dispatch
 - `work_manager` (LLM, gated `work_consequence`, bound via
   `bind_task: "open_work"`) advances the open work task one exact
   revision at a time. The runtime, not the model, chooses the task and
-  revision; the manager selects one action from its ordered catalog
-  (including `manage_codex` / `manage_claude` / `manage_hermes`) and
+  revision; the manager must select exactly one ordinary action from its
+  ordered catalog, including `manage_codex`, `manage_claude`, or
+  `manage_hermes`. A working-memory sidecar alone is invalid. The manager
   ends a revision only with an explicit `work_complete` or
   `work_blocked`. A managed operation it starts detaches immediately —
   the loop sleeps until the worker's completion claim (or the
   deadline's timeout claim) re-enters as its own `operation_result`
   run.
 - `result_manager` (LLM, gated `terminal_work_outcome`) routes terminal
-  work outcomes — completed or blocked, with the worker evidence behind
-  them — to the user, task, or affair note that owns them. It does not
-  close affairs: closure stays on a later `affair_review`, whose review
-  manager has the active lifecycle context.
+  work outcomes to the user. A completed outcome carries both the
+  controller's concise decision summary and the exact selected consequence
+  text; the latter remains the user-facing result instead of being replaced
+  by the summary. A blocked outcome carries its blocker and needed input. It
+  does not close affairs: closure stays on a later `affair_review`, whose
+  review manager has the active lifecycle context. Its agent packet declares
+  `required_call: "message"`, so every terminal outcome produces one reply;
+  empty and note-only responses enter bounded output repair, then fail loudly
+  through the existing run-failure delivery if repair is exhausted.
 - The dispatch steps are the ordinary `action_runner` builtin; every
   manager's calls flow through one.
 

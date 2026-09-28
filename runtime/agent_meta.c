@@ -180,6 +180,7 @@ int rt_agent_read_listen_config(const char *floop_name, const char *agent_id, co
   meta->recent = 10;
   meta->autocomplete_message_task_on_send = meta->conversational_payload_only = 0;
   meta->decision_repair_attempts = RT_AGENT_DECISION_REPAIR_DEFAULT;
+  meta->required_call[0] = '\0';
   meta->affair_extraction_context_only = 0;
   meta->memory_compaction_context_only = 0;
   meta->can_write_memory = 0;
@@ -210,6 +211,20 @@ int rt_agent_read_listen_config(const char *floop_name, const char *agent_id, co
   (void)json_ref_object_get_bool(&root, "conversational_payload_only", &meta->conversational_payload_only);
   (void)json_ref_object_get_bool(&root, "affair_extraction_context_only", &meta->affair_extraction_context_only);
   (void)json_ref_object_get_bool(&root, "memory_compaction_context_only", &meta->memory_compaction_context_only);
+  {
+    JsonRef required_call;
+    if (json_ref_object_get(&root, "required_call", &required_call) == 0 &&
+        (json_ref_string_copy(&required_call, meta->required_call,
+                              sizeof(meta->required_call)) != 0 ||
+         !safe_action_id(meta->required_call))) {
+      if (err) snprintf(err, err_len,
+                        "agent %s has invalid required_call; fix: use one "
+                        "action id from its actions array or remove it from %s",
+                        agent_id, path);
+      free(text);
+      return -1;
+    }
+  }
   {
     /* Top-level repair_attempts bounds feedback passes after the ordinary
      * output normalizer rejects an LLM decision. */
@@ -307,6 +322,18 @@ int rt_agent_read_listen_config(const char *floop_name, const char *agent_id, co
         "agent %s cannot combine bind_task \"open_work\" with %s; "
         "fix: remove %s or remove bind_task from %s",
         agent_id, conflict, conflict, path);
+    free(text);
+    return -1;
+  }
+  if (meta->required_call[0] &&
+      (meta->conversational_payload_only ||
+       meta->affair_extraction_context_only ||
+       meta->memory_compaction_context_only)) {
+    if (err) snprintf(
+        err, err_len,
+        "agent %s cannot combine required_call with a specialized output "
+        "mode; fix: remove required_call or the specialized mode from %s",
+        agent_id, path);
     free(text);
     return -1;
   }

@@ -186,6 +186,7 @@ static int build_agent_input(const RtContext *ctx, const char *agent_dir, const 
                             const char *bound_task_id,
                             long long bound_work_rev,
                             char *out, size_t out_len,
+                            char *err_code, size_t err_code_len,
                             char *err, size_t err_len) {
   char prompt_path[PATH_MAX];
   char *prompt_text = NULL;
@@ -193,7 +194,9 @@ static int build_agent_input(const RtContext *ctx, const char *agent_dir, const 
   char *model_input = NULL;
   char *available = NULL;
   const char *agent_id = agent_meta && agent_meta->id[0] ? agent_meta->id : "(unknown)";
+  const char *failure_code = "agent_input_render_failed";
   int rc = -1;
+  if (err_code && err_code_len) err_code[0] = '\0';
   if (err && err_len) err[0] = '\0';
   rendered_prompt = (char *)fc_xmalloc(RT_XL);
   model_input = (char *)fc_xmalloc(RT_XL);
@@ -205,6 +208,7 @@ static int build_agent_input(const RtContext *ctx, const char *agent_dir, const 
   }
   if (rt_build_processor_input(ctx, agent_meta, bound_task_id, bound_work_rev,
                                model_input, RT_XL) != 0) {
+    failure_code = "agent_input_projection_failed";
     if (err) snprintf(err, err_len,
                       "agent %s model input projection failed; "
                       "fix: reduce its configured listen input", agent_id);
@@ -313,6 +317,8 @@ static int build_agent_input(const RtContext *ctx, const char *agent_dir, const 
     rc = 0;
   }
 done:
+  if (rc != 0 && err_code && err_code_len)
+    snprintf(err_code, err_code_len, "%s", failure_code);
   free(prompt_text);
   fc_xfree(rendered_prompt);
   fc_xfree(model_input);
@@ -528,6 +534,7 @@ int rt_agent_normalize_output(RtContext *ctx, const RtStep *step,
   JsonRef root, calls, call, args_ref;
   char trusted_trigger[RT_SMALL] = "";
   size_t pos = 0, sidecar_count = 0, ordinary_count = 0;
+  size_t required_call_count = 0;
   if (!ctx || !step || !output_json || !out || out_len == 0) return -1;
   if (agent_meta && agent_meta->conversational_payload_only)
     return rt_agent_normalize_conversational_output(ctx, step, output_json, out, out_len);
@@ -553,10 +560,23 @@ int rt_agent_normalize_output(RtContext *ctx, const RtStep *step,
       sidecar_count++;
     else
       ordinary_count++;
+    if (agent_meta && agent_meta->required_call[0] &&
+        strcmp(name, agent_meta->required_call) == 0)
+      required_call_count++;
   }
   if (sidecar_count > 1) {
     rt_log_rejected_agent_event(step->target, "invalid_sidecar_call_count",
                                 "an agent response may append working_memory at most once");
+    return -1;
+  }
+  if (agent_meta && agent_meta->required_call[0] &&
+      required_call_count != 1) {
+    char detail[RT_MED];
+    snprintf(detail, sizeof(detail),
+             "agent output must contain exactly one %s call; received %zu",
+             agent_meta->required_call, required_call_count);
+    rt_log_rejected_agent_event(step->target, "invalid_required_call_count",
+                                detail);
     return -1;
   }
   if (agent_meta && agent_meta->bind_task_open_work) {
@@ -586,11 +606,11 @@ int rt_agent_normalize_output(RtContext *ctx, const RtStep *step,
         return -1;
       }
     }
-    if (ordinary_count > 1 || (ordinary_count == 0 && sidecar_count == 0)) {
+    if (ordinary_count != 1) {
       rt_log_rejected_agent_event(step->target, "invalid_controller_call_count",
-                                  ordinary_count == 0 && sidecar_count == 0
-                                      ? "bound controller must choose a call; received zero"
-                                      : "bound controller may choose at most one ordinary call");
+                                  ordinary_count == 0
+                                      ? "bound controller must choose exactly one ordinary call; received zero"
+                                      : "bound controller must choose exactly one ordinary call; received more than one");
       return -1;
     }
   }
@@ -964,9 +984,13 @@ int rt_agent_prepare_invocation(RtContext *ctx, const char *floop_name, const Rt
   if (build_agent_input(ctx, out->agent_dir, out->executor, actions, agent_meta,
                         out->bound_task_id, out->bound_work_rev,
                         out->input, sizeof(out->input),
+                        out->prepare_error_code,
+                        sizeof(out->prepare_error_code),
                         input_err, sizeof(input_err)) != 0) {
-    (void)rt_emit_error(ctx, "kernel", "%s",
-                        input_err[0] ? input_err : "agent input render failed");
+    const char *detail = input_err[0] ? input_err : "agent input render failed";
+    snprintf(out->prepare_error_message,
+             sizeof(out->prepare_error_message), "%s", detail);
+    (void)rt_emit_error(ctx, "kernel", "%s", detail);
     return -1;
   }
   return fs_write_text_atomic(out->in_path, out->input);

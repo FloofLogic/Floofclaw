@@ -17,6 +17,11 @@ typedef struct {
   char media_manifest_path[PATH_MAX];
   char bound_task_id[RT_SMALL];
   long long bound_work_rev;
+  /* Populated only when invocation preparation fails. The runner owns the
+   * run lifecycle, so it consumes this diagnostic instead of making the
+   * lower input builder reach into run state. */
+  char prepare_error_code[RT_SMALL];
+  char prepare_error_message[RT_MED];
   char input[RT_XL];
 } RtAgentInvocation;
 

@@ -1023,7 +1023,6 @@ static int spawn_claude_runner(ClaudeOpState *st, const char *cwd_abs,
   int pipefd[2];
   pid_t first;
   char perm[RT_SMALL];
-  const char *model_arg = (model && *model) ? model : "claude-sonnet-4-6";
   if (!st || !cwd_abs || !binary || !*binary) return -1;
   if (pipe(pipefd) != 0) {
     snprintf(err, err_len, "{\"message\":\"pipe failed\"}");
@@ -1068,23 +1067,46 @@ static int spawn_claude_runner(ClaudeOpState *st, const char *cwd_abs,
         close(in_fd); close(out_fd); close(err_fd);
         if (chdir(cwd_abs) != 0) _exit(126);
         snprintf(perm, sizeof(perm), "%s", st->permission_mode[0] ? st->permission_mode : "safe");
-        if (strcmp(perm, "dangerous") == 0) {
-          execlp(binary, binary, "--print",
-                 "--output-format", "stream-json",
-                 "--include-partial-messages",
-                 "--add-dir", cwd_abs,
-                 "--dangerously-skip-permissions",
-                 "--model", model_arg,
-                 "--", managed_prompt,
-                 (char *)NULL);
-        } else {
-          execlp(binary, binary, "--print",
-                 "--output-format", "stream-json",
-                 "--include-partial-messages",
-                 "--add-dir", cwd_abs,
-                 "--model", model_arg,
-                 "--", managed_prompt,
-                 (char *)NULL);
+        /* `--output-format json` returns one object carrying the final
+         * result; the streaming form additionally requires --verbose and
+         * exits 1 without it, and nothing here consumes stdout before the
+         * worker ends. Safe mode needs an explicit permission mode: under
+         * --print the worker can never be asked, so with no mode at all it
+         * cannot edit anything, where codex's safe mode may write in the
+         * workspace. */
+        {
+          char *child_argv[20];
+          int ai = 0;
+          child_argv[ai++] = (char *)binary;
+          child_argv[ai++] = "--print";
+          child_argv[ai++] = "--output-format";
+          child_argv[ai++] = "json";
+          child_argv[ai++] = "--add-dir";
+          child_argv[ai++] = (char *)cwd_abs;
+          if (strcmp(perm, "dangerous") == 0) {
+            child_argv[ai++] = "--dangerously-skip-permissions";
+          } else {
+            /* Safe mode must reach as far as codex's --sandbox
+             * workspace-write, which restricts writes and leaves the
+             * network and shell alone. acceptEdits only auto-approves
+             * edits; every other tool is denied, and a --print session can
+             * never be asked, so without this list a safe worker answers
+             * research questions from training data and says so. */
+            child_argv[ai++] = "--permission-mode";
+            child_argv[ai++] = "acceptEdits";
+            child_argv[ai++] = "--allowedTools";
+            child_argv[ai++] = "WebSearch WebFetch Bash";
+          }
+          /* Omitted when unset, so the CLI's own current default applies
+           * rather than a model name frozen into this binary. */
+          if (model && *model) {
+            child_argv[ai++] = "--model";
+            child_argv[ai++] = (char *)model;
+          }
+          child_argv[ai++] = "--";
+          child_argv[ai++] = managed_prompt;
+          child_argv[ai] = NULL;
+          execvp(binary, child_argv);
         }
         _exit(127);
       }
@@ -1092,14 +1114,31 @@ static int spawn_claude_runner(ClaudeOpState *st, const char *cwd_abs,
         if (WIFEXITED(status)) {
           int code = WEXITSTATUS(status);
           (void)write_long_file(st->exit_path, code);
-          /* Mirror the codex final-text fallback: when --print exits 0
-           * the assistant message is on stdout (stream-json); we
-           * surface the last line here so the artifact has something
-           * compact even before the reviewer parses the full stream. */
+          /* Codex writes its own final text through `-o`; claude has no
+           * such flag, so take the `result` string out of the single
+           * response object. Falling back to the raw body keeps a failed
+           * parse inspectable instead of empty. */
           if (code == 0) {
-            char tail[RT_OPERATION_RESULT_TEXT_MAX + 1] = "";
-            if (read_text_clip(st->stdout_path, tail, sizeof(tail)) == 0 && tail[0])
-              (void)fs_write_text(st->final_path, tail);
+            char *body = NULL;
+            /* Read whole: the finalize step applies the operation-result
+             * ceiling to final_path, so clipping here would only corrupt a
+             * long answer before it could be measured. The decoded string
+             * never exceeds its own raw JSON span, so the body length is a
+             * safe bound for it. */
+            if (fs_read_text(st->stdout_path, &body,
+                             FS_READ_TEXT_DEFAULT_CAP) == 0 && body && body[0]) {
+              size_t cap = strlen(body) + 1U;
+              char *final_text = (char *)fc_xmalloc(cap);
+              JsonRef root;
+              if (final_text && json_ref_top_object(body, &root) == 0 &&
+                  json_ref_object_get_string(&root, "result", final_text,
+                                             cap) == 0 && final_text[0])
+                (void)fs_write_text(st->final_path, final_text);
+              else
+                (void)fs_write_text(st->final_path, body);
+              fc_xfree(final_text);
+            }
+            fc_xfree(body);
           }
         } else if (WIFSIGNALED(status)) (void)write_long_file(st->exit_path, 128 + WTERMSIG(status));
         else (void)write_long_file(st->exit_path, 125);
@@ -1228,7 +1267,9 @@ int fc_manage_claude(RtRun *r, const char *rid, const RtActionDef *def,
   char binary_abs[PATH_MAX];
   char workspace_root[PATH_MAX], op_base[PATH_MAX], rel_expected[PATH_MAX] = "";
   const char *binary = getenv("FCLAW_CLAUDE_BIN");
-  (void)def;
+  const char *configured_model = rt_action_cached_config(
+      r && r->scheduler ? &r->scheduler->actions : NULL,
+      def ? def->id : NULL, "model");
   if (!binary || !*binary) binary = "claude";
   if (binary[0] != '/' && strchr(binary, '/')) {
     char launch_cwd[PATH_MAX];
@@ -1247,6 +1288,11 @@ int fc_manage_claude(RtRun *r, const char *rid, const RtActionDef *def,
   (void)json_ref_object_get_string(&root, "cwd", cwd_arg, sizeof(cwd_arg));
   if (!cwd_arg[0]) snprintf(cwd_arg, sizeof(cwd_arg), ".");
   (void)json_ref_object_get_string(&root, "model", model, sizeof(model));
+  /* An explicit call argument wins; otherwise the deployment's configured
+   * model, if it set one. Neither means the flag is omitted and the CLI's
+   * own default applies, which is how manage_codex behaves. */
+  if (!model[0] && configured_model && *configured_model)
+    snprintf(model, sizeof(model), "%s", configured_model);
   (void)json_ref_object_get_string(&root, "permission_mode", permission_mode, sizeof(permission_mode));
   if (!permission_mode[0]) snprintf(permission_mode, sizeof(permission_mode), "safe");
   if (strcmp(permission_mode, "safe") != 0 && strcmp(permission_mode, "dangerous") != 0) {

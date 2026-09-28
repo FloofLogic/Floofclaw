@@ -31,10 +31,14 @@ Ordinary agents receive only their declared blocks:
 - `affairs` — durable concerns relevant to the context
 - `usage` — measured agent/model and worker-operation usage
 
-The normal output is `{"calls":[]}`. `conversational_payload_only`,
+The normal output is a `{"calls":[]}` envelope. An agent may declare
+`required_call` when its floop needs exactly one named action in every ordinary
+output; a missing or duplicate required call is a normalizer rejection, not a
+scheduler decision. `conversational_payload_only`,
 `affair_extraction_context_only`, and `memory_compaction_context_only` are
 narrow input/output shapes retained for the companion and memory flows. They
-do not grant authority over runtime-owned fields.
+do not grant authority over runtime-owned fields and cannot be combined with
+`required_call`.
 
 These three shapes get no action catalog, but they get the same projected
 input every other agent gets: a prompt template that names `{{json}}` places
@@ -77,7 +81,7 @@ finish without supplying same-run data to another agent. A controller with
 task/revision. Its `work_consequence` gate receives the selected action's
 correlated intermediate result and distinguishes it from terminal
 `work_completed`/`work_blocked` outcomes. See
-[Action result flow](action_result_flow.md).
+[managed-operation contract](actions.md#managed-operation-contract).
 
 ## Model effort
 

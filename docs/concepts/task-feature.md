@@ -156,7 +156,11 @@ committed before dispatch and its terminal action event produces a correlated
 `work_step_result`; a managed operation's final data still arrives through
 `operation_result`. These are intermediate consequences. The controller ends
 the revision only with `work_completed` or `work_blocked`, routed through the
-work-outcome path.
+work-outcome path. `work_complete.summary` records the controller's terminal
+decision; it does not replace the selected consequence. The runtime copies
+that consequence's bounded `text` into the terminal outcome for the result
+manager, preserving detailed reports without asking the controller to rewrite
+them.
 
 A bound controller may include one `working_memory_append` sidecar alongside
 its one ordinary execution or terminal call. The full response is validated
@@ -183,9 +187,11 @@ that narrow path is not a general result channel.
 ## Projection
 
 Agents that declare `listen: ["tasks"]` receive a bounded active-task
-projection. Archived terminal tasks are not model-facing. Task presentation is
-derived from durable state; adapters and prompts do not reach into reducer
-implementation details.
+projection. Open, working, and revisable blocked tasks are model-facing.
+Completed, failed, and canceled tasks are excluded even while the bounded
+store retains them for operator evidence; archived tasks are excluded too.
+Task presentation is derived from durable state; adapters and prompts do not
+reach into reducer implementation details.
 
 Task-aware action callers may append to an exact `task_id` present in that
 projection. Managed Codex and Claude workers receive the same working-memory

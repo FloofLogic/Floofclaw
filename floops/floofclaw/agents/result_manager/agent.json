@@ -4,6 +4,7 @@
   "model": {
     "ref": "floofclaw_manager"
   },
+  "required_call": "message",
   "actions": [
     "message",
     "note_add"

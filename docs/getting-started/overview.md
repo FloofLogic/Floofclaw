@@ -63,8 +63,8 @@ Effects follow one of two result shapes:
   `operation_result` bus event, which the floop routes to an agent. This covers
   both quick intrinsic reads and long-lived worker operations.
 
-There is no third pattern. See
-[action_result_flow.md](../concepts/action_result_flow.md).
+There is no third pattern. See the
+[managed-operation contract](../concepts/actions.md#managed-operation-contract).
 
 ## What makes it different
 
@@ -85,7 +85,7 @@ There is no third pattern. See
 
 ## Rules the runtime is built to
 
-Distilled — full list in [Principles](../concepts/principles.md):
+Distilled from the canonical [Philosophy](../PHILOSOPHY.md):
 
 - **Reactor stays generic.** `collect_fds → poll → dispatch on_fd →
   tick modules`. No subsystem-specific phase.
@@ -114,10 +114,8 @@ Start:
 
 Deep concepts (pick as you need them):
 
-- [Principles](../concepts/principles.md) — the rules above with
-  worked examples
-- [Action Result Flow](../concepts/action_result_flow.md) — the
-  managed-op + operation_result pattern
+- [Philosophy](../PHILOSOPHY.md) — the canonical design and placement rules
+- [Architecture](../architecture.md) — the current module and ownership map
 - [Floops](../concepts/floops.md) — loop profile shape
 - [Executors](../concepts/executors.md) — native / llm / script
 - [Actions](../concepts/actions.md) — action.json and run.sh

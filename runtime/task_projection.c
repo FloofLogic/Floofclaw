@@ -46,9 +46,13 @@ static int append_agent_artifacts(const JsonRef *task,
         artifact.type != JSON_REF_OBJECT ||
         json_ref_object_get_long(&artifact, "work_rev",
                                  &artifact_work_rev) != 0 ||
-        artifact_work_rev < 0 ||
-        (current_work_rev > 0 && artifact_work_rev == 0))
+        artifact_work_rev < 0)
       return -1;
+    /* Older runtimes could attach an unbound action_cli diagnostic to a
+     * versioned work task. It is not evidence for any exact revision, so do
+     * not expose it to the controller or let it make the whole projection
+     * unreadable. The action event remains the durable diagnostic. */
+    if (current_work_rev > 0 && artifact_work_rev == 0) continue;
     if (artifact_work_rev != current_work_rev) continue;
     if (append_projected_artifact(&artifact, artifact_work_rev,
                                   out, out_len, pos, first) != 0)
@@ -65,9 +69,9 @@ static int append_agent_artifacts(const JsonRef *task,
         artifact.type != JSON_REF_OBJECT ||
         json_ref_object_get_long(&artifact, "work_rev",
                                  &artifact_work_rev) != 0 ||
-        artifact_work_rev < 0 ||
-        (current_work_rev > 0 && artifact_work_rev == 0))
+        artifact_work_rev < 0)
       return -1;
+    if (current_work_rev > 0 && artifact_work_rev == 0) continue;
     if (artifact_work_rev == current_work_rev) continue;
     if (append_projected_artifact(&artifact, artifact_work_rev,
                                   out, out_len, pos, first) != 0)
@@ -146,6 +150,22 @@ static int task_visible_in_context(const JsonRef *task, const char *context_id) 
   if (context_id && *context_id && strcmp(ctx, context_id) != 0) return 0;
   return strcmp(state, "archived") != 0;
 }
+
+/* Terminal tasks may remain in the bounded reducer store until eviction.
+ * They are operator evidence, not active context for another model turn.
+ * Blocked work remains visible because a later user instruction may revise
+ * it; completed, failed, and canceled work cannot advance. */
+static int task_active_in_context(const JsonRef *task,
+                                  const char *context_id) {
+  char state[RT_SMALL] = "";
+  if (!task_visible_in_context(task, context_id) ||
+      rt_task_json_state_string(task, "state", state,
+                                sizeof(state)) != 0)
+    return 0;
+  return strcmp(state, "open") == 0 || strcmp(state, "working") == 0 ||
+         strcmp(state, "blocked") == 0;
+}
+
 int rt_tasks_active_state_json(const char *context_id, char *out, size_t out_len) {
   char state[RT_XL];
   JsonRef root, tasks;
@@ -161,7 +181,7 @@ int rt_tasks_active_state_json(const char *context_id, char *out, size_t out_len
       JsonRef task;
       char raw[RT_XL], compact[RT_XL];
       if (json_ref_array_get(&tasks, i, &task) != 0 || task.type != JSON_REF_OBJECT ||
-          !task_visible_in_context(&task, context_id)) continue;
+          !task_active_in_context(&task, context_id)) continue;
       if (json_ref_value_copy(&task, raw, sizeof(raw)) != 0 ||
           json_compact(raw, compact, sizeof(compact)) != 0) return -1;
       if ((!first && rt_append_text(out, out_len, &pos, ",") != 0) ||
@@ -189,7 +209,7 @@ int rt_tasks_active_agent_state_json(const char *context_id,
       char projected[RT_XL];
       if (json_ref_array_get(&tasks, i, &task) != 0 ||
           task.type != JSON_REF_OBJECT ||
-          !task_visible_in_context(&task, context_id))
+          !task_active_in_context(&task, context_id))
         continue;
       if (project_task_for_agent(&task, projected, sizeof(projected)) != 0)
         return -1;

@@ -3,6 +3,122 @@
 FloofClaw follows semantic versioning for public source releases. The public
 release tag and `runtime/version.h` carry the same plain `X.Y.Z` version.
 
+## 0.32.0 — 2026-09-27
+
+### Changed
+
+- **The documentation now has one design contract instead of three competing
+  constitutions.** `docs/PHILOSOPHY.md` replaces `READ_FIRST`, Principles,
+  and Constitution; Architecture is a 231-line ownership map instead of a
+  1,500-line narrative; and the agent workflow and TODO contain only current
+  instructions and unresolved work. Duplicate comparison and action-result
+  essays and the resolved failure incident note were deleted. The mandatory
+  pre-change reading fell from 2,198 to 506 lines, and public Markdown fell
+  from 9,540 to 7,322 lines.
+- **The publication outbox settles a record when its state moves, instead of
+  polling for it on every reactor pass.** The intake tick had reconciled the
+  whole outbox on every pass, and each record's claim check opened
+  `workspace/runs` and parsed every retained `runstate.json` (500 on a
+  deployment at the retention cap), re-read and fsynced the source run's
+  event log, and re-applied the source event to the work-step ledger — for
+  the entire lifetime of every work turn. An unreadable `runstate.json`
+  anywhere under `workspace/runs` would also have stalled inbox intake for
+  as long as a record existed.
+
+  A record now changes state at the two moments something actually happens
+  to it. Intake writes the claiming run's id onto the record once that run's
+  control state is durable, so every later check reads one `runstate.json`
+  instead of all of them; and the scheduler removes the record as it retires
+  that run, which is the moment the record becomes garbage. The reactor's
+  intake tick reconciles nothing — it asks only for the single retry pass
+  that a failed bind, release, or producer publish left owing. Startup,
+  recovery, and a producer's own publish keep the full pass unchanged, and a
+  record whose bind was lost to a crash still resolves by scanning. A record
+  that has been bound is no longer re-verified against its source on later
+  passes: its source was checked once, before publication, and cannot change.
+
+  The record gains an optional `claimed_run_id`; records written by earlier
+  versions parse unchanged and resolve by scanning as before. Regression:
+  `publication_outbox_binds_at_intake_and_releases_at_retire`.
+
+### Fixed
+
+- **Canceled work no longer masquerades as active context on the next chat
+  turn.** Terminal tasks remain in the bounded task store until archive or
+  eviction, but the model-facing `tasks.active` projection previously removed
+  only archived records. A canceled task could therefore inject its full
+  working-memory scratchpad into a repeated request and make dead work look
+  live. Active projections now retain only open, working, and revisable
+  blocked tasks; completed, failed, canceled, and archived records remain
+  available to operators but do not consume model context.
+- **Pre-provider agent failures now tell the user what failed.** Agent-input
+  construction already wrote its detailed diagnostic to the run log, but the
+  runner discarded it before terminalizing the run, so the public fallback
+  repeated the floop step name (`work.select: work.select`). The runner now
+  preserves a typed input error and the existing diagnostic in run state and
+  the failure delivery. This is mechanical error propagation; no floop
+  behavior or scheduler judgment changed.
+- **An unbound managed-worker note failure no longer poisons its work task.**
+  Managed Codex and Claude workers can call `working_memory_append` through
+  the action CLI. If the note exceeded the task's bounded memory, the runtime
+  recorded the action failure correctly but also attached a revision-zero
+  diagnostic to a versioned work task; the next work-manager input then
+  rejected the mixed evidence and failed before seeing a completed worker
+  result. The durable diagnostic remains available to operators, but agent
+  projections exclude it because it cannot be attributed to an exact work
+  revision. Existing tasks recover without state surgery.
+- **Detailed worker answers now survive FloofClaw's terminal handoff.** The
+  bound controller previously reduced a multi-kilobyte `operation_result` to
+  `work_complete.summary`, and the published work outcome clipped that summary
+  to 384 bytes before Result Manager saw it. Completion now keeps the concise
+  controller summary while mechanically carrying the exact selected
+  consequence text as the user-facing result. A 5.9 KB regression proves that
+  facts near the beginning, middle, and end reach Result Manager and the
+  delivered reply. The controller, retry discipline, and blocked path are
+  unchanged.
+- **Accepted FloofClaw work can no longer disappear after a failed step.**
+  Synchronous controller-result wakes now carry the trusted originating
+  `context_id`; without it, a DM or thread wake fell back to the adapter-wide
+  lane, failed its exact work binding as stale, and retired without another
+  controller turn. Bound controllers must also choose exactly one ordinary
+  call, so a `working_memory_append` sidecar cannot strand an open task.
+  Terminal outcomes now use the result agent's floop-declared
+  `required_call: "message"` contract. Empty or note-only output gets bounded
+  repair, and exhausted repair uses the existing run-failure delivery instead
+  of silence. No scheduler outcome judgment or fallback watcher was added.
+- **`manage_claude` runs again.** The Claude worker asked for
+  `--output-format stream-json`, which Claude Code refuses under `--print`
+  unless `--verbose` is also passed, so every `op:start` exited 1 with no
+  output and terminalized its operation as failed. Nothing consumed the
+  worker's stdout while it ran — it is read once after the worker exits —
+  so the streaming form bought nothing, and the request is now
+  `--output-format json`, whose single response object is parsed for its
+  `result` string. That result goes to the operation's final artifact, the
+  way `codex exec -o` already supplied one, instead of the whole raw body
+  being clipped at 8 KiB and handed to the model as protocol noise. Safe
+  mode now passes `--permission-mode acceptEdits`: it previously passed no
+  permission mode at all, and a `--print` worker can never be asked to
+  approve anything, so a "safe" Claude worker could not edit a file where a
+  safe Codex worker may write inside the workspace. Dangerous mode is
+  unchanged. The fixture-binary tests could not catch this, because a shell
+  stand-in accepts any arguments the real CLI would reject.
+- **The Claude worker's model is configured, not compiled in.** It fell back
+  to a `claude-sonnet-4-6` literal in the runtime, which no deployment could
+  change and which silently aged as the model line moved. `manage_claude`
+  now takes `actions.manage_claude.model` the way `manage_codex` takes its
+  own, an explicit `model` call argument still overrides that, and when
+  neither is set the `--model` flag is omitted so the Claude Code CLI
+  applies its current default.
+- **A safe Claude worker can reach the network again.** Codex's safe mode
+  is `--sandbox workspace-write`, which bounds *writes* and leaves the
+  network and shell alone; the Claude worker's safe mode was mapped to
+  `--permission-mode acceptEdits`, which auto-approves *edits* and denies
+  every other tool. Under `--print` nothing can approve them, so a safe
+  Claude worker asked to research anything answered from training data and
+  said so. Safe mode now also passes
+  `--allowedTools "WebSearch WebFetch Bash"`, restoring the reach Codex
+  already had. Dangerous mode is unchanged.
+
 ## 0.31.0 — 2026-09-05
 
 Everything since v0.30.0.

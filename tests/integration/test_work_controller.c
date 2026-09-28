@@ -1060,6 +1060,21 @@ static int a2_binding_and_output_contract(void) {
                          "bound controller does not receive an all-task projection");
 
   rc |= expect(rt_append_event_format(
+                   &ctx, "task_updated", "legacy_action_runner",
+                   payload, sizeof(payload), 0,
+                   "{\"task_id\":\"task_a2_bound\",\"state\":{"
+                   "\"artifacts\":[{\"artifact_id\":\"legacy_unbound\","
+                   "\"work_rev\":0,\"parts\":[{\"kind\":\"error\","
+                   "\"message\":\"legacy unbound failure\"}]}]}}") == 0,
+               "seed the unbound-worker diagnostic shape");
+  rc |= expect(rt_build_processor_input(
+                   &ctx, &meta, "task_a2_bound", 1,
+                   input, sizeof(input)) == 0,
+               "legacy unbound diagnostic cannot poison controller input");
+  rc |= expect_no_substr(input, "legacy unbound failure",
+                         "unbound diagnostic is not attributed to a revision");
+
+  rc |= expect(rt_append_event_format(
                    &ctx, "task_updated", "a2_test",
                    payload, sizeof(payload), 0,
                    "{\"task_id\":\"task_a2_bound\",\"work_rev\":2,"
@@ -1113,6 +1128,12 @@ static int a2_binding_and_output_contract(void) {
                    &ctx, &step, &meta, "task_a2_bound", 1,
                    "{\"calls\":[]}", normalized, sizeof(normalized)) != 0,
                "zero controller calls are rejected before append");
+  rc |= expect(rt_agent_normalize_output(
+                   &ctx, &step, &meta, "task_a2_bound", 1,
+                   "{\"calls\":[{\"name\":\"working_memory_append\","
+                   "\"args\":{\"working_memory\":\"not a decision\"}}]}",
+                   normalized, sizeof(normalized)) != 0,
+               "a memory sidecar alone cannot strand bound work");
   rc |= expect(rt_agent_normalize_output(
                    &ctx, &step, &meta, "task_a2_bound", 1,
                    "{\"calls\":[{\"name\":\"work_complete\","
@@ -1194,11 +1215,93 @@ static int a2_binding_and_output_contract(void) {
                       "normalized call stamps trusted task id");
   rc |= expect_substr(normalized, "\"work_rev\":1",
                       "normalized call stamps trusted work revision");
+  meta.bind_task_open_work = 0;
+  snprintf(meta.required_call, sizeof(meta.required_call), "message");
+  step.gate[0] = '\0';
+  rc |= expect(rt_agent_normalize_output(
+                   &ctx, &step, &meta, NULL, 0,
+                   "{\"calls\":[]}", normalized,
+                   sizeof(normalized)) != 0,
+               "a declared required call rejects an empty agent turn");
+  rc |= expect(rt_agent_normalize_output(
+                   &ctx, &step, &meta, NULL, 0,
+                   "{\"calls\":[{\"name\":\"note_add\","
+                   "\"args\":{\"text\":\"note only\"}}]}", normalized,
+                   sizeof(normalized)) != 0,
+               "a different call cannot replace the declared required call");
+  rc |= expect(rt_agent_normalize_output(
+                   &ctx, &step, &meta, NULL, 0,
+                   "{\"calls\":[{\"name\":\"message\","
+                   "\"args\":{\"message\":\"terminal reply\"}}]}",
+                   normalized, sizeof(normalized)) == 0,
+               "exactly one declared required call normalizes");
+  rc |= expect(rt_agent_normalize_output(
+                   &ctx, &step, &meta, NULL, 0,
+                   "{\"calls\":[{\"name\":\"message\","
+                   "\"args\":{\"message\":\"first\"}},{\"name\":\"message\","
+                   "\"args\":{\"message\":\"second\"}}]}", normalized,
+                   sizeof(normalized)) != 0,
+               "duplicate declared required calls are rejected");
   rc |= test_read_file("workspace/runs/run_a2_output/event_log.jsonl",
                        &event_log);
   rc |= expect_no_substr(event_log, "\"type\":\"action_request\"",
                          "normalization rejection never leaks an action request");
   free(event_log);
+  return rc;
+}
+
+/* Terminal tasks remain durable until archive/eviction, but an agent's
+ * `tasks.active` input must not describe them as current work. A canceled
+ * task with a large scratchpad previously dominated the next chat turn and
+ * made a repeated request look as though it already had live work. */
+int active_task_projection_excludes_retained_terminal_tasks(void) {
+  char raw[RT_XL], agent[RT_XL];
+  int rc = 0;
+
+  rc |= test_reset_workspace();
+  rc |= test_write_file(
+      "workspace/memory/state/tasks.json",
+      "{\"tasks\":["
+      "{\"task_id\":\"task_open\",\"context_id\":\"chat:projection\","
+      "\"kind\":\"work\",\"state\":{\"status\":\"open\","
+      "\"work\":\"OPEN_VISIBLE\",\"work_rev\":1,\"artifacts\":[]}},"
+      "{\"task_id\":\"task_working\",\"context_id\":\"chat:projection\","
+      "\"kind\":\"work\",\"state\":{\"status\":\"working\","
+      "\"work\":\"WORKING_VISIBLE\",\"work_rev\":1,\"artifacts\":[]}},"
+      "{\"task_id\":\"task_blocked\",\"context_id\":\"chat:projection\","
+      "\"kind\":\"work\",\"state\":{\"status\":\"blocked\","
+      "\"work\":\"BLOCKED_VISIBLE\",\"work_rev\":1,\"artifacts\":[]}},"
+      "{\"task_id\":\"task_completed\",\"context_id\":\"chat:projection\","
+      "\"kind\":\"work\",\"state\":{\"status\":\"completed\","
+      "\"work\":\"COMPLETED_HIDDEN\",\"work_rev\":1,\"artifacts\":[]}},"
+      "{\"task_id\":\"task_failed\",\"context_id\":\"chat:projection\","
+      "\"kind\":\"work\",\"state\":{\"status\":\"failed\","
+      "\"work\":\"FAILED_HIDDEN\",\"work_rev\":1,\"artifacts\":[]}},"
+      "{\"task_id\":\"task_canceled\",\"context_id\":\"chat:projection\","
+      "\"kind\":\"work\",\"state\":{\"status\":\"canceled\","
+      "\"work\":\"CANCELED_HIDDEN\",\"work_rev\":1,"
+      "\"working_memory\":\"STALE_SCRATCH_HIDDEN\",\"artifacts\":[]}}]}\n");
+
+  rc |= expect(rt_tasks_active_state_json(
+                   "chat:projection", raw, sizeof(raw)) == 0,
+               "raw active-task projection builds");
+  rc |= expect(rt_tasks_active_agent_state_json(
+                   "chat:projection", agent, sizeof(agent)) == 0,
+               "agent active-task projection builds");
+  rc |= expect_substr(raw, "OPEN_VISIBLE",
+                      "raw projection retains open work");
+  rc |= expect_substr(agent, "WORKING_VISIBLE",
+                      "agent projection retains working work");
+  rc |= expect_substr(agent, "BLOCKED_VISIBLE",
+                      "agent projection retains revisable blocked work");
+  rc |= expect_no_substr(raw, "COMPLETED_HIDDEN",
+                         "raw projection excludes completed work");
+  rc |= expect_no_substr(agent, "FAILED_HIDDEN",
+                         "agent projection excludes failed work");
+  rc |= expect_no_substr(agent, "CANCELED_HIDDEN",
+                         "agent projection excludes canceled work");
+  rc |= expect_no_substr(agent, "STALE_SCRATCH_HIDDEN",
+                         "canceled scratchpad cannot bloat the next model turn");
   return rc;
 }
 
@@ -1731,6 +1834,41 @@ int deterministic_work_controller_binding_and_terminal_controls(void) {
                    meta.max_repair_attempts ==
                        RT_WORK_REPAIR_ATTEMPT_DEFAULT,
                "bound controller loads binding and compatibility repair default");
+  rc |= test_write_file(
+      "floops/a2_meta/agents/controller/agent.json",
+      "{\"executor\":\"llm\",\"listen\":[\"event\"],"
+      "\"required_call\":\"message\"}\n");
+  memset(&meta, 0, sizeof(meta));
+  rc |= expect(rt_agent_read_listen_config(
+                   "a2_meta", "controller", "llm",
+                   &meta, err, sizeof(err)) == 0 &&
+                   strcmp(meta.required_call, "message") == 0,
+               "agent loads its floop-declared required call");
+  rc |= test_write_file(
+      "floops/a2_meta/agents/controller/agent.json",
+      "{\"executor\":\"llm\",\"listen\":[\"event\"],"
+      "\"required_call\":\"not a safe id\"}\n");
+  memset(&meta, 0, sizeof(meta));
+  err[0] = '\0';
+  rc |= expect(rt_agent_read_listen_config(
+                   "a2_meta", "controller", "llm",
+                   &meta, err, sizeof(err)) != 0,
+               "invalid required-call ids fail agent startup");
+  rc |= expect_substr(err, "invalid required_call",
+                      "required-call startup error names the field");
+  rc |= test_write_file(
+      "floops/a2_meta/agents/controller/agent.json",
+      "{\"executor\":\"llm\",\"listen\":[\"event\"],"
+      "\"required_call\":\"message\","
+      "\"conversational_payload_only\":true}\n");
+  memset(&meta, 0, sizeof(meta));
+  err[0] = '\0';
+  rc |= expect(rt_agent_read_listen_config(
+                   "a2_meta", "controller", "llm",
+                   &meta, err, sizeof(err)) != 0,
+               "required call rejects an incompatible specialized output mode");
+  rc |= expect_substr(err, "cannot combine required_call",
+                      "required-call mode conflict names the fix");
   rc |= test_write_file(
       "floops/a2_meta/agents/controller/agent.json",
       "{\"executor\":\"native\",\"listen\":[\"event\"],"
